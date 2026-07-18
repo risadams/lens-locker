@@ -2393,6 +2393,8 @@ name = "lumenvault-decode"
 version = "0.1.0"
 dependencies = [
  "image",
+ "jpegxl-rs",
+ "jxl-oxide",
  "tempfile",
  "thiserror 2.0.18",
 ]
@@ -2415,6 +2417,7 @@ dependencies = [
  "lumenvault-convert",
  "lumenvault-decode",
  "lumenvault-hash",
+ "lumenvault-xmp",
  "rusqlite",
  "tempfile",
  "thiserror 2.0.18",
@@ -2428,6 +2431,13 @@ version = "0.1.0"
 [[package]]
 name = "lumenvault-xmp"
 version = "0.1.0"
+dependencies = [
+ "lumenvault-catalog",
+ "quick-xml",
+ "rusqlite",
+ "tempfile",
+ "thiserror 2.0.18",
+]
 
 [[package]]
 name = "markup5ever"

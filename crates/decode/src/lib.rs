@@ -12,6 +12,16 @@
 //! resolve directly (only `lumenvault-convert`'s scope is named in the
 //! Milestone 2 line) — flagged here rather than silently assumed.
 //!
+//! Milestone 4 adds JPEG XL decode ([`StandardFormat::Jxl`], via
+//! `jxl-oxide`) — needed for `lumenvault-import`'s rebuild-from-sidecars
+//! recovery path (workplan/SPEC.md §7): some blobs in the store are `.jxl`
+//! (Milestone 2's conversion output), and rebuilding `perceptual_hash` for
+//! them after the catalog is lost requires actually decoding those pixels,
+//! not just re-hashing the file's raw bytes. This reuses the same
+//! `jxl-oxide` version `lumenvault-convert` already depends on (there for
+//! metadata-readback verification) — the same kind of narrow,
+//! spec-consistent extension Milestone 2 made when it added TIFF here.
+//!
 //! Milestone 3 adds [`raw_extension`] — filename-extension-only recognition
 //! of common camera RAW formats, **no pixel decode attempted**. This is a
 //! deliberate, narrow stand-in for real RAW support: §5's format matrix
@@ -44,6 +54,12 @@ pub enum StandardFormat {
     Gif,
     Bmp,
     Tiff,
+    /// JPEG XL — decode only (via `jxl-oxide`); encoding is
+    /// `lumenvault-convert`'s job (§4). Not detected through the `image`
+    /// crate's format-guessing (it has no JXL support at all), so
+    /// [`probe`] falls back to a dedicated JXL attempt when the standard
+    /// path finds no recognizable signature — see [`probe`]'s doc comment.
+    Jxl,
 }
 
 impl StandardFormat {
@@ -57,6 +73,7 @@ impl StandardFormat {
             Self::Gif => "gif",
             Self::Bmp => "bmp",
             Self::Tiff => "tiff",
+            Self::Jxl => "jxl",
         }
     }
 
@@ -102,13 +119,26 @@ pub enum ProbeError {
     UnrecognizedFormat,
     #[error("not a decodable image: {0}")]
     Decode(#[from] image::ImageError),
+    #[error("not a decodable JPEG XL image at {path}: {source}")]
+    JxlDecode { path: std::path::PathBuf, source: Box<dyn std::error::Error + Send + Sync> },
 }
 
-/// Attempts to decode `path` as one of the six standard formats and
+/// Attempts to decode `path` as one of this crate's recognized formats and
 /// reports its format and pixel dimensions. A full decode (not just a
 /// header peek) is deliberate — it's the strongest signal available that
 /// the file isn't corrupt before the managed store takes custody of it.
+///
+/// JPEG XL is checked as a fallback, not through the same `image`-crate
+/// guessed-format path as the other six: the `image` crate has no JXL
+/// support, so a JXL file always reports `UnrecognizedFormat` there first.
 pub fn probe(path: &Path) -> Result<Probe, ProbeError> {
+    match probe_standard(path) {
+        Err(ProbeError::UnrecognizedFormat) => probe_jxl(path),
+        result => result,
+    }
+}
+
+fn probe_standard(path: &Path) -> Result<Probe, ProbeError> {
     let reader = image::ImageReader::open(path)
         .map_err(|source| ProbeError::Io { path: path.to_path_buf(), source })?
         .with_guessed_format()
@@ -120,6 +150,48 @@ pub fn probe(path: &Path) -> Result<Probe, ProbeError> {
     let decoded = reader.decode()?;
 
     Ok(Probe { format, width: decoded.width(), height: decoded.height(), image: decoded })
+}
+
+/// Decodes a JPEG XL file via `jxl-oxide`, converting its rendered pixel
+/// buffer into an `image::DynamicImage` so callers (perceptual hashing, in
+/// particular) don't need to know JXL was involved at all.
+fn probe_jxl(path: &Path) -> Result<Probe, ProbeError> {
+    let jxl_image = jxl_oxide::JxlImage::builder()
+        .open(path)
+        .map_err(|source| ProbeError::JxlDecode { path: path.to_path_buf(), source })?;
+
+    let render =
+        jxl_image.render_frame(0).map_err(|source| ProbeError::JxlDecode { path: path.to_path_buf(), source })?;
+    let frame = render.image_all_channels();
+
+    let width = frame.width() as u32;
+    let height = frame.height() as u32;
+    let channels = frame.channels();
+    let samples = frame.buf();
+
+    // `frame.buf()` is interleaved-by-channel f32 in [0, 1]; §1's dHash
+    // perceptual hash only needs an 8-bit RGB approximation, so take the
+    // first three channels (grayscale images replicate channel 0 across
+    // R/G/B; a 4th alpha/extra channel, if present, is simply not used).
+    let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+    for pixel in samples.chunks_exact(channels) {
+        let to_u8 = |v: f32| (v.clamp(0.0, 1.0) * 255.0).round() as u8;
+        if channels >= 3 {
+            rgb.push(to_u8(pixel[0]));
+            rgb.push(to_u8(pixel[1]));
+            rgb.push(to_u8(pixel[2]));
+        } else {
+            let gray = to_u8(pixel[0]);
+            rgb.extend_from_slice(&[gray, gray, gray]);
+        }
+    }
+
+    let buffer = image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| ProbeError::JxlDecode {
+        path: path.to_path_buf(),
+        source: "decoded pixel buffer did not match the reported width/height".into(),
+    })?;
+
+    Ok(Probe { format: StandardFormat::Jxl, width, height, image: image::DynamicImage::ImageRgb8(buffer) })
 }
 
 /// Common camera RAW extensions, recognized by filename only — see the
@@ -232,5 +304,62 @@ mod tests {
     fn is_raw_extension_matches_the_lowercase_format_strings_stored_in_the_catalog() {
         assert!(super::is_raw_extension("cr2"));
         assert!(!super::is_raw_extension("jpeg"));
+    }
+
+    /// Encodes a real JXL fixture via `jpegxl-rs` (the same encoder
+    /// `lumenvault-convert` uses in production) — proving `probe`'s JXL
+    /// path decodes an actual, real-world-shaped JXL file, not just bytes
+    /// this test happens to hand-construct.
+    fn write_jxl(dir: &std::path::Path, name: &str, width: u32, height: u32) -> std::path::PathBuf {
+        let path = dir.join(name);
+        let pixels: Vec<u8> = (0..width * height)
+            .flat_map(|i| {
+                let x = i % width;
+                let y = i / width;
+                [(x % 256) as u8, (y % 256) as u8, 128, 255]
+            })
+            .collect();
+
+        let mut encoder = jpegxl_rs::encoder_builder()
+            .has_alpha(true)
+            .lossless(true)
+            .use_container(true)
+            .uses_original_profile(true)
+            .color_encoding(jpegxl_rs::encode::ColorEncoding::Srgb)
+            .build()
+            .unwrap();
+        let frame = jpegxl_rs::encode::EncoderFrame::new(&pixels).num_channels(4);
+        let encoded = encoder.encode_frame::<u8, u8>(&frame, width, height).unwrap();
+        std::fs::write(&path, &encoded.data).unwrap();
+        path
+    }
+
+    #[test]
+    fn probing_a_jxl_file_reports_its_format_and_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_jxl(dir.path(), "sample.jxl", 24, 16);
+
+        let probe = super::probe(&path).unwrap();
+
+        assert_eq!(probe.format, super::StandardFormat::Jxl);
+        assert_eq!(probe.width, 24);
+        assert_eq!(probe.height, 16);
+        assert_eq!((probe.image.width(), probe.image.height()), (24, 16));
+    }
+
+    #[test]
+    fn probing_a_jxl_file_returns_pixels_close_to_the_source() {
+        // dHash-relevant check: the decoded pixels should be close to the
+        // source gradient, not just the right dimensions — proves this is
+        // a real decode, not a stub returning a blank buffer.
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_jxl(dir.path(), "gradient.jxl", 16, 16);
+
+        let probe = super::probe(&path).unwrap();
+        let rgb = probe.image.to_rgb8();
+
+        let top_left = rgb.get_pixel(0, 0);
+        let bottom_right = rgb.get_pixel(15, 15);
+        assert_ne!(top_left, bottom_right, "a real gradient decode must vary across the image");
     }
 }

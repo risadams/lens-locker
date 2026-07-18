@@ -9,7 +9,9 @@ workspace = true
 
 [dependencies]
 image = { version = "0.25.10", default-features = false, features = ["bmp", "gif", "jpeg", "png", "tiff", "webp"] }
+jxl-oxide = "0.12.6"
 thiserror = "2.0.18"
 
 [dev-dependencies]
+jpegxl-rs = { version = "0.15.0", features = ["vendored"] }
 tempfile = "3.27.0"

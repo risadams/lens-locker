@@ -10,7 +10,10 @@
 //! - RAW+JPEG pairing (§3 step 2) — see [`pair_raw_and_jpeg`].
 //! - The `dedupe_review_queue` (§6) — see [`record_near_duplicates`].
 //!
-//! What's left for later milestones: XMP sidecars (Milestone 4).
+//! Milestone 4 adds the [`rebuild`] module: the rebuild-from-sidecars
+//! recovery path (§7). Manual tagging itself is direct
+//! `lumenvault-catalog`/`lumenvault-xmp` calls, not something this crate
+//! wraps — no pipeline step needs it.
 //!
 //! **Design note on crash safety** (a genuine ambiguity SPEC.md §3 states as
 //! a property, not a mechanism): every physical side effect below — blob
@@ -28,6 +31,9 @@ use std::fs;
 use std::path::{Path, PathBuf};
 
 use rusqlite::{Connection, OptionalExtension, params};
+
+pub mod rebuild;
+pub use rebuild::{RebuildReport, rebuild_from_store};
 
 /// Where a library's managed files live on disk, and the paths derived from it.
 ///
@@ -74,6 +80,8 @@ pub enum ImportError {
     BlobIntegrity { path: PathBuf },
     #[error("walking {root}: {source}")]
     Walk { root: PathBuf, source: walkdir::Error },
+    #[error(transparent)]
+    Xmp(#[from] lumenvault_xmp::XmpError),
 }
 
 /// Outcome of importing one source file.
