@@ -24,6 +24,9 @@ use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tauri::Manager;
 
+#[cfg(windows)]
+mod webview2_hardening;
+
 struct AppState {
     conn: Mutex<Connection>,
     paths: lumenvault_import::LibraryPaths,
@@ -331,6 +334,66 @@ fn init_state(root: &Path) -> AppState {
     AppState { conn: Mutex::new(conn), paths, library_id }
 }
 
+/// Builds the main window with a WebView2 environment that has crash-report
+/// upload disabled (workplan/SPEC.md §8.1), then applies the SmartScreen
+/// setting once the webview exists. Tauri normally auto-creates
+/// config-declared windows *before* `.setup()` runs with its own default
+/// environment; `tauri.conf.json` sets `"create": false` on the main window
+/// specifically so this function — not Tauri's default path — is what
+/// creates it.
+#[cfg(windows)]
+fn create_hardened_main_window(app: &tauri::App) -> tauri::Result<()> {
+    let window_config = app
+        .config()
+        .app
+        .windows
+        .iter()
+        .find(|w| w.label == "main")
+        .cloned()
+        .expect("tauri.conf.json must declare a \"main\" window");
+
+    let environment = webview2_hardening::create_environment()
+        .expect("failed to create a hardened WebView2 environment");
+    // `ICoreWebView2Environment` (a COM interface) isn't `Send`, but
+    // `with_webview` below requires its closure to be — the raw pointer
+    // value is plain data and Send, and is all identity comparison needs.
+    use windows::core::Interface;
+    let environment_raw_ptr = environment.as_raw() as usize;
+
+    let window = tauri::WebviewWindowBuilder::from_config(app, &window_config)?
+        .with_environment(environment)
+        .build()?;
+
+    // Real, printed evidence that both COM settings took effect on the live
+    // running webview — not just "the code compiled" (workplan/SPEC.md §8's
+    // Milestone 6 verification bar).
+    window.with_webview(move |webview| {
+        let used_hardened_env =
+            webview2_hardening::is_hardened_environment(&webview, environment_raw_ptr);
+        println!(
+            "[webview2-hardening] using our environment (crash reporting redirected, not uploaded): {used_hardened_env}"
+        );
+
+        match webview2_hardening::disable_smartscreen(webview) {
+            Ok(smartscreen_still_enabled) => println!(
+                "[webview2-hardening] IsReputationCheckingRequired read back as: {smartscreen_still_enabled} (want: false)"
+            ),
+            Err(err) => {
+                // Not fatal: the browser-flag backstop
+                // (--disable-features=...msSmartScreenProtection) still
+                // applies even if the COM setting failed for some reason
+                // (e.g. an older WebView2 runtime missing
+                // ICoreWebView2Settings8).
+                eprintln!(
+                    "warning: failed to disable WebView2 SmartScreen via COM settings: {err}"
+                );
+            }
+        }
+    })?;
+
+    Ok(())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -339,6 +402,8 @@ pub fn run() {
         .setup(|app| {
             let root = default_library_root(app);
             app.manage(init_state(&root));
+            #[cfg(windows)]
+            create_hardened_main_window(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![

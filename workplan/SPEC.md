@@ -201,6 +201,36 @@ bridge, not WebView2's own background traffic:
 
 ([007](tickets/007-choose-gui-shell.md), [015](tickets/015-research-network-enforcement.md))
 
+**Milestone 6 implementation status** (added 2026-07-18, does not change any
+binding criterion above — records where each layer's real artifact lives):
+
+1. Implemented and driven-verified: `src-tauri/src/webview2_hardening.rs`,
+   wired into `src-tauri/src/lib.rs`'s window setup. The compiled app was
+   launched and both settings were read back from the live COM objects
+   (`IsReputationCheckingRequired` read back `false`; the webview's live
+   `ICoreWebView2Environment` confirmed identical, by COM pointer, to the one
+   built with `IsCustomCrashReportingEnabled` set) — see the Milestone 6
+   commit message for the full transcript.
+2. Confirmed still passing (`cargo deny check` — advisories/bans/licenses/
+   sources all ok) with everything Milestone 5 added.
+3. Blocked in the environment this milestone was built in — both `auditpol`
+   and `Get-WinEvent -LogName Security` require elevation this session
+   didn't have. Real, ready-to-run artifact left behind:
+   `docs/verify-wfp-audit.ps1` (script) / `docs/wfp-audit-runbook.md`
+   (procedure) — run from an elevated session before release.
+4. Hook script written and syntax-validated with a real `makensis` compile
+   (`src-tauri/windows/hooks.nsh`, wired via `tauri.conf.json`'s
+   `bundle.windows.nsis.installerHooks`, `installMode: "perMachine"` so the
+   installer itself runs elevated). NSIS installed cleanly via
+   `winget install NSIS.NSIS` with no elevation needed. A full
+   `tauri build --bundles nsis` could not complete in this environment,
+   though — `jpegxl-sys`'s release-profile CMake build needs a
+   `Visual Studio 17 2022` generator that isn't installed here (a different,
+   deeper gap than Milestone 2's Clang-component fix, and out of this
+   milestone's scope to resolve). The firewall rule itself is therefore
+   unverified end-to-end; that needs a release build from an environment
+   with Visual Studio installed.
+
 ## 9. GUI shell & thumbnail grid
 
 **Tauri v2**, chosen for UI velocity over the pure-Rust shells' structural

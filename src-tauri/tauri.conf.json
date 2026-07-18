@@ -10,6 +10,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
+        "create": false,
         "title": "LumenVault",
         "width": 1200,
         "height": 800
@@ -32,6 +33,12 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ]
+    ],
+    "windows": {
+      "nsis": {
+        "installMode": "perMachine",
+        "installerHooks": "./windows/hooks.nsh"
+      }
+    }
   }
 }

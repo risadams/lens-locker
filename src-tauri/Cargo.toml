@@ -28,3 +28,12 @@ thiserror = "2.0.18"
 lumenvault-catalog = { version = "0.1.0", path = "../crates/catalog" }
 lumenvault-import = { version = "0.1.0", path = "../crates/import" }
 lumenvault-xmp = { version = "0.1.0", path = "../crates/xmp" }
+
+# Windows-only: WebView2 COM hardening (workplan/SPEC.md §8.1, Milestone 6).
+# Both crates are already transitive dependencies of `wry`/`tauri-runtime-wry`
+# (confirmed via `cargo tree`) — declaring them directly just gives lib.rs
+# access to the same COM interfaces Tauri itself uses internally, at the
+# same resolved version, rather than adding a new dependency to the graph.
+[target.'cfg(windows)'.dependencies]
+webview2-com = "0.38"
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com"] }
