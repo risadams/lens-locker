@@ -769,6 +769,14 @@ document.getElementById('view-grid').style.display = 'flex';
 document.getElementById('view-grid').style.flexDirection = 'column';
 document.getElementById('view-grid').style.flex = '1';
 document.getElementById('view-grid').style.minHeight = '0';
+// view-review ships with a static `style="display:none"` attribute in
+// index.html, but on at least one real WebView2 install that attribute's
+// text was present (readable via getAttribute) without ever being parsed
+// into the live CSSOM (element.style.display read back empty, and the
+// panel rendered visibly stacked below the grid). Don't rely on the static
+// attribute for initial visibility — set it explicitly at boot, the same
+// way view-grid's state is already established above.
+document.getElementById('view-review').style.display = 'none';
 
 // ── Boot ───────────────────────────────────────────────────────────────
 refresh();
