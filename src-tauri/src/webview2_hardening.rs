@@ -39,6 +39,7 @@
 
 #![allow(unsafe_code)]
 
+use std::path::Path;
 use std::sync::mpsc;
 
 use webview2_com::Microsoft::Web::WebView2::Win32::{
@@ -53,14 +54,20 @@ use windows::Win32::Foundation::{E_POINTER, E_UNEXPECTED};
 /// before any webview is created for this app (see module docs): the
 /// property has no setter once an environment exists.
 ///
-/// Mirrors wry's own `create_environment` (data directory left to the
-/// WebView2 default, since this app's webview config sets none) so the
-/// environment Tauri ends up using is otherwise unchanged from what it would
-/// have built itself — only the crash-reporting option and the SmartScreen
-/// browser-flag backstop (`--disable-features=...msSmartScreenProtection`,
-/// also wry's own default, kept here so bypassing wry's environment creation
-/// doesn't silently drop it) differ.
-pub fn create_environment() -> Result<ICoreWebView2Environment, Box<dyn std::error::Error>> {
+/// `user_data_folder` is passed through to
+/// `CreateCoreWebView2EnvironmentWithOptions` explicitly rather than left
+/// empty (wry's own default when no `data_directory` is configured, per
+/// `tauri.conf.json`'s window config — this app's doesn't set one). An
+/// empty string makes WebView2 default to `<exe_dir>\<exe_name>.WebView2\`,
+/// which only works when the exe's own directory is writable by the running
+/// user — true in `target\debug`, false once installed to `C:\Program
+/// Files` (`installMode: perMachine`), where it fails outright with
+/// `HRESULT(0x80070005)` ("Access is denied.") rather than falling back to
+/// anywhere writable. The caller passes the app's own local-data directory
+/// (writable regardless of install location) instead.
+pub fn create_environment(
+    user_data_folder: &Path,
+) -> Result<ICoreWebView2Environment, Box<dyn std::error::Error>> {
     // wry's own environment creation (`Webview::new_in_hwnd`) calls this
     // before touching any WebView2 COM interface; because this function
     // runs *before* wry ever gets a chance to (we build our own environment
@@ -88,11 +95,14 @@ pub fn create_environment() -> Result<ICoreWebView2Environment, Box<dyn std::err
         options.set_is_custom_crash_reporting_enabled(true);
     }
 
+    std::fs::create_dir_all(user_data_folder)?;
+    let user_data_folder = HSTRING::from(user_data_folder.as_os_str());
+
     let (tx, rx) = mpsc::channel();
     unsafe {
         CreateCoreWebView2EnvironmentWithOptions(
             PCWSTR::null(),
-            &HSTRING::new(),
+            &user_data_folder,
             &webview2_com::Microsoft::Web::WebView2::Win32::ICoreWebView2EnvironmentOptions::from(
                 options,
             ),

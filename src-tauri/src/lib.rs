@@ -707,7 +707,17 @@ fn create_hardened_main_window(app: &tauri::App) -> tauri::Result<()> {
         .cloned()
         .expect("tauri.conf.json must declare a \"main\" window");
 
-    let environment = webview2_hardening::create_environment()
+    // WebView2's own default (an empty user-data-folder) resolves to
+    // `<exe_dir>\<exe_name>.WebView2\`, which isn't writable once installed
+    // to `C:\Program Files` (see webview2_hardening::create_environment's
+    // doc) — use the app's own local-data directory instead, which is
+    // writable regardless of install location.
+    let webview2_data_dir = app
+        .path()
+        .app_local_data_dir()
+        .expect("could not resolve app local data dir")
+        .join("WebView2");
+    let environment = webview2_hardening::create_environment(&webview2_data_dir)
         .expect("failed to create a hardened WebView2 environment");
     // `ICoreWebView2Environment` (a COM interface) isn't `Send`, but
     // `with_webview` below requires its closure to be — the raw pointer

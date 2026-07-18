@@ -202,7 +202,9 @@ bridge, not WebView2's own background traffic:
 ([007](tickets/007-choose-gui-shell.md), [015](tickets/015-research-network-enforcement.md))
 
 **Milestone 6 implementation status** (added 2026-07-18, does not change any
-binding criterion above — records where each layer's real artifact lives):
+binding criterion above — records where each layer's real artifact lives).
+All four layers are now driven-verified end-to-end as of 2026-07-18 (updated
+after closing the two gaps recorded below):
 
 1. Implemented and driven-verified: `src-tauri/src/webview2_hardening.rs`,
    wired into `src-tauri/src/lib.rs`'s window setup. The compiled app was
@@ -213,23 +215,27 @@ binding criterion above — records where each layer's real artifact lives):
    commit message for the full transcript.
 2. Confirmed still passing (`cargo deny check` — advisories/bans/licenses/
    sources all ok) with everything Milestone 5 added.
-3. Blocked in the environment this milestone was built in — both `auditpol`
-   and `Get-WinEvent -LogName Security` require elevation this session
-   didn't have. Real, ready-to-run artifact left behind:
-   `docs/verify-wfp-audit.ps1` (script) / `docs/wfp-audit-runbook.md`
-   (procedure) — run from an elevated session before release.
-4. Hook script written and syntax-validated with a real `makensis` compile
-   (`src-tauri/windows/hooks.nsh`, wired via `tauri.conf.json`'s
-   `bundle.windows.nsis.installerHooks`, `installMode: "perMachine"` so the
-   installer itself runs elevated). NSIS installed cleanly via
-   `winget install NSIS.NSIS` with no elevation needed. A full
-   `tauri build --bundles nsis` could not complete in this environment,
-   though — `jpegxl-sys`'s release-profile CMake build needs a
-   `Visual Studio 17 2022` generator that isn't installed here (a different,
-   deeper gap than Milestone 2's Clang-component fix, and out of this
-   milestone's scope to resolve). The firewall rule itself is therefore
-   unverified end-to-end; that needs a release build from an environment
-   with Visual Studio installed.
+3. **Closed.** Originally blocked (elevation unavailable in the build
+   session); run from an elevated session afterward via
+   `docs/verify-wfp-audit.ps1` while driving the real compiled app through
+   import/browse/tag/merge/export/close — **PASS**: zero WFP events (5156
+   permitted / 5157 blocked) attributed to `lumenvault-app.exe`.
+4. **Closed.** Originally blocked by a missing `Visual Studio 17 2022`
+   CMake generator; installing VS2022 Build Tools plus its separate
+   `VC.Llvm.Clang`/`VC.Llvm.ClangToolset` components (jpegxl-sys's CMake
+   invocation uses `-T ClangCL`, not just the base C++ workload) unblocked
+   `cargo tauri build --bundles nsis`. Installing and running the built
+   installer surfaced one real, previously-latent bug, now fixed: WebView2's
+   own environment-creation default (an empty user-data-folder, which
+   resolves to `<exe_dir>\<exe_name>.WebView2\`) only works when the exe's
+   own directory is writable — true under `target\debug`, false once
+   installed to `C:\Program Files` for a non-elevated process, which failed
+   outright with `HRESULT(0x80070005)` rather than falling back anywhere.
+   Fixed by passing the app's own local-data directory as an explicit
+   `user_data_folder` in `webview2_hardening::create_environment`. With that
+   fix, the firewall rule was verified live: `netsh advfirewall firewall
+   show rule name="LumenVault - block outbound"` showed the rule present
+   after install and absent after uninstall.
 
 ## 9. GUI shell & thumbnail grid
 
