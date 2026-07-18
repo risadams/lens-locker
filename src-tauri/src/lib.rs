@@ -214,6 +214,7 @@ struct ImageDetailDto {
     stored_path: String,
     tags: Vec<String>,
     first_imported_at: String,
+    preview_path: Option<String>,
 }
 
 #[tauri::command]
@@ -237,6 +238,7 @@ fn get_image_detail(state: tauri::State<Mutex<LibraryState>>, id: i64) -> CmdRes
             stored_path: d.stored_path,
             tags: d.tags,
             first_imported_at: d.first_imported_at,
+            preview_path: d.preview_path,
         })
     })
 }
@@ -497,7 +499,23 @@ fn try_init_state(root: &Path) -> CmdResult<AppState> {
     let library_id = lumenvault_import::ensure_library(&conn, root)?;
     // Launch-only retention sweep (workplan/SPEC.md §3).
     let _ = lumenvault_import::sweep_expired_quarantine(&conn);
+    // Launch-only backfill: images imported before the `preview_full`
+    // thumbnail variant existed get one now (see `backfill_previews`'s doc).
+    let _ = lumenvault_import::backfill_previews(&conn, &paths);
     Ok(AppState { conn: Mutex::new(conn), paths, library_id })
+}
+
+/// `tauri.conf.json`'s `assetProtocol.scope` is a static `$APPDATA/**`
+/// entry, fixed at build time. Milestone 5.5 made the library location
+/// runtime-chosen — it can be any drive — so `convertFileSrc` thumbnail/
+/// blob URLs outside `$APPDATA` are silently denied by WebView2 unless the
+/// chosen root is added to the scope at runtime. Called everywhere a
+/// library becomes [`LibraryState::Ready`]: initial boot, and both
+/// first-run branches (`create_library`/`open_existing_library`).
+fn allow_library_in_asset_scope(app: &tauri::AppHandle, root: &Path) {
+    if let Err(err) = app.asset_protocol_scope().allow_directory(root, true) {
+        eprintln!("[bootstrap] could not widen asset scope to {}: {err}", root.display());
+    }
 }
 
 /// Read on every launch, before anything else touches a catalog. Never
@@ -517,7 +535,10 @@ fn load_initial_library_state(app: &tauri::AppHandle) -> LibraryState {
     }
 
     match try_init_state(&root) {
-        Ok(app_state) => LibraryState::Ready(app_state),
+        Ok(app_state) => {
+            allow_library_in_asset_scope(app, &root);
+            LibraryState::Ready(app_state)
+        }
         Err(err) => {
             eprintln!("[bootstrap] configured library at {library_path} could not be opened: {err}");
             LibraryState::NeedsSetup { unreachable_path: Some(library_path) }
@@ -622,6 +643,7 @@ fn create_library(
     let root = PathBuf::from(&path);
     let app_state = create_library_at(&root, conversion_enabled)?;
     write_bootstrap_config(&app, &root)?;
+    allow_library_in_asset_scope(&app, &root);
     *state.lock().unwrap() = LibraryState::Ready(app_state);
     Ok(())
 }
@@ -653,6 +675,7 @@ fn open_existing_library(app: tauri::AppHandle, state: tauri::State<Mutex<Librar
     let root = PathBuf::from(&path);
     let app_state = open_existing_library_at(&root)?;
     write_bootstrap_config(&app, &root)?;
+    allow_library_in_asset_scope(&app, &root);
     *state.lock().unwrap() = LibraryState::Ready(app_state);
     Ok(())
 }

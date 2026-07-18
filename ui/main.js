@@ -529,13 +529,6 @@ let lbZoom = { scale: 1, tx: 0, ty: 0 };
 let lbPanning = false, lbPanStart = { x: 0, y: 0, tx: 0, ty: 0 };
 let lbCurrentId = null;
 
-// Formats a modern browser/WebView2 can actually decode in an <img>; a
-// stored .jxl (or other non-web format) falls back to the JPEG grid
-// thumbnail — no separate high-res "preview" asset was in this milestone's
-// explicit backend command list (only the 256x256 grid thumbnail was), a
-// documented scope gap, not an oversight.
-const BROWSER_DISPLAYABLE = new Set(['jpeg', 'png', 'webp', 'gif', 'bmp']);
-
 async function openLightbox(id) {
   lbCurrentId = id;
   lbZoom = { scale: 1, tx: 0, ty: 0 };
@@ -547,8 +540,11 @@ function closeLightbox() { lightboxEl.classList.remove('open'); }
 
 async function renderLightbox() {
   const detail = await invoke('get_image_detail', { id: lbCurrentId });
-  const useFull = BROWSER_DISPLAYABLE.has(detail.storedFormat);
-  lbImgEl.src = assetSrc(useFull ? detail.storedPath : thumbnailPathFor(lbCurrentId));
+  // `previewPath` is a full-resolution, browser-displayable JPEG cache of
+  // the blob (backend generates it at import time since WebView2 can't
+  // decode .jxl in an <img> at all) — falls back to the grid thumbnail only
+  // for images imported before this existed, or RAW files.
+  lbImgEl.src = assetSrc(detail.previewPath || thumbnailPathFor(lbCurrentId));
   document.getElementById('lb-filename').textContent = detail.filename;
 
   const idx = currentVisibleIndex(lbCurrentId);
@@ -679,8 +675,8 @@ document.getElementById('importChooseBtn').addEventListener('click', async () =>
   status.textContent = 'Importing…';
   try {
     const importedCount = await invoke('import_directory');
-    status.textContent = `Imported ${importedCount} new photo${importedCount === 1 ? '' : 's'}.`;
     showToast(`Imported ${importedCount} photo${importedCount === 1 ? '' : 's'}`);
+    closeImportModal();
     refreshGrid();
     refreshReviewBadge();
   } catch (e) {

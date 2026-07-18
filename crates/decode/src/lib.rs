@@ -225,15 +225,30 @@ pub fn write_jpeg_thumbnail(
     max_dim: u32,
 ) -> Result<(), ThumbnailError> {
     let resized = image.resize(max_dim, max_dim, image::imageops::FilterType::Triangle);
+    encode_jpeg(&resized, dest, 85)
+}
+
+/// Writes `image` as a full-resolution (no downsizing) quality-92 JPEG to
+/// `dest`. Not a "thumbnail" at all — this exists because WebView2/Chromium
+/// cannot decode `.jxl` in an `<img>` tag, so a stored JPEG XL blob has no
+/// browser-displayable form at *any* size without a decode+re-encode step.
+/// The blob itself already holds the image at its full, original quality;
+/// this is purely a format workaround, not a size reduction, so it does not
+/// resize.
+pub fn write_jpeg_preview(image: &image::DynamicImage, dest: &Path) -> Result<(), ThumbnailError> {
+    encode_jpeg(image, dest, 92)
+}
+
+fn encode_jpeg(image: &image::DynamicImage, dest: &Path, quality: u8) -> Result<(), ThumbnailError> {
     if let Some(parent) = dest.parent() {
         std::fs::create_dir_all(parent).map_err(|source| ThumbnailError::Io { path: dest.to_path_buf(), source })?;
     }
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
         std::fs::File::create(dest).map_err(|source| ThumbnailError::Io { path: dest.to_path_buf(), source })?,
-        85,
+        quality,
     );
     encoder
-        .encode_image(&resized)
+        .encode_image(image)
         .map_err(|source| ThumbnailError::Encode { path: dest.to_path_buf(), source })?;
     Ok(())
 }

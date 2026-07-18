@@ -81,6 +81,15 @@ impl LibraryPaths {
     fn thumbnail_path(&self, hash_hex: &str) -> PathBuf {
         self.root.join("thumbnails").join(&hash_hex[0..2]).join(format!("{hash_hex}.jpg"))
     }
+
+    /// Where a generated full-resolution browser-displayable preview lives —
+    /// see [`lumenvault_decode::write_jpeg_preview`] for why this exists
+    /// (a `.jxl` blob has no browser-native form, at any size). Same
+    /// content-addressing scheme as `thumbnail_path`, in its own `previews/`
+    /// subtree so the two variants never collide.
+    fn preview_path(&self, hash_hex: &str) -> PathBuf {
+        self.root.join("previews").join(&hash_hex[0..2]).join(format!("{hash_hex}.jpg"))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -251,6 +260,38 @@ pub fn sweep_expired_quarantine(conn: &Connection) -> Result<usize, ImportError>
         purged += 1;
     }
     Ok(purged)
+}
+
+/// Launch-only backfill (same pattern as [`sweep_expired_quarantine`]):
+/// generates the `preview_full` thumbnail variant (see
+/// `LibraryPaths::preview_path` / `lumenvault_decode::write_jpeg_preview`)
+/// for any active image that doesn't have one yet — images imported before
+/// that variant existed. Best-effort per image: a blob that fails to
+/// re-decode (missing file, RAW with no decoded pixels) is skipped rather
+/// than aborting the whole backfill, since one bad image shouldn't block
+/// previews for the rest of the library.
+pub fn backfill_previews(conn: &Connection, paths: &LibraryPaths) -> Result<usize, ImportError> {
+    let mut stmt = conn.prepare(
+        "SELECT im.id, im.original_hash, im.stored_path FROM images im
+         LEFT JOIN thumbnails th ON th.image_id = im.id AND th.variant = 'preview_full'
+         WHERE th.id IS NULL AND im.status = 'active'",
+    )?;
+    let candidates: Vec<(i64, Vec<u8>, String)> =
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect::<Result<_, _>>()?;
+    drop(stmt);
+
+    let mut backfilled = 0;
+    for (image_id, original_hash, stored_path) in candidates {
+        let Ok(probe) = lumenvault_decode::probe(Path::new(&stored_path)) else {
+            continue; // undecodable (missing file) or RAW with no pixels — nothing to generate from
+        };
+        let original_hash_hex: String = original_hash.iter().map(|b| format!("{b:02x}")).collect();
+        let preview_path = paths.preview_path(&original_hash_hex);
+        lumenvault_decode::write_jpeg_preview(&probe.image, &preview_path)?;
+        lumenvault_catalog::record_thumbnail(conn, image_id, "preview_full", "jpeg", &preview_path.to_string_lossy())?;
+        backfilled += 1;
+    }
+    Ok(backfilled)
 }
 
 /// Recursively imports every regular file under `source_root`, invoking
@@ -430,6 +471,15 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
                     let thumb_path = paths.thumbnail_path(&original_hash_hex);
                     lumenvault_decode::write_jpeg_thumbnail(image, &thumb_path, 256)?;
                     lumenvault_catalog::record_thumbnail(conn, new_id, "grid256", "jpeg", &thumb_path.to_string_lossy())?;
+
+                    // Full-resolution browser-displayable preview (see
+                    // `LibraryPaths::preview_path`) — a stored `.jxl` blob
+                    // has no form WebView2 can show in an `<img>` at all,
+                    // regardless of size, so the lightbox needs this to show
+                    // more than the 256px grid thumbnail.
+                    let preview_path = paths.preview_path(&original_hash_hex);
+                    lumenvault_decode::write_jpeg_preview(image, &preview_path)?;
+                    lumenvault_catalog::record_thumbnail(conn, new_id, "preview_full", "jpeg", &preview_path.to_string_lossy())?;
                 }
 
                 new_id
