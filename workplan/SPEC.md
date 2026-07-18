@@ -172,9 +172,15 @@ the app rescans the store, re-hashes everything (BLAKE3 + perceptual), and
 re-imports tags/metadata from sidecars. Dedupe-merge history and ML embeddings are
 explicitly **not** recoverable this way — an accepted limitation.
 
-Export (not built in v1, but the metadata model must not foreclose it) means
-copying the managed file plus its `.xmp` sidecar — sufficient given XMP is widely
-read (Adobe products, digiKam, darktable).
+**Export is in v1 scope** (amended 2026-07-18, during Milestone 5's UI design —
+the original ticket deferred it, but the owner reviewed a working design with a
+real Export action and chose to bring it forward rather than ship a UI that
+lies about what it does). The mechanism is unchanged from the original design:
+copying the managed file plus its `.xmp` sidecar to a location the owner
+chooses — no format round-trip, the file exports in whatever format is
+currently stored (e.g. a converted `.jxl`, not un-converted back to the
+original JPEG). Sufficient given XMP is widely read (Adobe products, digiKam,
+darktable).
 
 ([012](tickets/012-metadata-portability.md))
 
@@ -318,9 +324,16 @@ rescanning). Manual tagging via direct catalog calls (still no UI).
 **Milestone 5 — Grid UI.** `ui` crate: the virtualized grid from
 [the validated prototype](tickets/019-validate-thumbnail-grid-performance.md)
 (reuse its approach directly — it's proven), thumbnail generation per §9's
-defaults served as static files, basic filtering (date/format/directory per the
-original brief's MVP scope), the review-queue UI (side-by-side merge per §6), and
-the tagging UI. This is the milestone where LumenVault becomes a usable app.
+defaults served as static files, filtering (date/format/source/tags, not just
+date/format/directory — "source" replaced "directory" since the vault isn't
+Explorer-browsable by design, see §3), sorting, live search, the review-queue UI
+with real merge/dismiss backend logic (§6 — this had never actually been
+implemented behind the M3 review-queue detection), the tagging UI, an import
+trigger (implied by needing any way to get photos into the grid, never
+separately scoped), a full-size lightbox (zoom/pan/keyboard prev-next), and
+export (§7, amended into v1 scope alongside this milestone). Full interaction
+design, owner-approved before build: `workplan/design/lumenvault-design.html`.
+This is the milestone where LumenVault becomes a usable app.
 
 **Milestone 6 — Offline hardening & release gate.** Implement all four §8 layers
 for real (not just documented); run the WFP connection audit at least once;

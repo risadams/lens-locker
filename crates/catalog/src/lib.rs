@@ -5,7 +5,12 @@ use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{Migrations, M};
 
 fn migrations() -> Migrations<'static> {
-    Migrations::new(vec![M::up(include_str!("../schema.sql"))])
+    Migrations::new(vec![
+        M::up(include_str!("../schema.sql")),
+        // Milestone 5 — see migrations/0002_standard_fts.sql's own comment
+        // for why images_fts is redefined here rather than in schema.sql.
+        M::up(include_str!("../migrations/0002_standard_fts.sql")),
+    ])
 }
 
 /// Brings `conn` to the current schema version and enables foreign-key
@@ -49,6 +54,7 @@ pub fn add_tag(conn: &Connection, image_id: i64, tag_name: &str) -> rusqlite::Re
         "INSERT OR IGNORE INTO image_tags (image_id, tag_id) VALUES (?1, ?2)",
         params![image_id, tag_id],
     )?;
+    sync_fts_row(conn, image_id)?;
     Ok(())
 }
 
@@ -60,6 +66,7 @@ pub fn remove_tag(conn: &Connection, image_id: i64, tag_name: &str) -> rusqlite:
          WHERE image_id = ?1 AND tag_id = (SELECT id FROM tags WHERE name = ?2)",
         params![image_id, tag_name],
     )?;
+    sync_fts_row(conn, image_id)?;
     Ok(())
 }
 
@@ -74,6 +81,401 @@ pub fn tags_for_image(conn: &Connection, image_id: i64) -> rusqlite::Result<Vec<
          ORDER BY t.name ASC",
     )?;
     stmt.query_map([image_id], |row| row.get(0))?.collect()
+}
+
+// ── Full-text search index sync (workplan/SPEC.md §9's "text search" filter,
+// Milestone 5) ───────────────────────────────────────────────────────────
+//
+// `images_fts` (schema.sql) is a `content=''` (contentless) FTS5 table: it
+// stores only the search index, not a queryable copy of the column text —
+// callers get matching rowids back from a MATCH query, then join against
+// `images` for the real data. Nothing populated this table before Milestone
+// 5; [`sync_fts_row`] is the one function that keeps it current, called
+// after every event that changes what a search should match (a new image's
+// filename/camera becoming known, or its tag list changing).
+
+/// Rebuilds `images_fts`'s row for `image_id` from the image's current
+/// camera fields, its most-recently-recorded source filename, and its
+/// current tags — a full delete+reinsert rather than an in-place update,
+/// since FTS5 doesn't support updating individual columns of a contentless
+/// row. Idempotent and safe to call as often as needed (e.g. after every
+/// `add_tag`/`remove_tag`).
+pub fn sync_fts_row(conn: &Connection, image_id: i64) -> rusqlite::Result<()> {
+    let filename: Option<String> = conn
+        .query_row(
+            "SELECT original_filename FROM image_sources
+             WHERE image_id = ?1 ORDER BY imported_at DESC LIMIT 1",
+            [image_id],
+            |row| row.get(0),
+        )
+        .optional()?;
+    let (camera_make, camera_model): (Option<String>, Option<String>) = conn
+        .query_row("SELECT camera_make, camera_model FROM images WHERE id = ?1", [image_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })
+        .optional()?
+        .unwrap_or((None, None));
+    let tags = tags_for_image(conn, image_id)?;
+    let tag_names = tags.join(" ");
+
+    conn.execute("DELETE FROM images_fts WHERE rowid = ?1", [image_id])?;
+    conn.execute(
+        "INSERT INTO images_fts (rowid, original_filename, camera_make, camera_model, tag_names)
+         VALUES (?1, ?2, ?3, ?4, ?5)",
+        params![image_id, filename.unwrap_or_default(), camera_make.unwrap_or_default(), camera_model.unwrap_or_default(), tag_names],
+    )?;
+    Ok(())
+}
+
+// ── Grid queries (workplan/SPEC.md §9, Milestone 5) ─────────────────────
+//
+// `list_images` backs the virtualized grid: real SQL with filter/sort/
+// search/pagination, never a full-table fetch into memory. It returns only
+// what a grid card needs (§9's own scoping call), not full metadata —
+// [`get_image_detail`] is the separate, per-image call for the drawer.
+
+/// Filter selections for [`list_images`] — an empty `Vec`/`None` means "no
+/// filter on this facet." Per workplan/SPEC.md §9: multi-select facets
+/// (`formats`, `sources`, `tags`) are OR-within-the-facet, AND across
+/// facets — matching the approved design's documented filter behavior.
+#[derive(Debug, Default, Clone)]
+pub struct ImageFilters {
+    /// Inclusive ISO-8601 lower bound on `capture_date`.
+    pub date_from: Option<String>,
+    /// Inclusive ISO-8601 upper bound on `capture_date`.
+    pub date_to: Option<String>,
+    /// `images.original_format` values; OR'd together.
+    pub formats: Vec<String>,
+    /// `import_batches.source_root` values (the folder chosen at import
+    /// time) — the vault isn't Explorer-browsable by design (SPEC.md §3),
+    /// so "source" means *where a photo was imported from*, not a live
+    /// on-disk path. OR'd together.
+    pub sources: Vec<String>,
+    /// Tag names; OR'd together.
+    pub tags: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SortOrder {
+    CapturedDesc,
+    CapturedAsc,
+    ImportedDesc,
+    FilenameAsc,
+    SizeDesc,
+}
+
+impl SortOrder {
+    fn order_by_clause(self) -> &'static str {
+        match self {
+            // NULLS LAST isn't native pre-3.30 SQLite syntax portability
+            // concerns aside, bundled rusqlite ships a modern SQLite that
+            // supports it directly.
+            Self::CapturedDesc => "im.capture_date DESC NULLS LAST, im.id DESC",
+            Self::CapturedAsc => "im.capture_date ASC NULLS LAST, im.id ASC",
+            Self::ImportedDesc => "latest_import DESC, im.id DESC",
+            Self::FilenameAsc => "latest_filename COLLATE NOCASE ASC, im.id ASC",
+            Self::SizeDesc => "im.file_size_bytes DESC, im.id DESC",
+        }
+    }
+}
+
+/// One grid card's worth of data — deliberately not full metadata (see
+/// [`get_image_detail`] for that), per workplan/SPEC.md §9's scoping.
+#[derive(Debug, Clone)]
+pub struct GridImage {
+    pub id: i64,
+    pub thumbnail_path: Option<String>,
+    pub capture_date: Option<String>,
+    pub tags: Vec<String>,
+    /// Always `true` in this schema: every stored image already passed
+    /// blob-integrity verification before its `images` row was ever
+    /// committed (workplan/SPEC.md §3) — there is no reachable "unverified"
+    /// state to represent. Kept as an explicit field (rather than dropped)
+    /// because the approved design surfaces a verified glyph on every card.
+    pub verified: bool,
+}
+
+/// Real SQL against `images` (joined to `image_tags`/`tags` for tag
+/// filtering, `image_sources`/`import_batches` for source filtering and
+/// imported-sort, `thumbnails` for the grid thumbnail, `images_fts` for
+/// text search) — never a full-table fetch. Returns `(page, total_matching)`
+/// so the virtualized grid can size its scroll extent without a second
+/// query.
+pub fn list_images(
+    conn: &Connection,
+    filters: &ImageFilters,
+    sort: SortOrder,
+    search: Option<&str>,
+    offset: i64,
+    limit: i64,
+) -> rusqlite::Result<(Vec<GridImage>, i64)> {
+    let mut where_clauses = vec!["im.status = 'active'".to_string()];
+    let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
+
+    if let Some(from) = &filters.date_from {
+        where_clauses.push("im.capture_date >= ?".to_string());
+        args.push(Box::new(from.clone()));
+    }
+    if let Some(to) = &filters.date_to {
+        where_clauses.push("im.capture_date <= ?".to_string());
+        args.push(Box::new(to.clone()));
+    }
+    if !filters.formats.is_empty() {
+        let placeholders = vec!["?"; filters.formats.len()].join(",");
+        where_clauses.push(format!("im.original_format IN ({placeholders})"));
+        for f in &filters.formats {
+            args.push(Box::new(f.clone()));
+        }
+    }
+    if !filters.sources.is_empty() {
+        let placeholders = vec!["?"; filters.sources.len()].join(",");
+        where_clauses.push(format!(
+            "im.id IN (SELECT s.image_id FROM image_sources s \
+             JOIN import_batches b ON b.id = s.import_batch_id \
+             WHERE b.source_root IN ({placeholders}))"
+        ));
+        for s in &filters.sources {
+            args.push(Box::new(s.clone()));
+        }
+    }
+    if !filters.tags.is_empty() {
+        let placeholders = vec!["?"; filters.tags.len()].join(",");
+        where_clauses.push(format!(
+            "im.id IN (SELECT it.image_id FROM image_tags it \
+             JOIN tags t ON t.id = it.tag_id WHERE t.name IN ({placeholders}))"
+        ));
+        for t in &filters.tags {
+            args.push(Box::new(t.clone()));
+        }
+    }
+    if let Some(q) = search.filter(|q| !q.trim().is_empty()) {
+        // FTS5 query syntax treats bare special characters (quotes,
+        // hyphens...) as syntax errors, not literal text; wrapping the raw
+        // search term in double quotes with internal quotes escaped turns
+        // it into a single FTS5 string-literal phrase match, which is what
+        // a "search box" experience needs (match this text), not a
+        // FTS5-query-language experience.
+        let escaped = q.replace('"', "\"\"");
+        where_clauses.push(
+            "im.id IN (SELECT rowid FROM images_fts WHERE images_fts MATCH ?)".to_string(),
+        );
+        args.push(Box::new(format!("\"{escaped}\"")));
+    }
+
+    let where_sql = where_clauses.join(" AND ");
+    let count_sql = format!("SELECT COUNT(*) FROM images im WHERE {where_sql}");
+    let total: i64 = conn.query_row(&count_sql, rusqlite::params_from_iter(args.iter().map(|b| b.as_ref())), |row| row.get(0))?;
+
+    let sql = format!(
+        "SELECT im.id, th.path, im.capture_date,
+                (SELECT MAX(s.imported_at) FROM image_sources s WHERE s.image_id = im.id) AS latest_import,
+                (SELECT s.original_filename FROM image_sources s WHERE s.image_id = im.id ORDER BY s.imported_at DESC LIMIT 1) AS latest_filename
+         FROM images im
+         LEFT JOIN thumbnails th ON th.image_id = im.id AND th.variant = 'grid256'
+         WHERE {where_sql}
+         ORDER BY {order}
+         LIMIT ? OFFSET ?",
+        order = sort.order_by_clause(),
+    );
+
+    let mut stmt = conn.prepare(&sql)?;
+    let mut all_args: Vec<&dyn rusqlite::ToSql> = args.iter().map(|b| b.as_ref()).collect();
+    all_args.push(&limit);
+    all_args.push(&offset);
+
+    let rows: Vec<(i64, Option<String>, Option<String>)> = stmt
+        .query_map(rusqlite::params_from_iter(all_args), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+
+    let mut page = Vec::with_capacity(rows.len());
+    for (id, thumbnail_path, capture_date) in rows {
+        let tags = tags_for_image(conn, id)?;
+        page.push(GridImage { id, thumbnail_path, capture_date, tags, verified: true });
+    }
+
+    Ok((page, total))
+}
+
+/// Full metadata for one image, for the detail drawer — everything the
+/// approved design's drawer shows (workplan/SPEC.md §9/Milestone 5).
+#[derive(Debug, Clone)]
+pub struct ImageDetail {
+    pub id: i64,
+    pub filename: String,
+    pub original_format: String,
+    pub stored_format: String,
+    pub conversion_status: String,
+    pub capture_date: Option<String>,
+    pub camera_make: Option<String>,
+    pub camera_model: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+    pub original_hash_hex: String,
+    pub file_size_bytes: i64,
+    pub stored_path: String,
+    pub tags: Vec<String>,
+    pub first_imported_at: String,
+}
+
+pub fn get_image_detail(conn: &Connection, image_id: i64) -> rusqlite::Result<Option<ImageDetail>> {
+    let row: Option<(String, String, String, Option<String>, Option<String>, Option<String>, Option<i64>, Option<i64>, Vec<u8>, i64, String, String)> = conn
+        .query_row(
+            "SELECT original_format, stored_format, conversion_status, capture_date, camera_make,
+                    camera_model, width, height, original_hash, file_size_bytes, stored_path, first_imported_at
+             FROM images WHERE id = ?1",
+            [image_id],
+            |row| {
+                Ok((
+                    row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?,
+                    row.get(5)?, row.get(6)?, row.get(7)?, row.get(8)?, row.get(9)?,
+                    row.get(10)?, row.get(11)?,
+                ))
+            },
+        )
+        .optional()?;
+
+    let Some((
+        original_format, stored_format, conversion_status, capture_date, camera_make,
+        camera_model, width, height, original_hash, file_size_bytes, stored_path, first_imported_at,
+    )) = row
+    else {
+        return Ok(None);
+    };
+
+    let filename: String = conn
+        .query_row(
+            "SELECT original_filename FROM image_sources WHERE image_id = ?1 ORDER BY imported_at DESC LIMIT 1",
+            [image_id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .unwrap_or_default();
+
+    let original_hash_hex = original_hash.iter().map(|b| format!("{b:02x}")).collect();
+    let tags = tags_for_image(conn, image_id)?;
+
+    Ok(Some(ImageDetail {
+        id: image_id,
+        filename,
+        original_format,
+        stored_format,
+        conversion_status,
+        capture_date,
+        camera_make,
+        camera_model,
+        width,
+        height,
+        original_hash_hex,
+        file_size_bytes,
+        stored_path,
+        tags,
+        first_imported_at,
+    }))
+}
+
+/// A tag and how many active images carry it — for the tag filter popover's
+/// counts.
+#[derive(Debug, Clone)]
+pub struct TagCount {
+    pub name: String,
+    pub count: i64,
+}
+
+pub fn list_tags(conn: &Connection) -> rusqlite::Result<Vec<TagCount>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.name, COUNT(*) FROM tags t
+         JOIN image_tags it ON it.tag_id = t.id
+         JOIN images im ON im.id = it.image_id AND im.status = 'active'
+         GROUP BY t.id ORDER BY COUNT(*) DESC, t.name ASC",
+    )?;
+    stmt.query_map([], |row| Ok(TagCount { name: row.get(0)?, count: row.get(1)? }))?.collect()
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceCount {
+    pub source_root: String,
+    pub count: i64,
+}
+
+/// Distinct import source roots (the folder chosen at import time) with a
+/// count of active images that came from each — for the source filter
+/// popover. See [`ImageFilters::sources`] for why "source" means this and
+/// not a live filesystem path.
+pub fn list_sources(conn: &Connection) -> rusqlite::Result<Vec<SourceCount>> {
+    let mut stmt = conn.prepare(
+        "SELECT b.source_root, COUNT(DISTINCT im.id) FROM import_batches b
+         JOIN image_sources s ON s.import_batch_id = b.id
+         JOIN images im ON im.id = s.image_id AND im.status = 'active'
+         GROUP BY b.source_root ORDER BY COUNT(DISTINCT im.id) DESC",
+    )?;
+    stmt.query_map([], |row| Ok(SourceCount { source_root: row.get(0)?, count: row.get(1)? }))?.collect()
+}
+
+/// Records a generated thumbnail (workplan/SPEC.md §9's `thumbnails` table)
+/// — upserts on `(image_id, variant)` so regenerating a thumbnail (e.g. a
+/// future eviction/regen pass) doesn't violate the schema's `UNIQUE`
+/// constraint.
+pub fn record_thumbnail(conn: &Connection, image_id: i64, variant: &str, format: &str, path: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO thumbnails (image_id, variant, format, path)
+         VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT (image_id, variant) DO UPDATE SET format = excluded.format, path = excluded.path,
+             generated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')",
+        params![image_id, variant, format, path],
+    )?;
+    Ok(())
+}
+
+// ── Review queue (workplan/SPEC.md §6, Milestone 5) ─────────────────────
+//
+// Milestone 3 built detection (`dedupe_review_queue` rows); resolution
+// never existed until now.
+
+#[derive(Debug, Clone)]
+pub struct ReviewQueueEntry {
+    pub queue_id: i64,
+    pub hamming_distance: i64,
+    pub image_a: GridImage,
+    pub image_b: GridImage,
+}
+
+/// Every `pending` review-queue row, joined to each side's summary data for
+/// the side-by-side compare UI.
+pub fn list_review_queue(conn: &Connection) -> rusqlite::Result<Vec<ReviewQueueEntry>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, image_a_id, image_b_id, hamming_distance FROM dedupe_review_queue
+         WHERE status = 'pending' ORDER BY created_at ASC",
+    )?;
+    let rows: Vec<(i64, i64, i64, i64)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+
+    let mut entries = Vec::with_capacity(rows.len());
+    for (queue_id, a_id, b_id, hamming_distance) in rows {
+        let Some(image_a) = grid_image_by_id(conn, a_id)? else { continue };
+        let Some(image_b) = grid_image_by_id(conn, b_id)? else { continue };
+        entries.push(ReviewQueueEntry { queue_id, hamming_distance, image_a, image_b });
+    }
+    Ok(entries)
+}
+
+fn grid_image_by_id(conn: &Connection, image_id: i64) -> rusqlite::Result<Option<GridImage>> {
+    let row: Option<(Option<String>, Option<String>)> = conn
+        .query_row(
+            "SELECT th.path, im.capture_date FROM images im
+             LEFT JOIN thumbnails th ON th.image_id = im.id AND th.variant = 'grid256'
+             WHERE im.id = ?1",
+            [image_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .optional()?;
+    let Some((thumbnail_path, capture_date)) = row else { return Ok(None) };
+    let tags = tags_for_image(conn, image_id)?;
+    Ok(Some(GridImage { id: image_id, thumbnail_path, capture_date, tags, verified: true }))
 }
 
 #[cfg(test)]
@@ -232,5 +634,260 @@ mod tests {
 
         assert!(super::tags_for_image(&conn, image_a).unwrap().is_empty());
         assert_eq!(super::tags_for_image(&conn, image_b).unwrap(), vec!["shared".to_string()]);
+    }
+
+    // ── Milestone 5: grid queries, review queue ─────────────────────────
+
+    /// Inserts a fully-specified image (format/date/size/source) for the
+    /// grid-query tests below, which — unlike the tag tests — need those
+    /// fields to actually differ between rows to exercise filtering/sorting.
+    #[allow(clippy::too_many_arguments)]
+    fn insert_full_image(
+        conn: &Connection,
+        library_id: i64,
+        original_hash: u8,
+        original_format: &str,
+        capture_date: &str,
+        size_bytes: i64,
+        source_root: &str,
+        filename: &str,
+    ) -> i64 {
+        conn.execute(
+            "INSERT INTO images (
+                library_id, original_hash, stored_hash, stored_path,
+                original_format, stored_format, file_size_bytes, capture_date
+            ) VALUES (?1, ?2, x'00', ?3, ?4, ?4, ?5, ?6)",
+            params![library_id, [original_hash; 32].to_vec(), format!("blob-{original_hash}"), original_format, size_bytes, capture_date],
+        )
+        .unwrap();
+        let image_id = conn.last_insert_rowid();
+
+        conn.execute(
+            "INSERT INTO import_batches (library_id, source_root, status) VALUES (?1, ?2, 'completed')",
+            params![library_id, source_root],
+        )
+        .unwrap();
+        let batch_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO image_sources (image_id, import_batch_id, original_filename, source_path)
+             VALUES (?1, ?2, ?3, ?4)",
+            params![image_id, batch_id, filename, format!("{source_root}/{filename}")],
+        )
+        .unwrap();
+        image_id
+    }
+
+    fn test_library(conn: &Connection) -> i64 {
+        conn.execute("INSERT INTO libraries (name, root_path) VALUES ('lib', 'A:/lib')", []).unwrap();
+        conn.last_insert_rowid()
+    }
+
+    #[test]
+    fn list_images_filters_by_format_and_returns_total_count() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        insert_full_image(&conn, library_id, 1, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
+        insert_full_image(&conn, library_id, 2, "png", "2026-01-02T00:00:00Z", 200, "D:/src", "b.png");
+
+        let filters = super::ImageFilters { formats: vec!["jpeg".to_string()], ..Default::default() };
+        let (page, total) = super::list_images(&conn, &filters, super::SortOrder::CapturedDesc, None, 0, 10).unwrap();
+
+        assert_eq!(total, 1);
+        assert_eq!(page.len(), 1);
+        assert!(page[0].verified);
+    }
+
+    #[test]
+    fn list_images_paginates_with_offset_and_limit() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        for i in 0..5u8 {
+            insert_full_image(&conn, library_id, i + 10, "jpeg", &format!("2026-01-0{}T00:00:00Z", i + 1), 100, "D:/src", "x.jpg");
+        }
+
+        let (page1, total) = super::list_images(&conn, &super::ImageFilters::default(), super::SortOrder::CapturedAsc, None, 0, 2).unwrap();
+        let (page2, _) = super::list_images(&conn, &super::ImageFilters::default(), super::SortOrder::CapturedAsc, None, 2, 2).unwrap();
+
+        assert_eq!(total, 5);
+        assert_eq!(page1.len(), 2);
+        assert_eq!(page2.len(), 2);
+        assert_ne!(page1[0].id, page2[0].id, "different pages must return different rows");
+    }
+
+    #[test]
+    fn list_images_sorts_by_captured_date_descending() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let older = insert_full_image(&conn, library_id, 20, "jpeg", "2020-01-01T00:00:00Z", 100, "D:/src", "old.jpg");
+        let newer = insert_full_image(&conn, library_id, 21, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "new.jpg");
+
+        let (page, _) = super::list_images(&conn, &super::ImageFilters::default(), super::SortOrder::CapturedDesc, None, 0, 10).unwrap();
+
+        assert_eq!(page[0].id, newer);
+        assert_eq!(page[1].id, older);
+    }
+
+    #[test]
+    fn list_images_filters_by_tag_with_or_semantics_within_the_facet() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let sunset = insert_full_image(&conn, library_id, 30, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "s.jpg");
+        let beach = insert_full_image(&conn, library_id, 31, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/src", "b.jpg");
+        let untagged = insert_full_image(&conn, library_id, 32, "jpeg", "2026-01-03T00:00:00Z", 100, "D:/src", "u.jpg");
+        super::add_tag(&conn, sunset, "sunset").unwrap();
+        super::add_tag(&conn, beach, "beach").unwrap();
+
+        let filters = super::ImageFilters { tags: vec!["sunset".to_string(), "beach".to_string()], ..Default::default() };
+        let (page, total) = super::list_images(&conn, &filters, super::SortOrder::CapturedDesc, None, 0, 10).unwrap();
+
+        let ids: Vec<i64> = page.iter().map(|g| g.id).collect();
+        assert_eq!(total, 2);
+        assert!(ids.contains(&sunset) && ids.contains(&beach) && !ids.contains(&untagged));
+    }
+
+    #[test]
+    fn list_images_filters_by_source_root() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let from_a = insert_full_image(&conn, library_id, 40, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/tripA", "a.jpg");
+        let _from_b = insert_full_image(&conn, library_id, 41, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/tripB", "b.jpg");
+
+        let filters = super::ImageFilters { sources: vec!["D:/tripA".to_string()], ..Default::default() };
+        let (page, total) = super::list_images(&conn, &filters, super::SortOrder::CapturedDesc, None, 0, 10).unwrap();
+
+        assert_eq!(total, 1);
+        assert_eq!(page[0].id, from_a);
+    }
+
+    #[test]
+    fn list_images_excludes_merged_images() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let keeper = insert_full_image(&conn, library_id, 50, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "k.jpg");
+        let loser = insert_full_image(&conn, library_id, 51, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/src", "l.jpg");
+        conn.execute(
+            "UPDATE images SET status = 'merged', merged_into_id = ?1 WHERE id = ?2",
+            params![keeper, loser],
+        )
+        .unwrap();
+
+        let (page, total) = super::list_images(&conn, &super::ImageFilters::default(), super::SortOrder::CapturedDesc, None, 0, 10).unwrap();
+
+        assert_eq!(total, 1);
+        assert_eq!(page[0].id, keeper);
+    }
+
+    #[test]
+    fn text_search_matches_synced_filenames_and_tags() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let sunset_pic = insert_full_image(&conn, library_id, 60, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "vacation_beach.jpg");
+        let other = insert_full_image(&conn, library_id, 61, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/src", "receipt_scan.jpg");
+        super::add_tag(&conn, sunset_pic, "sunset").unwrap();
+        super::sync_fts_row(&conn, sunset_pic).unwrap();
+        super::sync_fts_row(&conn, other).unwrap();
+
+        let (by_tag, _) = super::list_images(&conn, &super::ImageFilters::default(), super::SortOrder::CapturedDesc, Some("sunset"), 0, 10).unwrap();
+        let (by_filename, _) = super::list_images(&conn, &super::ImageFilters::default(), super::SortOrder::CapturedDesc, Some("vacation"), 0, 10).unwrap();
+
+        assert_eq!(by_tag.len(), 1);
+        assert_eq!(by_tag[0].id, sunset_pic);
+        assert_eq!(by_filename.len(), 1);
+        assert_eq!(by_filename[0].id, sunset_pic);
+    }
+
+    #[test]
+    fn get_image_detail_returns_full_metadata_including_tags() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let image_id = insert_full_image(&conn, library_id, 70, "jpeg", "2026-01-01T00:00:00Z", 1234, "D:/src", "photo.jpg");
+        super::add_tag(&conn, image_id, "family").unwrap();
+
+        let detail = super::get_image_detail(&conn, image_id).unwrap().unwrap();
+
+        assert_eq!(detail.filename, "photo.jpg");
+        assert_eq!(detail.original_format, "jpeg");
+        assert_eq!(detail.file_size_bytes, 1234);
+        assert_eq!(detail.tags, vec!["family".to_string()]);
+        assert_eq!(detail.original_hash_hex.len(), 64);
+    }
+
+    #[test]
+    fn get_image_detail_returns_none_for_a_nonexistent_image() {
+        let conn = migrated_conn();
+        assert!(super::get_image_detail(&conn, 999).unwrap().is_none());
+    }
+
+    #[test]
+    fn list_tags_returns_counts_across_active_images_only() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let a = insert_full_image(&conn, library_id, 80, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
+        let b = insert_full_image(&conn, library_id, 81, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/src", "b.jpg");
+        super::add_tag(&conn, a, "family").unwrap();
+        super::add_tag(&conn, b, "family").unwrap();
+
+        let tags = super::list_tags(&conn).unwrap();
+
+        assert_eq!(tags.len(), 1);
+        assert_eq!(tags[0].name, "family");
+        assert_eq!(tags[0].count, 2);
+    }
+
+    #[test]
+    fn list_sources_returns_distinct_import_roots_with_counts() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        insert_full_image(&conn, library_id, 90, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/tripA", "a.jpg");
+        insert_full_image(&conn, library_id, 91, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/tripA", "b.jpg");
+        insert_full_image(&conn, library_id, 92, "jpeg", "2026-01-03T00:00:00Z", 100, "D:/tripB", "c.jpg");
+
+        let sources = super::list_sources(&conn).unwrap();
+
+        assert_eq!(sources.len(), 2);
+        let trip_a = sources.iter().find(|s| s.source_root == "D:/tripA").unwrap();
+        assert_eq!(trip_a.count, 2);
+    }
+
+    #[test]
+    fn record_thumbnail_upserts_on_image_and_variant() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+
+        super::record_thumbnail(&conn, image_id, "grid256", "jpeg", "/a/b.jpg").unwrap();
+        super::record_thumbnail(&conn, image_id, "grid256", "jpeg", "/a/c.jpg").unwrap();
+
+        let count: i64 = conn.query_row("SELECT COUNT(*) FROM thumbnails WHERE image_id = ?1", [image_id], |r| r.get(0)).unwrap();
+        let path: String = conn.query_row("SELECT path FROM thumbnails WHERE image_id = ?1", [image_id], |r| r.get(0)).unwrap();
+        assert_eq!(count, 1, "re-recording the same variant must not duplicate the row");
+        assert_eq!(path, "/a/c.jpg");
+    }
+
+    #[test]
+    fn list_review_queue_returns_only_pending_entries_with_both_sides() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let a = insert_full_image(&conn, library_id, 100, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
+        let b = insert_full_image(&conn, library_id, 101, "jpeg", "2026-01-01T00:00:01Z", 100, "D:/src", "b.jpg");
+        conn.execute(
+            "INSERT INTO dedupe_review_queue (image_a_id, image_b_id, hamming_distance) VALUES (?1, ?2, 3)",
+            params![a, b],
+        )
+        .unwrap();
+        // A resolved entry must not show up.
+        let c = insert_full_image(&conn, library_id, 102, "jpeg", "2026-01-01T00:00:02Z", 100, "D:/src", "c.jpg");
+        let d = insert_full_image(&conn, library_id, 103, "jpeg", "2026-01-01T00:00:03Z", 100, "D:/src", "d.jpg");
+        conn.execute(
+            "INSERT INTO dedupe_review_queue (image_a_id, image_b_id, hamming_distance, status) VALUES (?1, ?2, 2, 'dismissed')",
+            params![c, d],
+        )
+        .unwrap();
+
+        let entries = super::list_review_queue(&conn).unwrap();
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].hamming_distance, 3);
+        assert_eq!(entries[0].image_a.id, a);
+        assert_eq!(entries[0].image_b.id, b);
     }
 }

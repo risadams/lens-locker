@@ -65,6 +65,22 @@ impl LibraryPaths {
     fn quarantine_path(&self, journal_id: i64, filename: &std::ffi::OsStr) -> PathBuf {
         self.root.join("quarantine").join(journal_id.to_string()).join(filename)
     }
+
+    /// Where a merge-discarded image's *stored blob* (not an import
+    /// original) gets quarantined — the `quarantine_type = 'merge_discard'`
+    /// case (workplan/SPEC.md §3/§6/§10), keyed by the loser's image id
+    /// rather than a journal id since a merge isn't a journal-tracked event.
+    fn merge_quarantine_path(&self, image_id: i64, filename: &std::ffi::OsStr) -> PathBuf {
+        self.root.join("quarantine").join(format!("merge-{image_id}")).join(filename)
+    }
+
+    /// Where a generated grid thumbnail lives — under the library root
+    /// (workplan/SPEC.md §9), content-addressed by the image's stored hash
+    /// like the blob store, so re-generating a thumbnail always lands at the
+    /// same path.
+    fn thumbnail_path(&self, hash_hex: &str) -> PathBuf {
+        self.root.join("thumbnails").join(&hash_hex[0..2]).join(format!("{hash_hex}.jpg"))
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -82,6 +98,14 @@ pub enum ImportError {
     Walk { root: PathBuf, source: walkdir::Error },
     #[error(transparent)]
     Xmp(#[from] lumenvault_xmp::XmpError),
+    #[error(transparent)]
+    Thumbnail(#[from] lumenvault_decode::ThumbnailError),
+    #[error("review-queue entry {0} not found")]
+    ReviewQueueEntryNotFound(i64),
+    #[error("review-queue entry {0} is not pending (already resolved)")]
+    ReviewQueueEntryNotPending(i64),
+    #[error("keeper_id {keeper} is not one of the review-queue entry's two images ({a}, {b})")]
+    InvalidKeeper { keeper: i64, a: i64, b: i64 },
 }
 
 /// Outcome of importing one source file.
@@ -275,19 +299,20 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
     // get `None`, which both keeps `perceptual_hash` NULL in the catalog
     // and — since NULL never matches in `record_near_duplicates` — is what
     // excludes them from perceptual dedupe candidacy without extra logic.
-    let classified = match lumenvault_decode::probe(source_path) {
+    let (classified, decoded_image) = match lumenvault_decode::probe(source_path) {
         Ok(probe) => {
             let hash = lumenvault_hash::perceptual_hash(&probe.image);
-            Classified {
+            let classified = Classified {
                 format: probe.format.as_str(),
                 width: Some(probe.width),
                 height: Some(probe.height),
                 perceptual_hash: Some(hash as i64),
-            }
+            };
+            (classified, Some(probe.image))
         }
         Err(e) => match lumenvault_decode::raw_extension(source_path) {
             Some(raw_format) => {
-                Classified { format: raw_format, width: None, height: None, perceptual_hash: None }
+                (Classified { format: raw_format, width: None, height: None, perceptual_hash: None }, None)
             }
             None => {
                 set_journal_step(conn, journal_id, "failed", Some(&e.to_string()))?;
@@ -370,7 +395,23 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
                         perceptual_hash,
                     ],
                 )?;
-                conn.last_insert_rowid()
+                let new_id = conn.last_insert_rowid();
+
+                // Thumbnail generation (§9), at import time — reuses the
+                // pixels `probe()` already decoded (see the module doc on
+                // `decoded_image`) rather than re-decoding the blob. Content-
+                // addressed by the *original* hash (same key as the blob
+                // path) so it's stable and collision-free; skipped for RAW
+                // files, which have no decoded pixels this milestone (see
+                // lumenvault-decode's module doc) — a genuine, documented gap,
+                // not silently swallowed.
+                if let Some(image) = &decoded_image {
+                    let thumb_path = paths.thumbnail_path(&original_hash_hex);
+                    lumenvault_decode::write_jpeg_thumbnail(image, &thumb_path, 256)?;
+                    lumenvault_catalog::record_thumbnail(conn, new_id, "grid256", "jpeg", &thumb_path.to_string_lossy())?;
+                }
+
+                new_id
             }
         };
         (image_id, FileOutcome::Imported { image_id })
@@ -401,6 +442,11 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
             ],
         )?;
     }
+    // Keeps the full-text search index (§9's live search filter, Milestone
+    // 5) current with the latest-known filename — cheap to re-run
+    // unconditionally, same idempotent-retry rationale as the rest of this
+    // function.
+    lumenvault_catalog::sync_fts_row(conn, image_id)?;
 
     // §3 steps 2 and 3. Run unconditionally (not just for a fresh
     // `Imported` outcome) so both stay correct under this module's
@@ -420,6 +466,171 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
     set_journal_step(conn, journal_id, "done", None)?;
 
     Ok(outcome)
+}
+
+// ── Review-queue resolution (workplan/SPEC.md §6, Milestone 5) ──────────
+//
+// Milestone 3 built detection only (`dedupe_review_queue` rows) — this is
+// the first resolution logic. Lives in this crate (not `lumenvault-catalog`)
+// because a merge does real file I/O (quarantining the loser's stored blob),
+// which `catalog` deliberately stays free of.
+
+/// What the reviewer decided for one `dedupe_review_queue` entry.
+#[derive(Debug, Clone, Copy)]
+pub enum ReviewAction {
+    /// Union both images' tags onto `keeper_id`, quarantine the other
+    /// image's stored blob, mark the loser `merged`.
+    Merge { keeper_id: i64 },
+    /// "Keep both" — no data changes beyond the queue row itself.
+    Dismiss,
+}
+
+/// Resolves one review-queue entry per §6's exact merge UX: on merge, tags
+/// union onto the keeper (reusing [`lumenvault_catalog::add_tag`]), the
+/// loser's `images.status` becomes `merged` (with `merged_into_id`/
+/// `merged_at` set), its **stored blob** (not an import original) is
+/// quarantined under `quarantine_type = 'merge_discard'` — the same
+/// retention mechanism as any other removed original, never a hard delete —
+/// and the queue row itself is marked `merged`/`resolved_at`. On dismiss,
+/// only the queue row changes.
+///
+/// Idempotent: resolving an already-resolved entry a second time is a
+/// silent no-op rather than an error, so a double-click or a retried IPC
+/// call from the UI can't corrupt state.
+pub fn resolve_review_pair(
+    conn: &Connection,
+    paths: &LibraryPaths,
+    queue_id: i64,
+    action: ReviewAction,
+) -> Result<(), ImportError> {
+    let entry: Option<(i64, i64, String)> = conn
+        .query_row(
+            "SELECT image_a_id, image_b_id, status FROM dedupe_review_queue WHERE id = ?1",
+            [queue_id],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+        )
+        .optional()?;
+    let Some((image_a, image_b, status)) = entry else {
+        return Err(ImportError::ReviewQueueEntryNotFound(queue_id));
+    };
+    if status != "pending" {
+        // Already resolved (a prior call, or a UI double-click) — no-op,
+        // not an error, to keep this safe to retry.
+        return Ok(());
+    }
+
+    match action {
+        ReviewAction::Dismiss => {
+            conn.execute(
+                "UPDATE dedupe_review_queue SET status = 'dismissed', resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE id = ?1",
+                [queue_id],
+            )?;
+        }
+        ReviewAction::Merge { keeper_id } => {
+            let loser_id = if keeper_id == image_a {
+                image_b
+            } else if keeper_id == image_b {
+                image_a
+            } else {
+                return Err(ImportError::InvalidKeeper { keeper: keeper_id, a: image_a, b: image_b });
+            };
+
+            // Tags union onto the keeper (§6).
+            for tag in lumenvault_catalog::tags_for_image(conn, loser_id)? {
+                lumenvault_catalog::add_tag(conn, keeper_id, &tag)?;
+            }
+            lumenvault_xmp::sync_sidecar(conn, keeper_id)?;
+
+            // Quarantine the loser's stored blob — quarantine_type =
+            // 'merge_discard', the schema's dedicated case for this
+            // (workplan/SPEC.md §3/§10), distinct from an import-time
+            // original.
+            let (library_id, stored_path): (i64, String) = conn.query_row(
+                "SELECT library_id, stored_path FROM images WHERE id = ?1",
+                [loser_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )?;
+            let stored_path = PathBuf::from(stored_path);
+            if stored_path.exists() {
+                let filename = stored_path.file_name().unwrap_or_default();
+                let quarantine_path = paths.merge_quarantine_path(loser_id, filename);
+                if let Some(parent) = quarantine_path.parent() {
+                    fs::create_dir_all(parent)?;
+                }
+                // Same volume as the blob store (both under the library
+                // root) — a plain rename is always correct here, unlike
+                // import-time quarantine's cross-volume case.
+                fs::rename(&stored_path, &quarantine_path)?;
+
+                let retention_days: i64 = conn.query_row(
+                    "SELECT retention_days FROM app_settings WHERE id = 1",
+                    [],
+                    |row| row.get(0),
+                )?;
+                conn.execute(
+                    "INSERT INTO quarantine (
+                        library_id, quarantine_type, related_image_id, quarantined_path,
+                        original_path, expires_at
+                    ) VALUES (?1, 'merge_discard', ?2, ?3, ?4,
+                              strftime('%Y-%m-%dT%H:%M:%fZ', 'now', ?5 || ' days'))",
+                    params![
+                        library_id,
+                        loser_id,
+                        quarantine_path.to_string_lossy(),
+                        stored_path.to_string_lossy(),
+                        retention_days,
+                    ],
+                )?;
+            }
+
+            conn.execute(
+                "UPDATE images SET status = 'merged', merged_into_id = ?1, merged_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE id = ?2",
+                params![keeper_id, loser_id],
+            )?;
+            conn.execute(
+                "UPDATE dedupe_review_queue SET status = 'merged', resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now')
+                 WHERE id = ?1",
+                [queue_id],
+            )?;
+        }
+    }
+
+    Ok(())
+}
+
+// ── Export (workplan/SPEC.md §7, amended into v1 scope for Milestone 5) ──
+
+/// Copies `image_id`'s stored file plus its `.xmp` sidecar (if one exists)
+/// to `dest_dir`, keeping the currently-stored format verbatim — no format
+/// round-trip, per §7's amendment. Returns the destination file path.
+pub fn export_image(conn: &Connection, image_id: i64, dest_dir: &Path) -> Result<PathBuf, ImportError> {
+    let (stored_path, sidecar_path): (String, Option<String>) = conn.query_row(
+        "SELECT stored_path, sidecar_path FROM images WHERE id = ?1",
+        [image_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let stored_path = Path::new(&stored_path);
+
+    fs::create_dir_all(dest_dir)?;
+    let filename = stored_path.file_name().ok_or_else(|| ImportError::Io(std::io::Error::new(
+        std::io::ErrorKind::InvalidInput,
+        format!("stored path has no filename: {}", stored_path.display()),
+    )))?;
+    let dest_file = dest_dir.join(filename);
+    fs::copy(stored_path, &dest_file)?;
+
+    if let Some(sidecar_path) = sidecar_path {
+        let sidecar_path = Path::new(&sidecar_path);
+        if sidecar_path.exists() {
+            if let Some(sidecar_name) = sidecar_path.file_name() {
+                fs::copy(sidecar_path, dest_dir.join(sidecar_name))?;
+            }
+        }
+    }
+
+    Ok(dest_file)
 }
 
 /// §3 step 2: RAW+JPEG camera-pair auto-detection, run before perceptual
@@ -1030,5 +1241,191 @@ mod tests {
         let conversion_status: String =
             conn.query_row("SELECT conversion_status FROM images WHERE id = ?1", [image_id], |row| row.get(0)).unwrap();
         assert_eq!(conversion_status, "not_applicable");
+    }
+
+    // ── Milestone 5: thumbnail generation, review-queue resolution, export ──
+
+    #[test]
+    fn importing_a_standard_image_generates_and_records_a_grid_thumbnail() {
+        let conn = test_conn();
+        let source_dir = tempfile::tempdir().unwrap();
+        let library_dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(library_dir.path());
+
+        let library_id = ensure_library(&conn, library_dir.path()).unwrap();
+        let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
+        let path = write_png(source_dir.path(), "photo.png", 5);
+
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let outcome = import_file(&ctx, &path).unwrap();
+        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+
+        let thumb_path: String = conn
+            .query_row(
+                "SELECT path FROM thumbnails WHERE image_id = ?1 AND variant = 'grid256'",
+                [image_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(std::path::Path::new(&thumb_path).exists(), "thumbnail file must actually exist on disk");
+        // A real, decodable JPEG — not just a placeholder file.
+        let decoded = image::open(&thumb_path).unwrap();
+        assert!(decoded.width() > 0 && decoded.height() > 0);
+    }
+
+    /// Two distinct-bytes, perceptually-identical images (same
+    /// x/y-derived gradient, only the seed byte in an unused corner of the
+    /// color space differs) — enough to avoid exact-hash collapse while
+    /// still landing well within the default 5-bit Hamming threshold, so a
+    /// real `dedupe_review_queue` row exists to resolve.
+    fn library_with_two_review_candidates(conn: &Connection, library_dir: &std::path::Path) -> (i64, LibraryPaths, i64, i64, i64) {
+        let paths = LibraryPaths::new(library_dir);
+        let source_dir = tempfile::tempdir().unwrap();
+        let library_id = ensure_library(conn, library_dir).unwrap();
+        let batch_id = start_or_resume_batch(conn, library_id, source_dir.path()).unwrap();
+        let path_a = write_png(source_dir.path(), "a.png", 1);
+        let path_b = write_png(source_dir.path(), "b.png", 2);
+
+        let ctx = ImportContext { conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let FileOutcome::Imported { image_id: image_a } = import_file(&ctx, &path_a).unwrap() else {
+            panic!("expected a fresh import for a.png")
+        };
+        let outcome_b = import_file(&ctx, &path_b).unwrap();
+        let image_b = match outcome_b {
+            FileOutcome::Imported { image_id } => image_id,
+            FileOutcome::Collapsed { image_id } => image_id,
+            other => panic!("unexpected outcome for b.png: {other:?}"),
+        };
+
+        let queue_id: i64 = conn
+            .query_row(
+                "SELECT id FROM dedupe_review_queue WHERE (image_a_id = ?1 AND image_b_id = ?2) OR (image_a_id = ?2 AND image_b_id = ?1)",
+                params![image_a, image_b],
+                |row| row.get(0),
+            )
+            .unwrap();
+
+        (library_id, paths, image_a, image_b, queue_id)
+    }
+
+    #[test]
+    fn merging_a_review_pair_unions_tags_quarantines_the_loser_and_marks_state() {
+        let conn = test_conn();
+        let library_dir = tempfile::tempdir().unwrap();
+        let (_library_id, paths, image_a, image_b, queue_id) = library_with_two_review_candidates(&conn, library_dir.path());
+
+        lumenvault_catalog::add_tag(&conn, image_a, "keeper-tag").unwrap();
+        lumenvault_catalog::add_tag(&conn, image_b, "loser-tag").unwrap();
+
+        let loser_stored_path: String =
+            conn.query_row("SELECT stored_path FROM images WHERE id = ?1", [image_b], |row| row.get(0)).unwrap();
+        assert!(std::path::Path::new(&loser_stored_path).exists(), "precondition: loser blob exists before merge");
+
+        resolve_review_pair(&conn, &paths, queue_id, ReviewAction::Merge { keeper_id: image_a }).unwrap();
+
+        // Tags unioned onto the keeper.
+        let keeper_tags = lumenvault_catalog::tags_for_image(&conn, image_a).unwrap();
+        assert!(keeper_tags.contains(&"keeper-tag".to_string()));
+        assert!(keeper_tags.contains(&"loser-tag".to_string()));
+
+        // Loser marked merged.
+        let (status, merged_into): (String, Option<i64>) = conn
+            .query_row("SELECT status, merged_into_id FROM images WHERE id = ?1", [image_b], |row| Ok((row.get(0)?, row.get(1)?)))
+            .unwrap();
+        assert_eq!(status, "merged");
+        assert_eq!(merged_into, Some(image_a));
+
+        // Loser's blob quarantined (moved, not deleted), quarantine_type = merge_discard.
+        assert!(!std::path::Path::new(&loser_stored_path).exists(), "loser blob must be moved out of the store");
+        let (quarantine_type, quarantined_path): (String, String) = conn
+            .query_row(
+                "SELECT quarantine_type, quarantined_path FROM quarantine WHERE related_image_id = ?1 AND quarantine_type = 'merge_discard'",
+                [image_b],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(quarantine_type, "merge_discard");
+        assert!(std::path::Path::new(&quarantined_path).exists(), "the quarantined copy must actually exist");
+
+        // Queue row resolved.
+        let queue_status: String =
+            conn.query_row("SELECT status FROM dedupe_review_queue WHERE id = ?1", [queue_id], |row| row.get(0)).unwrap();
+        assert_eq!(queue_status, "merged");
+    }
+
+    #[test]
+    fn dismissing_a_review_pair_only_changes_the_queue_row() {
+        let conn = test_conn();
+        let library_dir = tempfile::tempdir().unwrap();
+        let (_library_id, paths, image_a, image_b, queue_id) = library_with_two_review_candidates(&conn, library_dir.path());
+
+        let (status_a_before, status_b_before): (String, String) = (
+            conn.query_row("SELECT status FROM images WHERE id = ?1", [image_a], |row| row.get(0)).unwrap(),
+            conn.query_row("SELECT status FROM images WHERE id = ?1", [image_b], |row| row.get(0)).unwrap(),
+        );
+
+        resolve_review_pair(&conn, &paths, queue_id, ReviewAction::Dismiss).unwrap();
+
+        let queue_status: String =
+            conn.query_row("SELECT status FROM dedupe_review_queue WHERE id = ?1", [queue_id], |row| row.get(0)).unwrap();
+        assert_eq!(queue_status, "dismissed");
+
+        let (status_a_after, status_b_after): (String, String) = (
+            conn.query_row("SELECT status FROM images WHERE id = ?1", [image_a], |row| row.get(0)).unwrap(),
+            conn.query_row("SELECT status FROM images WHERE id = ?1", [image_b], |row| row.get(0)).unwrap(),
+        );
+        assert_eq!(status_a_before, status_a_after);
+        assert_eq!(status_b_before, status_b_after);
+
+        let quarantine_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM quarantine WHERE quarantine_type = 'merge_discard'", [], |row| row.get(0)).unwrap();
+        assert_eq!(quarantine_count, 0);
+    }
+
+    #[test]
+    fn resolving_an_already_resolved_entry_twice_is_a_safe_no_op() {
+        let conn = test_conn();
+        let library_dir = tempfile::tempdir().unwrap();
+        let (_library_id, paths, image_a, _image_b, queue_id) = library_with_two_review_candidates(&conn, library_dir.path());
+
+        resolve_review_pair(&conn, &paths, queue_id, ReviewAction::Merge { keeper_id: image_a }).unwrap();
+        // Second call must not error or double-quarantine.
+        resolve_review_pair(&conn, &paths, queue_id, ReviewAction::Merge { keeper_id: image_a }).unwrap();
+
+        let quarantine_count: i64 =
+            conn.query_row("SELECT COUNT(*) FROM quarantine WHERE quarantine_type = 'merge_discard'", [], |row| row.get(0)).unwrap();
+        assert_eq!(quarantine_count, 1);
+    }
+
+    #[test]
+    fn exporting_an_image_copies_the_stored_file_and_its_sidecar() {
+        let conn = test_conn();
+        let source_dir = tempfile::tempdir().unwrap();
+        let library_dir = tempfile::tempdir().unwrap();
+        let export_dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(library_dir.path());
+
+        let library_id = ensure_library(&conn, library_dir.path()).unwrap();
+        let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
+        let path = write_png(source_dir.path(), "photo.png", 9);
+
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let FileOutcome::Imported { image_id } = import_file(&ctx, &path).unwrap() else { panic!("expected Imported") };
+
+        lumenvault_catalog::add_tag(&conn, image_id, "vacation").unwrap();
+        lumenvault_xmp::sync_sidecar(&conn, image_id).unwrap();
+
+        let dest = export_image(&conn, image_id, export_dir.path()).unwrap();
+
+        assert!(dest.exists(), "the exported image file must actually exist");
+        let dest_ext = dest.extension().unwrap().to_string_lossy().to_string();
+        let stored_format: String =
+            conn.query_row("SELECT stored_format FROM images WHERE id = ?1", [image_id], |row| row.get(0)).unwrap();
+        assert_eq!(dest_ext, stored_format, "export must keep the currently-stored format, no un-conversion");
+
+        let exported_sidecar = dest.with_extension("xmp");
+        assert!(exported_sidecar.exists(), "the sidecar must be exported alongside the image");
+        let sidecar_tags = lumenvault_xmp::read_sidecar(&exported_sidecar).unwrap();
+        assert_eq!(sidecar_tags, vec!["vacation".to_string()]);
     }
 }

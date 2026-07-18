@@ -39,6 +39,13 @@
 //! thumbnails, real perceptual hashing of RAW content) remains unbuilt and
 //! un-scheduled — flagged here, not silently papered over.
 
+//! Milestone 5 adds [`write_jpeg_thumbnail`] — grid/preview thumbnail
+//! generation from an already-decoded `DynamicImage`. This lives here
+//! (rather than a new crate) because it's a small, genuinely-needed
+//! extension of "decode": [`probe`] already produces the pixels a thumbnail
+//! needs, and putting thumbnail encoding next to it avoids a second decode
+//! pass or a new crate boundary for one function.
+
 use std::path::Path;
 
 use image::ImageFormat;
@@ -194,6 +201,59 @@ fn probe_jxl(path: &Path) -> Result<Probe, ProbeError> {
     Ok(Probe { format: StandardFormat::Jxl, width, height, image: image::DynamicImage::ImageRgb8(buffer) })
 }
 
+/// Grid/preview thumbnail generation, per workplan/SPEC.md §9.
+///
+/// **Deviation from §9's literal wording**: §9 specifies WebP thumbnails, but
+/// the pure-Rust `image-webp` backend this workspace already depends on only
+/// supports *lossless* encoding (confirmed in
+/// workplan/research/recompression.md) — there is no lossy WebP encoder
+/// available without adding a C dependency, which isn't worth it for a
+/// disposable, fully-regenerable UI convenience copy. This uses JPEG instead
+/// (the `image` crate's encoder is lossy-capable and already a dependency
+/// everywhere in this workspace) — same reasoning as §9's original WebP
+/// choice (cheap, disposable, quality doesn't matter since this isn't a
+/// managed-store asset), just a different codec.
+///
+/// Resizes `image` to fit within `max_dim` x `max_dim` (preserving aspect
+/// ratio, matching a thumbnail's usual "longest edge" convention) and writes
+/// it as a quality-85 JPEG to `dest`. Reuses the already-decoded
+/// `DynamicImage` a caller already has (e.g. from [`probe`]) rather than
+/// re-decoding from bytes.
+pub fn write_jpeg_thumbnail(
+    image: &image::DynamicImage,
+    dest: &Path,
+    max_dim: u32,
+) -> Result<(), ThumbnailError> {
+    let resized = image.resize(max_dim, max_dim, image::imageops::FilterType::Triangle);
+    if let Some(parent) = dest.parent() {
+        std::fs::create_dir_all(parent).map_err(|source| ThumbnailError::Io { path: dest.to_path_buf(), source })?;
+    }
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
+        std::fs::File::create(dest).map_err(|source| ThumbnailError::Io { path: dest.to_path_buf(), source })?,
+        85,
+    );
+    encoder
+        .encode_image(&resized)
+        .map_err(|source| ThumbnailError::Encode { path: dest.to_path_buf(), source })?;
+    Ok(())
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum ThumbnailError {
+    #[error("could not write thumbnail to {path}: {source}")]
+    Io {
+        path: std::path::PathBuf,
+        #[source]
+        source: std::io::Error,
+    },
+    #[error("could not encode thumbnail to {path}: {source}")]
+    Encode {
+        path: std::path::PathBuf,
+        #[source]
+        source: image::ImageError,
+    },
+}
+
 /// Common camera RAW extensions, recognized by filename only — see the
 /// module doc for why this is deliberately not a real RAW decoder. Not
 /// exhaustive (real RAW support per §5 would use `rawler`'s own format
@@ -298,6 +358,21 @@ mod tests {
             let path = std::path::Path::new("photo").with_extension(ext);
             assert_eq!(super::raw_extension(&path), None, "{ext} must not be recognized as RAW");
         }
+    }
+
+    #[test]
+    fn write_jpeg_thumbnail_produces_a_decodable_downscaled_jpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = write_png(dir.path(), "big.png", 800, 400);
+        let probe = super::probe(&source).unwrap();
+
+        let thumb_path = dir.path().join("thumb.jpg");
+        super::write_jpeg_thumbnail(&probe.image, &thumb_path, 256).unwrap();
+
+        assert!(thumb_path.exists());
+        let decoded = image::open(&thumb_path).unwrap();
+        assert!(decoded.width() <= 256 && decoded.height() <= 256);
+        assert_eq!(decoded.width() * 400, decoded.height() * 800, "aspect ratio must be preserved");
     }
 
     #[test]

@@ -1,0 +1,1130 @@
+<title>LumenVault — UI Design</title>
+<style>
+  :root {
+    --bg: #15141a;
+    --surface: #1d1c24;
+    --surface-raised: #24232c;
+    --surface-hover: #2a2933;
+    --border: #302f3a;
+    --border-soft: #24232c;
+    --text: #edeae3;
+    --text-muted: #8d8a99;
+    --text-faint: #5f5d6b;
+    --accent: #c9a24b;
+    --accent-dim: #8a7038;
+    --accent-soft: rgba(201, 162, 75, 0.12);
+    --danger: #b85c4a;
+    --danger-soft: rgba(184, 92, 74, 0.14);
+    --radius: 3px;
+    --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+    --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: var(--bg); color: var(--text);
+    font-family: var(--sans);
+    font-size: 13px;
+    overflow: hidden;
+  }
+  ::selection { background: var(--accent-soft); color: var(--text); }
+  button { font-family: inherit; }
+
+  .app {
+    display: grid;
+    grid-template-columns: 56px 1fr;
+    grid-template-rows: 100%;
+    height: 100vh;
+    width: 100vw;
+  }
+
+  /* ── Nav rail ─────────────────────────────────────────────────────── */
+  .rail {
+    background: var(--surface);
+    border-right: 1px solid var(--border-soft);
+    display: flex; flex-direction: column; align-items: center;
+    padding: 14px 0;
+    gap: 4px;
+  }
+  .rail-mark {
+    width: 28px; height: 28px; border-radius: 6px;
+    background: linear-gradient(155deg, var(--accent), var(--accent-dim));
+    margin-bottom: 18px;
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-weight: 600; font-size: 13px; color: #17151c;
+  }
+  .rail-btn {
+    width: 40px; height: 40px; border-radius: var(--radius);
+    background: transparent; border: none; color: var(--text-muted);
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; position: relative;
+    transition: background 0.12s, color 0.12s;
+  }
+  .rail-btn:hover { background: var(--surface-hover); color: var(--text); }
+  .rail-btn.active { background: var(--accent-soft); color: var(--accent); }
+  .rail-btn svg { width: 19px; height: 19px; }
+  .rail-badge {
+    position: absolute; top: 3px; right: 3px;
+    min-width: 15px; height: 15px; padding: 0 3px;
+    background: var(--accent); color: #17151c;
+    border-radius: 8px; font-size: 9.5px; font-weight: 700;
+    font-family: var(--mono);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .rail-spacer { flex: 1; }
+
+  /* ── Main column ──────────────────────────────────────────────────── */
+  .main { display: flex; flex-direction: column; min-width: 0; height: 100vh; }
+
+  .topbar {
+    height: 52px; min-height: 52px;
+    border-bottom: 1px solid var(--border-soft);
+    display: flex; align-items: center;
+    padding: 0 16px; gap: 14px;
+  }
+  .topbar-title { font-weight: 600; font-size: 14px; letter-spacing: 0.01em; }
+  .topbar-count { color: var(--text-faint); font-family: var(--mono); font-size: 11.5px; }
+  .filters { display: flex; gap: 6px; margin-left: 4px; }
+  .chip {
+    padding: 5px 10px; border-radius: 999px;
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text-muted); font-size: 11.5px; cursor: pointer;
+    display: flex; align-items: center; gap: 5px;
+    transition: border-color 0.12s, color 0.12s;
+  }
+  .chip:hover { color: var(--text); border-color: var(--text-faint); }
+  .chip.on { color: var(--accent); border-color: var(--accent-dim); background: var(--accent-soft); }
+  .chip svg { width: 11px; height: 11px; }
+  .topbar-spacer { flex: 1; }
+  .search {
+    width: 220px; height: 30px; border-radius: var(--radius);
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); font-size: 12px; padding: 0 10px 0 28px;
+    position: relative;
+  }
+  .search-wrap { position: relative; display: flex; align-items: center; }
+  .search-wrap svg { position: absolute; left: 9px; width: 13px; height: 13px; color: var(--text-faint); pointer-events: none; }
+  .search::placeholder { color: var(--text-faint); }
+  .btn {
+    height: 30px; padding: 0 13px; border-radius: var(--radius);
+    border: 1px solid var(--border); background: var(--surface);
+    color: var(--text); font-size: 12px; font-weight: 500; cursor: pointer;
+    display: flex; align-items: center; gap: 6px;
+    transition: background 0.12s, border-color 0.12s;
+  }
+  .btn:hover { background: var(--surface-hover); border-color: var(--text-faint); }
+  .btn-primary {
+    background: var(--accent); border-color: var(--accent); color: #17151c; font-weight: 600;
+  }
+  .btn-primary:hover { background: #d6ad55; }
+  .btn svg { width: 13px; height: 13px; }
+
+  /* ── Grid ─────────────────────────────────────────────────────────── */
+  .gridwrap { flex: 1; overflow-y: auto; padding: 1px; background: var(--border-soft); }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(150px, 1fr));
+    gap: 1px;
+  }
+  .thumb {
+    position: relative; aspect-ratio: 1; overflow: hidden;
+    cursor: pointer; background: var(--surface);
+  }
+  .thumb img, .thumb .fake-img { width: 100%; height: 100%; object-fit: cover; display: block; }
+  .thumb-overlay {
+    position: absolute; inset: 0;
+    background: linear-gradient(to top, rgba(10,9,13,0.82) 0%, rgba(10,9,13,0.0) 42%);
+    opacity: 0; transition: opacity 0.1s;
+    display: flex; flex-direction: column; justify-content: flex-end;
+    padding: 7px 8px;
+  }
+  .thumb:hover .thumb-overlay, .thumb.selected .thumb-overlay { opacity: 1; }
+  .thumb-meta { display: flex; align-items: center; justify-content: space-between; }
+  .thumb-date { font-family: var(--mono); font-size: 10px; color: #d9d6ce; }
+  .verified-glyph {
+    width: 13px; height: 13px; opacity: 0.55;
+    transition: opacity 0.1s;
+  }
+  .thumb:hover .verified-glyph { opacity: 1; }
+  .verified-glyph.always {
+    position: absolute; top: 6px; right: 6px; opacity: 0.38; z-index: 1;
+  }
+  .thumb:hover .verified-glyph.always { opacity: 0; }
+  .thumb-tags { display: flex; gap: 3px; margin-top: 4px; flex-wrap: wrap; }
+  .thumb-tag {
+    font-size: 9px; padding: 1px 5px; border-radius: 999px;
+    background: rgba(237,234,227,0.12); color: #e4e1da; font-family: var(--mono);
+  }
+  .thumb.selected { outline: 2px solid var(--accent); outline-offset: -2px; }
+  .thumb-select-dot {
+    position: absolute; top: 6px; left: 6px; width: 15px; height: 15px;
+    border-radius: 50%; border: 1.5px solid rgba(237,234,227,0.5);
+    opacity: 0; transition: opacity 0.1s, background 0.1s, border-color 0.1s;
+  }
+  .thumb:hover .thumb-select-dot, .thumb.selected .thumb-select-dot { opacity: 1; }
+  .thumb.selected .thumb-select-dot { background: var(--accent); border-color: var(--accent); }
+
+  /* ── Detail drawer ────────────────────────────────────────────────── */
+  .drawer-scrim {
+    position: fixed; inset: 0; background: rgba(10,9,13,0.5);
+    opacity: 0; pointer-events: none; transition: opacity 0.16s;
+    z-index: 10;
+  }
+  .drawer-scrim.open { opacity: 1; pointer-events: auto; }
+  .drawer {
+    position: fixed; top: 0; right: 0; bottom: 0; width: 420px;
+    background: var(--surface); border-left: 1px solid var(--border);
+    transform: translateX(100%); transition: transform 0.18s cubic-bezier(.2,.7,.3,1);
+    z-index: 11; display: flex; flex-direction: column;
+  }
+  .drawer.open { transform: translateX(0); }
+  .drawer-preview { aspect-ratio: 4/3; background: var(--bg); position: relative; flex-shrink: 0; }
+  .drawer-preview .fake-img { width: 100%; height: 100%; }
+  .drawer-close {
+    position: absolute; top: 10px; right: 10px; width: 26px; height: 26px;
+    border-radius: 50%; background: rgba(10,9,13,0.55); border: none;
+    color: #efece5; cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .drawer-close:hover { background: rgba(10,9,13,0.8); }
+  .drawer-body { flex: 1; overflow-y: auto; padding: 16px 18px 20px; }
+  .drawer-filename { font-size: 13.5px; font-weight: 600; margin-bottom: 2px; word-break: break-all; }
+  .drawer-sub { color: var(--text-muted); font-size: 11.5px; margin-bottom: 16px; }
+  .meta-table { width: 100%; border-collapse: collapse; margin-bottom: 18px; }
+  .meta-table tr { border-bottom: 1px solid var(--border-soft); }
+  .meta-table tr:last-child { border-bottom: none; }
+  .meta-table td { padding: 6px 0; font-size: 11.5px; vertical-align: top; }
+  .meta-table td:first-child { color: var(--text-faint); width: 108px; }
+  .meta-table td:last-child { font-family: var(--mono); color: var(--text); }
+  .verified-row { display: flex; align-items: center; gap: 6px; color: var(--accent); }
+  .section-label {
+    font-size: 10px; letter-spacing: 0.08em; text-transform: uppercase;
+    color: var(--text-faint); margin-bottom: 9px; font-weight: 600;
+  }
+  .tag-row { display: flex; flex-wrap: wrap; gap: 6px; margin-bottom: 22px; }
+  .tag-chip {
+    display: flex; align-items: center; gap: 5px;
+    background: var(--surface-raised); border: 1px solid var(--border);
+    border-radius: 999px; padding: 4px 6px 4px 10px; font-size: 11.5px;
+  }
+  .tag-chip button {
+    width: 14px; height: 14px; border-radius: 50%; border: none;
+    background: transparent; color: var(--text-faint); cursor: pointer;
+    display: flex; align-items: center; justify-content: center; padding: 0;
+  }
+  .tag-chip button:hover { color: var(--danger); background: var(--danger-soft); }
+  .tag-add {
+    background: transparent; border: 1px dashed var(--border);
+    color: var(--text-faint); border-radius: 999px; padding: 4px 12px;
+    font-size: 11.5px; cursor: pointer;
+  }
+  .tag-add:hover { border-color: var(--accent-dim); color: var(--accent); }
+
+  /* ── Review queue ─────────────────────────────────────────────────── */
+  .review-list { flex: 1; overflow-y: auto; padding: 18px 22px; max-width: 900px; }
+  .review-intro { color: var(--text-muted); font-size: 12px; margin-bottom: 18px; line-height: 1.5; max-width: 560px; }
+  .review-pair {
+    border: 1px solid var(--border); border-radius: 6px;
+    margin-bottom: 14px; overflow: hidden; background: var(--surface);
+  }
+  .review-pair-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 11px 14px; cursor: pointer;
+  }
+  .review-pair-head:hover { background: var(--surface-hover); }
+  .review-pair-title { font-size: 12.5px; font-weight: 500; }
+  .review-pair-sub { color: var(--text-faint); font-family: var(--mono); font-size: 11px; margin-top: 2px; }
+  .hamming-badge {
+    font-family: var(--mono); font-size: 10.5px; color: var(--accent);
+    background: var(--accent-soft); border-radius: 999px; padding: 2px 9px;
+  }
+  .review-compare {
+    display: grid; grid-template-columns: 1fr 1fr; gap: 1px;
+    background: var(--border-soft); border-top: 1px solid var(--border);
+  }
+  .review-candidate { background: var(--surface); padding: 14px; position: relative; }
+  .review-candidate.suggested { background: #211f26; }
+  .review-candidate-img { aspect-ratio: 4/3; margin-bottom: 10px; position: relative; border-radius: 3px; overflow: hidden; }
+  .suggested-badge {
+    position: absolute; top: 8px; left: 8px;
+    background: var(--accent); color: #17151c; font-size: 9.5px; font-weight: 700;
+    padding: 2px 7px; border-radius: 999px; letter-spacing: 0.03em;
+  }
+  .candidate-meta { font-family: var(--mono); font-size: 11px; color: var(--text-muted); line-height: 1.7; }
+  .candidate-meta b { color: var(--text); font-weight: 500; }
+  .review-actions {
+    display: flex; gap: 8px; padding: 12px 14px;
+    border-top: 1px solid var(--border); background: var(--surface);
+  }
+  .review-actions .btn { flex: 1; justify-content: center; }
+
+  /* ── Empty / import ───────────────────────────────────────────────── */
+  .modal-scrim {
+    position: fixed; inset: 0; background: rgba(10,9,13,0.6);
+    display: none; align-items: center; justify-content: center; z-index: 20;
+  }
+  .modal-scrim.open { display: flex; }
+  .modal {
+    width: 420px; background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; padding: 22px;
+  }
+  .modal h3 { margin: 0 0 6px; font-size: 15px; }
+  .modal p { color: var(--text-muted); font-size: 12px; line-height: 1.6; margin: 0 0 16px; }
+  .modal-drop {
+    border: 1.5px dashed var(--border); border-radius: 6px; padding: 26px;
+    text-align: center; color: var(--text-faint); font-size: 12px; margin-bottom: 16px;
+  }
+  .modal-row { display: flex; align-items: center; justify-content: space-between; padding: 9px 0; border-top: 1px solid var(--border-soft); font-size: 12px; }
+  .toggle { width: 34px; height: 19px; border-radius: 999px; background: var(--border); position: relative; cursor: pointer; }
+  .toggle.on { background: var(--accent-dim); }
+  .toggle::after { content: ''; position: absolute; width: 15px; height: 15px; border-radius: 50%; background: var(--text); top: 2px; left: 2px; transition: left 0.12s; }
+  .toggle.on::after { left: 17px; background: #17151c; }
+  .modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+
+  /* ── Filter popovers ──────────────────────────────────────────────── */
+  .chip { position: relative; }
+  .chip .count { font-family: var(--mono); font-size: 10px; opacity: 0.7; }
+  .popover {
+    position: absolute; top: calc(100% + 6px); left: 0;
+    width: 236px; background: var(--surface-raised); border: 1px solid var(--border);
+    border-radius: 6px; box-shadow: 0 12px 28px rgba(0,0,0,0.45);
+    padding: 6px; z-index: 30; display: none;
+  }
+  .popover.open { display: block; }
+  .popover-item {
+    display: flex; align-items: center; gap: 8px;
+    padding: 6px 8px; border-radius: 4px; cursor: pointer; font-size: 12px;
+  }
+  .popover-item:hover { background: var(--surface-hover); }
+  .popover-item .box {
+    width: 13px; height: 13px; border-radius: 3px; border: 1.5px solid var(--text-faint);
+    flex-shrink: 0; display: flex; align-items: center; justify-content: center;
+  }
+  .popover-item.checked .box { background: var(--accent); border-color: var(--accent); }
+  .popover-item.checked .box svg { width: 9px; height: 9px; color: #17151c; }
+  .popover-item .label { flex: 1; }
+  .popover-item .n { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
+  .popover-divider { height: 1px; background: var(--border); margin: 5px 2px; }
+  .popover-foot { display: flex; justify-content: space-between; padding: 6px 8px 2px; }
+  .popover-link { font-size: 11px; color: var(--text-faint); background: none; border: none; cursor: pointer; padding: 0; }
+  .popover-link:hover { color: var(--accent); }
+  .popover-date-custom { padding: 6px 8px 2px; display: flex; gap: 6px; align-items: center; }
+  .popover-date-custom input {
+    flex: 1; width: 0; background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); font-size: 11px; border-radius: 4px; padding: 5px 6px; font-family: var(--mono);
+  }
+
+  .sort-btn { display: flex; align-items: center; gap: 6px; }
+  .sort-btn svg.chev { width: 9px; height: 9px; opacity: 0.6; }
+  .popover.sort-popover { width: 172px; }
+
+  .active-filters {
+    display: none; align-items: center; gap: 6px; flex-wrap: wrap;
+    padding: 8px 16px; border-bottom: 1px solid var(--border-soft);
+  }
+  .active-filters.show { display: flex; }
+  .active-filters-label { font-size: 10.5px; color: var(--text-faint); margin-right: 2px; }
+  .pill {
+    display: flex; align-items: center; gap: 5px;
+    background: var(--accent-soft); color: var(--accent); border: 1px solid var(--accent-dim);
+    border-radius: 999px; padding: 3px 6px 3px 10px; font-size: 11px;
+  }
+  .pill button {
+    width: 13px; height: 13px; border: none; background: none; color: var(--accent);
+    cursor: pointer; display: flex; align-items: center; justify-content: center; padding: 0; opacity: 0.75;
+  }
+  .pill button:hover { opacity: 1; }
+  .clear-all { font-size: 11px; color: var(--text-faint); background: none; border: none; cursor: pointer; margin-left: 4px; }
+  .clear-all:hover { color: var(--danger); }
+
+  .empty-results { padding: 60px 20px; text-align: center; color: var(--text-faint); font-size: 12.5px; grid-column: 1 / -1; }
+
+  /* ── Expand-to-lightbox trigger ───────────────────────────────────── */
+  .drawer-expand {
+    position: absolute; bottom: 10px; right: 10px; height: 28px; padding: 0 11px;
+    border-radius: 999px; background: rgba(10,9,13,0.6); border: none;
+    color: #efece5; cursor: pointer; font-size: 11px; font-weight: 500;
+    display: flex; align-items: center; gap: 6px;
+  }
+  .drawer-expand:hover { background: rgba(10,9,13,0.85); }
+  .drawer-expand svg { width: 12px; height: 12px; }
+  .drawer-preview { cursor: zoom-in; }
+
+  /* ── Lightbox ─────────────────────────────────────────────────────── */
+  .lightbox {
+    position: fixed; inset: 0; background: rgba(9,8,11,0.97);
+    z-index: 40; display: none; flex-direction: column;
+  }
+  .lightbox.open { display: flex; }
+  .lightbox-topbar {
+    height: 48px; flex-shrink: 0; display: flex; align-items: center;
+    padding: 0 14px; gap: 12px; color: var(--text-muted); font-size: 12px;
+  }
+  .lightbox-filename { color: var(--text); font-weight: 500; font-family: var(--mono); font-size: 12px; }
+  .lightbox-counter { font-family: var(--mono); font-size: 11px; color: var(--text-faint); }
+  .lightbox-topbar-spacer { flex: 1; }
+  .lightbox-iconbtn {
+    width: 30px; height: 30px; border-radius: 6px; background: transparent; border: none;
+    color: var(--text-muted); cursor: pointer; display: flex; align-items: center; justify-content: center;
+  }
+  .lightbox-iconbtn:hover { background: var(--surface-hover); color: var(--text); }
+  .lightbox-iconbtn svg { width: 15px; height: 15px; }
+
+  .lightbox-stage {
+    flex: 1; position: relative; overflow: hidden;
+    display: flex; align-items: center; justify-content: center;
+    cursor: grab; user-select: none;
+  }
+  .lightbox-stage.panning { cursor: grabbing; }
+  .lightbox-img {
+    width: min(80vw, 1100px); aspect-ratio: 4/3; border-radius: 2px;
+    will-change: transform; transition: transform 0.02s linear;
+  }
+
+  .lightbox-nav {
+    position: absolute; top: 0; bottom: 0; width: 84px;
+    display: flex; align-items: center; z-index: 2;
+    background: none; border: none; color: rgba(237,234,227,0.35); cursor: pointer;
+    transition: color 0.12s, background 0.12s;
+  }
+  .lightbox-nav:hover { color: var(--text); background: linear-gradient(90deg, rgba(0,0,0,0.25), transparent); }
+  .lightbox-nav.next { right: 0; justify-content: flex-end; }
+  .lightbox-nav.next:hover { background: linear-gradient(270deg, rgba(0,0,0,0.25), transparent); }
+  .lightbox-nav.prev { left: 0; justify-content: flex-start; }
+  .lightbox-nav svg { width: 30px; height: 30px; margin: 0 18px; }
+
+  .lightbox-toolbar {
+    flex-shrink: 0; height: 52px; display: flex; align-items: center; justify-content: center;
+    gap: 4px; padding: 0 14px;
+  }
+  .lightbox-zoomgroup {
+    display: flex; align-items: center; gap: 2px; background: var(--surface);
+    border: 1px solid var(--border); border-radius: 999px; padding: 3px; margin-right: 10px;
+  }
+  .lightbox-zoomgroup .lightbox-iconbtn { width: 26px; height: 26px; }
+  .lightbox-zoom-pct {
+    font-family: var(--mono); font-size: 11px; color: var(--text-muted);
+    width: 46px; text-align: center; cursor: pointer;
+  }
+  .lightbox-zoom-pct:hover { color: var(--accent); }
+
+  .toast {
+    position: fixed; bottom: 78px; left: 50%; transform: translateX(-50%) translateY(8px);
+    background: var(--surface-raised); border: 1px solid var(--border); color: var(--text);
+    padding: 8px 16px; border-radius: 999px; font-size: 12px;
+    opacity: 0; pointer-events: none; transition: opacity 0.15s, transform 0.15s;
+    z-index: 50; display: flex; align-items: center; gap: 7px;
+  }
+  .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  .toast svg { width: 13px; height: 13px; color: var(--accent); }
+</style>
+
+<div class="app">
+  <div class="rail">
+    <div class="rail-mark">LV</div>
+    <button class="rail-btn active" data-view="grid" title="All Photos">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+    </button>
+    <button class="rail-btn" data-view="review" title="Review Queue">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12l4-8h10l4 8-4 8H7z"/><path d="M9 12l2 2 4-4"/></svg>
+      <span class="rail-badge">3</span>
+    </button>
+    <button class="rail-btn" title="Tags">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M20.59 13.41L11 3.83A2 2 0 009.59 3.24L3 3v6.59a2 2 0 00.59 1.41l9.59 9.59a2 2 0 002.82 0l6.59-6.59a2 2 0 000-2.82z"/><circle cx="7.5" cy="7.5" r="1.2" fill="currentColor" stroke="none"/></svg>
+    </button>
+    <div class="rail-spacer"></div>
+    <button class="rail-btn" title="Import" onclick="document.getElementById('importModal').classList.add('open')">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"/></svg>
+    </button>
+  </div>
+
+  <div class="main">
+    <!-- GRID VIEW -->
+    <div id="view-grid">
+      <div class="topbar">
+        <span class="topbar-title">All Photos</span>
+        <span class="topbar-count" id="itemCount">140 items</span>
+        <div class="filters" id="filterBar"></div>
+        <div class="topbar-spacer"></div>
+        <div class="chip sort-btn" id="sortChip" onclick="togglePop('sortPop', event)">
+          <span id="sortLabel">Newest captured</span>
+          <svg class="chev" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
+          <div class="popover sort-popover" id="sortPop" onclick="event.stopPropagation()"></div>
+        </div>
+        <div class="search-wrap">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          <input class="search" id="searchInput" placeholder="Search tags, camera, filename…">
+        </div>
+        <button class="btn btn-primary" onclick="document.getElementById('importModal').classList.add('open')">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v12m0 0l-4-4m4 4l4-4M5 20h14"/></svg>
+          Import
+        </button>
+      </div>
+      <div class="active-filters" id="activeFilters"></div>
+      <div class="gridwrap">
+        <div class="grid" id="grid"></div>
+      </div>
+    </div>
+
+    <!-- REVIEW QUEUE VIEW -->
+    <div id="view-review" style="display:none; flex-direction: column; flex: 1; min-height: 0;">
+      <div class="topbar">
+        <span class="topbar-title">Review Queue</span>
+        <span class="topbar-count">3 pending</span>
+      </div>
+      <div class="review-list">
+        <p class="review-intro">These photos look nearly identical (≤5-bit perceptual difference). Nothing is deleted until you confirm — the copy you don't keep moves to quarantine, recoverable for 30 days.</p>
+        <div id="review-pairs"></div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div class="drawer-scrim" id="drawerScrim" onclick="closeDrawer()"></div>
+<div class="drawer" id="drawer">
+  <div class="drawer-preview" id="drawerPreview" onclick="openLightbox(currentItemId)">
+    <button class="drawer-close" onclick="event.stopPropagation(); closeDrawer()">
+      <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+    <button class="drawer-expand" onclick="event.stopPropagation(); openLightbox(currentItemId)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3H5a2 2 0 00-2 2v4m18 0V5a2 2 0 00-2-2h-4m0 18h4a2 2 0 002-2v-4M3 15v4a2 2 0 002 2h4"/></svg>
+      View full size
+    </button>
+  </div>
+  <div class="drawer-body">
+    <div class="drawer-filename" id="d-filename">IMG_4471.jxl</div>
+    <div class="drawer-sub" id="d-sub">Converted from JPEG · 4032×3024</div>
+
+    <table class="meta-table">
+      <tr><td>Integrity</td><td><span class="verified-row" id="d-verified">Hash verified</span></td></tr>
+      <tr><td>Captured</td><td id="d-captured">2026-06-14 18:22:07</td></tr>
+      <tr><td>Camera</td><td id="d-camera">FUJIFILM X-T5</td></tr>
+      <tr><td>Original hash</td><td id="d-hash">a3f9c2…04b1</td></tr>
+      <tr><td>File size</td><td id="d-size">3.1 MB → 2.4 MB</td></tr>
+    </table>
+
+    <div class="section-label">Tags</div>
+    <div class="tag-row" id="d-tags"></div>
+
+    <div class="section-label">In this library since</div>
+    <div class="meta-table" style="margin-bottom:0">
+      <tr><td>Imported</td><td>2026-07-02</td></tr>
+    </div>
+  </div>
+</div>
+
+<div class="modal-scrim" id="importModal">
+  <div class="modal">
+    <h3>Import a folder</h3>
+    <p>LumenVault moves files into the vault — the originals leave their current location. Nothing is deleted outright; anything replaced or superseded is kept in quarantine for 30 days.</p>
+    <div class="modal-drop">Drop a folder here, or choose one</div>
+    <div class="modal-row">
+      <span>Convert to save space (lossless)</span>
+      <div class="toggle on"></div>
+    </div>
+    <div class="modal-row">
+      <span>Scan subfolders</span>
+      <div class="toggle on"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="document.getElementById('importModal').classList.remove('open')">Cancel</button>
+      <button class="btn btn-primary">Choose Folder…</button>
+    </div>
+  </div>
+</div>
+
+<div class="lightbox" id="lightbox">
+  <div class="lightbox-topbar">
+    <span class="lightbox-filename" id="lb-filename">IMG_4471.jxl</span>
+    <span class="lightbox-counter" id="lb-counter">3 of 89</span>
+    <div class="lightbox-topbar-spacer"></div>
+    <button class="lightbox-iconbtn" title="Copy file path" onclick="copyPath()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 01-1-1V4a1 1 0 011-1h10a1 1 0 011 1v1"/></svg>
+    </button>
+    <button class="lightbox-iconbtn" title="Export…" onclick="exportImage()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+    </button>
+    <button class="lightbox-iconbtn" title="Close (Esc)" onclick="closeLightbox()">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button>
+  </div>
+  <div class="lightbox-stage" id="lb-stage">
+    <button class="lightbox-nav prev" onclick="event.stopPropagation(); lightboxStep(-1)" title="Previous (←)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+    </button>
+    <div class="lightbox-img" id="lb-img"></div>
+    <button class="lightbox-nav next" onclick="event.stopPropagation(); lightboxStep(1)" title="Next (→)">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+    </button>
+  </div>
+  <div class="lightbox-toolbar">
+    <div class="lightbox-zoomgroup">
+      <button class="lightbox-iconbtn" title="Zoom out" onclick="lightboxZoomBy(-0.25)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6"/></svg>
+      </button>
+      <span class="lightbox-zoom-pct" id="lb-zoompct" title="Reset to fit (0)" onclick="lightboxResetZoom()">100%</span>
+      <button class="lightbox-iconbtn" title="Zoom in" onclick="lightboxZoomBy(0.25)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M11 8v6M8 11h6"/></svg>
+      </button>
+    </div>
+    <span style="color: var(--text-faint); font-size: 11px;">Scroll to zoom · drag to pan · ← → to browse</span>
+  </div>
+</div>
+
+<div class="toast" id="toast"></div>
+
+<script>
+function vg(size) {
+  return `<svg class="verified-glyph" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2l7 3v6c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V5z"/><path d="M9 12l2 2 4-4"/></svg>`;
+}
+document.getElementById('d-verified').innerHTML = vg(13) + ' Hash verified';
+
+const PALETTES = [
+  ['#5b7a8a','#2e3f49'], ['#8a6a4f','#3f2f22'], ['#6b7a4f','#333f22'],
+  ['#7a5b8a','#3f2e49'], ['#8a4f5b','#3f2229'], ['#4f8a7a','#223f37'],
+  ['#8a7a4f','#3f3722'], ['#5b6b8a','#2e343f'], ['#7a8a5b','#373f2e'],
+];
+function fakeImg(seed) {
+  const p = PALETTES[seed % PALETTES.length];
+  const angle = (seed * 37) % 360;
+  return `background: linear-gradient(${angle}deg, ${p[0]}, ${p[1]});`;
+}
+
+const CAMERAS = ['FUJIFILM X-T5','Canon EOS R6','Sony A7 IV','iPhone 15 Pro','Nikon Z6 III'];
+const TAGS = ['family','trip-2026','portrait','landscape','concert','friends','pets','sunset','archive'];
+const SOURCES = ['D:/Photos/2026 Trip', 'C:/Users/chris/Pictures/Camera Roll', 'D:/Photos/Archive/2024', 'E:/SD Card Backups'];
+// Weighted toward JPEG/RAW, matching a realistic personal library; matches
+// workplan/SPEC.md §4's actual conversion matrix for storedFormat, not a
+// separate invented mapping.
+const ORIGINAL_FORMATS = ['jpeg','jpeg','jpeg','jpeg','raw','raw','png','webp','tiff','gif'];
+function storedFormatFor(originalFormat) {
+  // §4: JPEG/PNG/BMP → JXL; TIFF → TIFF (recompressed in place); everything
+  // else (WebP, GIF, RAW, ...) has no defined conversion path.
+  if (originalFormat === 'jpeg' || originalFormat === 'png' || originalFormat === 'bmp') return 'jxl';
+  return originalFormat;
+}
+
+const NOW = new Date('2026-07-18T12:00:00');
+function daysAgo(n) { return new Date(NOW.getTime() - n * 86400000); }
+
+function randTags(seed) {
+  const n = seed % 3;
+  const out = [];
+  for (let i=0;i<n;i++) out.push(TAGS[(seed*7+i*13)%TAGS.length]);
+  return out;
+}
+
+const ITEMS = [];
+for (let i=0;i<140;i++) {
+  const originalFormat = ORIGINAL_FORMATS[i % ORIGINAL_FORMATS.length];
+  const capturedAt = daysAgo((i * 37) % 640); // spread across ~21 months, so "This year"/"This month" presets have real variety
+  ITEMS.push({
+    id: i,
+    filename: `IMG_${4400+i}.${originalFormat === 'raw' ? 'cr2' : originalFormat}`,
+    originalFormat,
+    storedFormat: storedFormatFor(originalFormat),
+    capturedAt,
+    importedAt: daysAgo((i * 11) % 60),
+    camera: CAMERAS[i % CAMERAS.length],
+    source: SOURCES[i % SOURCES.length],
+    tags: randTags(i),
+    sizeBytes: 1_800_000 + ((i * 96731) % 4_200_000),
+  });
+}
+
+// ── Filter / sort / search state ──
+const state = {
+  dateRange: null,            // {label, start: Date|null, end: Date|null}
+  formats: new Set(),         // originalFormat values
+  sources: new Set(),
+  tags: new Set(),
+  sort: 'captured-desc',
+  query: '',
+};
+
+const DATE_PRESETS = [
+  {label: 'Today', days: 1},
+  {label: 'This week', days: 7},
+  {label: 'This month', days: 31},
+  {label: 'This year', days: 366},
+];
+const SORT_OPTIONS = [
+  {key: 'captured-desc', label: 'Newest captured'},
+  {key: 'captured-asc', label: 'Oldest captured'},
+  {key: 'imported-desc', label: 'Recently imported'},
+  {key: 'filename-asc', label: 'Filename (A–Z)'},
+  {key: 'size-desc', label: 'File size (largest)'},
+];
+
+function matchesFilters(item) {
+  if (state.dateRange && state.dateRange.start && item.capturedAt < state.dateRange.start) return false;
+  if (state.dateRange && state.dateRange.end && item.capturedAt > state.dateRange.end) return false;
+  if (state.formats.size && !state.formats.has(item.originalFormat)) return false;
+  if (state.sources.size && !state.sources.has(item.source)) return false;
+  if (state.tags.size && !item.tags.some(t => state.tags.has(t))) return false;
+  if (state.query) {
+    const q = state.query.toLowerCase();
+    const hay = `${item.filename} ${item.camera} ${item.tags.join(' ')}`.toLowerCase();
+    if (!hay.includes(q)) return false;
+  }
+  return true;
+}
+
+function sortItems(items) {
+  const sorted = items.slice();
+  switch (state.sort) {
+    case 'captured-desc': sorted.sort((a,b) => b.capturedAt - a.capturedAt); break;
+    case 'captured-asc': sorted.sort((a,b) => a.capturedAt - b.capturedAt); break;
+    case 'imported-desc': sorted.sort((a,b) => b.importedAt - a.importedAt); break;
+    case 'filename-asc': sorted.sort((a,b) => a.filename.localeCompare(b.filename)); break;
+    case 'size-desc': sorted.sort((a,b) => b.sizeBytes - a.sizeBytes); break;
+  }
+  return sorted;
+}
+
+function fmtDate(d) { return d.toISOString().slice(0,10); }
+function fmtSize(bytes) { return (bytes / 1_000_000).toFixed(1) + ' MB'; }
+
+const gridEl = document.getElementById('grid');
+const countEl = document.getElementById('itemCount');
+// The list lightbox/drawer navigation walks — always the currently
+// filtered+sorted set, so "next" never jumps outside what you were actually
+// browsing.
+let visibleItems = ITEMS.slice();
+let currentItemId = null;
+
+function renderGrid() {
+  const visible = sortItems(ITEMS.filter(matchesFilters));
+  visibleItems = visible;
+  countEl.textContent = `${visible.length} item${visible.length === 1 ? '' : 's'}`;
+
+  if (visible.length === 0) {
+    gridEl.innerHTML = `<div class="empty-results">Nothing matches these filters.<br><button class="popover-link" style="margin-top:6px" onclick="clearAllFilters()">Clear filters</button></div>`;
+    return;
+  }
+
+  gridEl.innerHTML = visible.map(item => `
+    <div class="thumb" onclick="openDrawer(${item.id})">
+      <div class="fake-img" style="${fakeImg(item.id)}"></div>
+      ${vg(13).replace('verified-glyph', 'verified-glyph always')}
+      <div class="thumb-select-dot"></div>
+      <div class="thumb-overlay">
+        <div class="thumb-meta">
+          <span class="thumb-date">${fmtDate(item.capturedAt)}</span>
+          ${vg(12)}
+        </div>
+        ${item.tags.length ? `<div class="thumb-tags">${item.tags.map(t=>`<span class="thumb-tag">${t}</span>`).join('')}</div>` : ''}
+      </div>
+    </div>
+  `).join('');
+}
+
+function openDrawer(i) {
+  const item = ITEMS[i];
+  currentItemId = i;
+  document.querySelectorAll('.thumb').forEach(t=>t.classList.remove('selected'));
+  const el = Array.from(gridEl.children).find(c => c.getAttribute('onclick') === `openDrawer(${i})`);
+  el?.classList.add('selected');
+  document.getElementById('drawerPreview').style.background = fakeImg(i).replace('background:','');
+  document.getElementById('drawerPreview').querySelector('.fake-img')?.remove();
+  document.getElementById('d-filename').textContent = item.filename;
+  document.getElementById('d-sub').textContent = item.storedFormat !== item.originalFormat
+    ? `Converted from ${item.originalFormat.toUpperCase()} · 4032×3024`
+    : `${item.originalFormat.toUpperCase()} · 4032×3024`;
+  document.getElementById('d-camera').textContent = item.camera;
+  document.getElementById('d-hash').textContent = (i*2654435761 >>> 0).toString(16).padStart(8,'0') + '…' + ((i*40503) >>> 0).toString(16).slice(0,4);
+  document.getElementById('d-captured').textContent = item.capturedAt.toISOString().slice(0,16).replace('T',' ');
+  document.getElementById('d-size').textContent = item.storedFormat !== item.originalFormat
+    ? `${fmtSize(item.sizeBytes)} → ${fmtSize(item.sizeBytes * 0.78)}`
+    : fmtSize(item.sizeBytes);
+  document.getElementById('d-tags').innerHTML = item.tags.map(t=>`<span class="tag-chip">${t}<button onclick="event.stopPropagation()">×</button></span>`).join('') + `<button class="tag-add">+ Add tag</button>`;
+  document.getElementById('drawer').classList.add('open');
+  document.getElementById('drawerScrim').classList.add('open');
+}
+function closeDrawer() {
+  document.getElementById('drawer').classList.remove('open');
+  document.getElementById('drawerScrim').classList.remove('open');
+  document.querySelectorAll('.thumb').forEach(t=>t.classList.remove('selected'));
+}
+
+// ── Lightbox: full-size view, prev/next, scroll-to-zoom + pan ──────────
+const lightboxEl = document.getElementById('lightbox');
+const lbImgEl = document.getElementById('lb-img');
+const lbStageEl = document.getElementById('lb-stage');
+let lbZoom = { scale: 1, tx: 0, ty: 0 };
+let lbPanning = false, lbPanStart = { x: 0, y: 0, tx: 0, ty: 0 };
+
+function lightboxIndex() {
+  return visibleItems.findIndex(it => it.id === currentItemId);
+}
+
+function openLightbox(id) {
+  currentItemId = id;
+  lbZoom = { scale: 1, tx: 0, ty: 0 };
+  lbImgEl.style.transformOrigin = '50% 50%';
+  renderLightbox();
+  lightboxEl.classList.add('open');
+}
+function closeLightbox() {
+  lightboxEl.classList.remove('open');
+}
+
+function renderLightbox() {
+  const idx = lightboxIndex();
+  const item = visibleItems[idx];
+  if (!item) return;
+  lbImgEl.style.background = fakeImg(item.id).replace('background:', '');
+  document.getElementById('lb-filename').textContent = item.filename;
+  document.getElementById('lb-counter').textContent = `${idx + 1} of ${visibleItems.length}`;
+  applyLbTransform();
+}
+
+function lightboxStep(delta) {
+  const idx = lightboxIndex();
+  const next = idx + delta;
+  if (next < 0 || next >= visibleItems.length) return; // at an edge — a real build would disable/hide the arrow here
+  currentItemId = visibleItems[next].id;
+  lbZoom = { scale: 1, tx: 0, ty: 0 }; // fresh image starts back at fit, matching most viewers' convention
+  lbImgEl.style.transformOrigin = '50% 50%';
+  renderLightbox();
+}
+
+function applyLbTransform() {
+  lbImgEl.style.transform = `translate(${lbZoom.tx}px, ${lbZoom.ty}px) scale(${lbZoom.scale})`;
+  document.getElementById('lb-zoompct').textContent = Math.round(lbZoom.scale * 100) + '%';
+  lbStageEl.style.cursor = lbZoom.scale > 1 ? 'grab' : 'default';
+}
+
+function lightboxResetZoom() {
+  lbZoom = { scale: 1, tx: 0, ty: 0 };
+  lbImgEl.style.transformOrigin = '50% 50%';
+  applyLbTransform();
+}
+
+function lightboxZoomBy(delta, clientX, clientY) {
+  const prevScale = lbZoom.scale;
+  const newScale = Math.min(4, Math.max(1, prevScale + delta));
+  if (newScale === prevScale) return;
+
+  // Anchor the zoom on the cursor by moving transform-origin to its
+  // position over the image itself (not the stage — the image is letterboxed
+  // and smaller than the stage, so those two coordinate spaces differ).
+  // Falls back to centered zoom for the +/- buttons and keyboard shortcuts,
+  // which have no cursor position to anchor on.
+  if (clientX !== undefined) {
+    const rect = lbImgEl.getBoundingClientRect();
+    const originX = Math.min(100, Math.max(0, ((clientX - rect.left) / rect.width) * 100));
+    const originY = Math.min(100, Math.max(0, ((clientY - rect.top) / rect.height) * 100));
+    lbImgEl.style.transformOrigin = `${originX}% ${originY}%`;
+  } else {
+    lbImgEl.style.transformOrigin = '50% 50%';
+  }
+
+  lbZoom.scale = newScale;
+  if (newScale === 1) { lbZoom.tx = 0; lbZoom.ty = 0; lbImgEl.style.transformOrigin = '50% 50%'; }
+  applyLbTransform();
+}
+
+lbStageEl.addEventListener('wheel', (e) => {
+  e.preventDefault();
+  lightboxZoomBy(e.deltaY < 0 ? 0.18 : -0.18, e.clientX, e.clientY);
+}, { passive: false });
+
+lbStageEl.addEventListener('dblclick', () => lightboxResetZoom());
+
+lbStageEl.addEventListener('mousedown', (e) => {
+  if (lbZoom.scale <= 1) return;
+  lbPanning = true;
+  lbStageEl.classList.add('panning');
+  lbPanStart = { x: e.clientX, y: e.clientY, tx: lbZoom.tx, ty: lbZoom.ty };
+});
+window.addEventListener('mousemove', (e) => {
+  if (!lbPanning) return;
+  lbZoom.tx = lbPanStart.tx + (e.clientX - lbPanStart.x);
+  lbZoom.ty = lbPanStart.ty + (e.clientY - lbPanStart.y);
+  applyLbTransform();
+});
+window.addEventListener('mouseup', () => {
+  lbPanning = false;
+  lbStageEl.classList.remove('panning');
+});
+
+document.addEventListener('keydown', (e) => {
+  if (!lightboxEl.classList.contains('open')) return;
+  if (e.key === 'ArrowRight') lightboxStep(1);
+  else if (e.key === 'ArrowLeft') lightboxStep(-1);
+  else if (e.key === 'Escape') closeLightbox();
+  else if (e.key === '+' || e.key === '=') lightboxZoomBy(0.25);
+  else if (e.key === '-') lightboxZoomBy(-0.25);
+  else if (e.key === '0') lightboxResetZoom();
+});
+
+// ── Copy path / export — both are real file-system actions in the actual
+// app; here they just demonstrate the interaction + feedback pattern. ──
+let toastTimer = null;
+function showToast(msg) {
+  const t = document.getElementById('toast');
+  t.innerHTML = `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5 9-9"/></svg>${msg}`;
+  t.classList.add('show');
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => t.classList.remove('show'), 1800);
+}
+function copyPath() {
+  const item = visibleItems[lightboxIndex()];
+  const path = `D:\\LumenVault\\blobs\\a3\\a3f9c204b1${item.id}.${item.storedFormat}`;
+  try { navigator.clipboard?.writeText(path); } catch (e) {}
+  showToast('File path copied');
+}
+function exportImage() {
+  showToast('Exported with .xmp sidecar to Downloads');
+}
+
+// ── Popovers ──
+function closeAllPops(except) {
+  document.querySelectorAll('.popover.open').forEach(p => { if (p.id !== except) p.classList.remove('open'); });
+}
+function togglePop(id, evt) {
+  evt.stopPropagation();
+  const wasOpen = document.getElementById(id).classList.contains('open');
+  closeAllPops(id);
+  document.getElementById(id).classList.toggle('open', !wasOpen);
+}
+document.addEventListener('click', () => closeAllPops());
+
+function renderActiveFilters() {
+  const pills = [];
+  if (state.dateRange) pills.push({ text: state.dateRange.label, clear: () => { state.dateRange = null; } });
+  state.formats.forEach(f => pills.push({ text: f.toUpperCase(), clear: () => state.formats.delete(f) }));
+  state.sources.forEach(s => pills.push({ text: s.split('/').pop(), clear: () => state.sources.delete(s) }));
+  state.tags.forEach(t => pills.push({ text: '#'+t, clear: () => state.tags.delete(t) }));
+
+  const bar = document.getElementById('activeFilters');
+  if (!pills.length) { bar.classList.remove('show'); bar.innerHTML = ''; return; }
+  bar.classList.add('show');
+  bar.innerHTML = `<span class="active-filters-label">Filtered by</span>` +
+    pills.map((p, idx) => `<span class="pill">${p.text}<button data-idx="${idx}">
+      <svg viewBox="0 0 24 24" width="9" height="9" fill="none" stroke="currentColor" stroke-width="3"><path d="M6 6l12 12M18 6L6 18"/></svg>
+    </button></span>`).join('') +
+    `<button class="clear-all" onclick="clearAllFilters()">Clear all</button>`;
+  bar.querySelectorAll('button[data-idx]').forEach((btn, idx) => {
+    btn.addEventListener('click', () => { pills[idx].clear(); refresh(); });
+  });
+}
+function clearAllFilters() {
+  state.dateRange = null; state.formats.clear(); state.sources.clear(); state.tags.clear();
+  refresh();
+}
+
+function renderFilterBar() {
+  const bar = document.getElementById('filterBar');
+  const dateOn = !!state.dateRange;
+  const fmtOn = state.formats.size > 0;
+  const srcOn = state.sources.size > 0;
+  const tagOn = state.tags.size > 0;
+  bar.innerHTML = `
+    <div class="chip ${dateOn ? 'on' : ''}" onclick="togglePop('datePop', event)">
+      ${state.dateRange ? state.dateRange.label : 'Date'}
+      <div class="popover" id="datePop" onclick="event.stopPropagation()"></div>
+    </div>
+    <div class="chip ${fmtOn ? 'on' : ''}" onclick="togglePop('fmtPop', event)">
+      Format${fmtOn ? ` (${state.formats.size})` : ''}
+      <div class="popover" id="fmtPop" onclick="event.stopPropagation()"></div>
+    </div>
+    <div class="chip ${srcOn ? 'on' : ''}" onclick="togglePop('srcPop', event)">
+      Source${srcOn ? ` (${state.sources.size})` : ''}
+      <div class="popover" id="srcPop" onclick="event.stopPropagation()"></div>
+    </div>
+    <div class="chip ${tagOn ? 'on' : ''}" onclick="togglePop('tagPop', event)">
+      Tags${tagOn ? ` (${state.tags.size})` : ''}
+      <div class="popover" id="tagPop" onclick="event.stopPropagation()"></div>
+    </div>
+  `;
+  renderDatePop(); renderFormatPop(); renderSourcePop(); renderTagPop();
+}
+
+function checkIcon() { return `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="3"><path d="M5 12l5 5 9-9"/></svg>`; }
+
+function renderDatePop() {
+  const pop = document.getElementById('datePop');
+  pop.innerHTML = DATE_PRESETS.map(p => {
+    const on = state.dateRange && state.dateRange.label === p.label;
+    return `<div class="popover-item ${on?'checked':''}" data-preset="${p.label}">
+      <span class="box">${on?checkIcon():''}</span><span class="label">${p.label}</span>
+    </div>`;
+  }).join('') + `
+    <div class="popover-divider"></div>
+    <div class="popover-date-custom">
+      <input type="date" id="dateFrom"><span style="color:var(--text-faint)">–</span><input type="date" id="dateTo">
+    </div>
+    <div class="popover-foot"><button class="popover-link" data-clear-date>Clear</button><button class="popover-link" data-apply-date>Apply</button></div>
+  `;
+  pop.querySelectorAll('[data-preset]').forEach(el => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const preset = DATE_PRESETS.find(p => p.label === el.dataset.preset);
+    state.dateRange = { label: preset.label, start: daysAgo(preset.days), end: null };
+    refresh();
+  }));
+  pop.querySelector('[data-clear-date]').addEventListener('click', (e) => { e.stopPropagation(); state.dateRange = null; refresh(); });
+  pop.querySelector('[data-apply-date]').addEventListener('click', (e) => {
+    e.stopPropagation();
+    const from = pop.querySelector('#dateFrom').value, to = pop.querySelector('#dateTo').value;
+    if (!from && !to) return;
+    state.dateRange = {
+      label: `${from || '…'} – ${to || '…'}`,
+      start: from ? new Date(from) : null,
+      end: to ? new Date(to + 'T23:59:59') : null,
+    };
+    refresh();
+  });
+}
+
+function renderFormatPop() {
+  const pop = document.getElementById('fmtPop');
+  const counts = {};
+  ITEMS.forEach(i => counts[i.originalFormat] = (counts[i.originalFormat]||0)+1);
+  const formats = Object.keys(counts).sort((a,b)=>counts[b]-counts[a]);
+  pop.innerHTML = formats.map(f => {
+    const on = state.formats.has(f);
+    return `<div class="popover-item ${on?'checked':''}" data-fmt="${f}">
+      <span class="box">${on?checkIcon():''}</span><span class="label">${f.toUpperCase()}</span><span class="n">${counts[f]}</span>
+    </div>`;
+  }).join('') + `<div class="popover-divider"></div><div class="popover-foot"><button class="popover-link" data-clear-fmt>None</button><span></span></div>`;
+  pop.querySelectorAll('[data-fmt]').forEach(el => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const f = el.dataset.fmt;
+    state.formats.has(f) ? state.formats.delete(f) : state.formats.add(f);
+    refresh();
+  }));
+  pop.querySelector('[data-clear-fmt]').addEventListener('click', (e) => { e.stopPropagation(); state.formats.clear(); refresh(); });
+}
+
+function renderSourcePop() {
+  const pop = document.getElementById('srcPop');
+  const counts = {};
+  ITEMS.forEach(i => counts[i.source] = (counts[i.source]||0)+1);
+  pop.innerHTML = `<div style="font-size:10px;color:var(--text-faint);padding:4px 8px 6px">Where a photo was originally imported from</div>` +
+    SOURCES.map(s => {
+      const on = state.sources.has(s);
+      return `<div class="popover-item ${on?'checked':''}" data-src="${s}" title="${s}">
+        <span class="box">${on?checkIcon():''}</span><span class="label" style="overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${s}</span><span class="n">${counts[s]||0}</span>
+      </div>`;
+    }).join('');
+  pop.querySelectorAll('[data-src]').forEach(el => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const s = el.dataset.src;
+    state.sources.has(s) ? state.sources.delete(s) : state.sources.add(s);
+    refresh();
+  }));
+}
+
+function renderTagPop() {
+  const pop = document.getElementById('tagPop');
+  const counts = {};
+  ITEMS.forEach(i => i.tags.forEach(t => counts[t] = (counts[t]||0)+1));
+  const tags = Object.keys(counts).sort((a,b)=>counts[b]-counts[a]);
+  pop.innerHTML = tags.map(t => {
+    const on = state.tags.has(t);
+    return `<div class="popover-item ${on?'checked':''}" data-tag="${t}">
+      <span class="box">${on?checkIcon():''}</span><span class="label">${t}</span><span class="n">${counts[t]}</span>
+    </div>`;
+  }).join('');
+  pop.querySelectorAll('[data-tag]').forEach(el => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const t = el.dataset.tag;
+    state.tags.has(t) ? state.tags.delete(t) : state.tags.add(t);
+    refresh();
+  }));
+}
+
+function renderSortPop() {
+  const pop = document.getElementById('sortPop');
+  pop.innerHTML = SORT_OPTIONS.map(o => {
+    const on = state.sort === o.key;
+    return `<div class="popover-item ${on?'checked':''}" data-sort="${o.key}">
+      <span class="box">${on?checkIcon():''}</span><span class="label">${o.label}</span>
+    </div>`;
+  }).join('');
+  pop.querySelectorAll('[data-sort]').forEach(el => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    state.sort = el.dataset.sort;
+    document.getElementById('sortLabel').textContent = SORT_OPTIONS.find(o=>o.key===state.sort).label;
+    closeAllPops();
+    renderSortPop();
+    renderGrid();
+  }));
+}
+
+document.getElementById('searchInput').addEventListener('input', (e) => {
+  state.query = e.target.value.trim();
+  renderGrid();
+});
+
+function refresh() {
+  renderFilterBar();
+  renderActiveFilters();
+  renderGrid();
+}
+refresh();
+renderSortPop();
+
+// ── Nav switching ──
+document.querySelectorAll('.rail-btn[data-view]').forEach(btn => {
+  btn.addEventListener('click', () => {
+    document.querySelectorAll('.rail-btn[data-view]').forEach(b=>b.classList.remove('active'));
+    btn.classList.add('active');
+    const view = btn.dataset.view;
+    document.getElementById('view-grid').style.display = view === 'grid' ? 'flex' : 'none';
+    document.getElementById('view-grid').style.flexDirection = 'column';
+    document.getElementById('view-review').style.display = view === 'review' ? 'flex' : 'none';
+  });
+});
+document.getElementById('view-grid').style.display = 'flex';
+document.getElementById('view-grid').style.flexDirection = 'column';
+document.getElementById('view-grid').style.flex = '1';
+document.getElementById('view-grid').style.minHeight = '0';
+
+// ── Review queue pairs ──
+const PAIRS = [
+  {a: 23, b: 24, dist: 3, res: '4032×3024', fmt: 'JXL', size: '2.4 MB', date: '2026-06-14'},
+  {a: 55, b: 8,  dist: 5, res: '3840×2160', fmt: 'PNG', size: '5.1 MB', date: '2026-05-02'},
+  {a: 91, b: 92, dist: 1, res: '6000×4000', fmt: 'JXL', size: '3.8 MB', date: '2026-07-09'},
+];
+const reviewEl = document.getElementById('review-pairs');
+reviewEl.innerHTML = PAIRS.map((p, idx) => `
+  <div class="review-pair">
+    <div class="review-pair-head" onclick="toggleCompare(${idx})">
+      <div>
+        <div class="review-pair-title">IMG_${4400+p.a}.${p.fmt.toLowerCase()} &nbsp;≈&nbsp; IMG_${4400+p.b}.${p.fmt.toLowerCase()}</div>
+        <div class="review-pair-sub">${p.date}</div>
+      </div>
+      <span class="hamming-badge">${p.dist}-bit diff</span>
+    </div>
+    <div class="review-compare" id="compare-${idx}" style="display:none">
+      <div class="review-candidate suggested">
+        <div class="suggested-badge">SUGGESTED KEEPER</div>
+        <div class="review-candidate-img"><div class="fake-img" style="${fakeImg(p.a)}; width:100%; height:100%;"></div></div>
+        <div class="candidate-meta">
+          <b>${p.res}</b><br>${p.fmt} · ${p.size}<br>${p.date}
+        </div>
+      </div>
+      <div class="review-candidate">
+        <div class="review-candidate-img"><div class="fake-img" style="${fakeImg(p.b)}; width:100%; height:100%;"></div></div>
+        <div class="candidate-meta">
+          <b>${p.res}</b><br>${p.fmt} · lower quality<br>${p.date}
+        </div>
+      </div>
+    </div>
+    <div class="review-actions" id="actions-${idx}" style="display:none">
+      <button class="btn">Keep both</button>
+      <button class="btn btn-primary">Merge — tags combine, quarantine the other</button>
+    </div>
+  </div>
+`).join('');
+
+function toggleCompare(idx) {
+  const c = document.getElementById('compare-'+idx);
+  const a = document.getElementById('actions-'+idx);
+  const open = c.style.display !== 'none';
+  c.style.display = open ? 'none' : 'grid';
+  a.style.display = open ? 'none' : 'flex';
+}
+</script>

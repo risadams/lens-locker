@@ -1,17 +1,157 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="UTF-8" />
-    <link rel="stylesheet" href="styles.css" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>LumenVault</title>
-    <script type="module" src="/main.js" defer></script>
-  </head>
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LumenVault</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <div class="rail">
+      <div class="rail-mark">LV</div>
+      <button class="rail-btn active" data-view="grid" title="All Photos">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+      </button>
+      <button class="rail-btn" data-view="review" title="Review Queue">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 12l4-8h10l4 8-4 8H7z"/><path d="M9 12l2 2 4-4"/></svg>
+        <span class="rail-badge" id="reviewBadge" style="display:none">0</span>
+      </button>
+      <div class="rail-spacer"></div>
+      <button class="rail-btn" title="Import" id="railImportBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"/></svg>
+      </button>
+    </div>
 
-  <body>
-    <main class="container">
-      <h1>LumenVault</h1>
-      <p>Milestone 0 scaffold — no import pipeline or grid yet.</p>
-    </main>
-  </body>
+    <div class="main">
+      <!-- GRID VIEW -->
+      <div id="view-grid">
+        <div class="topbar">
+          <span class="topbar-title">All Photos</span>
+          <span class="topbar-count" id="itemCount">0 items</span>
+          <div class="filters" id="filterBar"></div>
+          <div class="topbar-spacer"></div>
+          <div class="chip sort-btn" id="sortChip">
+            <span id="sortLabel">Newest captured</span>
+            <svg class="chev" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
+            <div class="popover sort-popover" id="sortPop"></div>
+          </div>
+          <div class="search-wrap">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            <input class="search" id="searchInput" placeholder="Search tags, camera, filename…">
+          </div>
+          <button class="btn btn-primary" id="topbarImportBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v12m0 0l-4-4m4 4l4-4M5 20h14"/></svg>
+            Import
+          </button>
+        </div>
+        <div class="active-filters" id="activeFilters"></div>
+        <div class="gridwrap" id="gridWrap">
+          <div class="grid-spacer" id="gridSpacer">
+            <div class="grid-window" id="gridWindow"></div>
+          </div>
+        </div>
+      </div>
+
+      <!-- REVIEW QUEUE VIEW -->
+      <div id="view-review" style="display:none; flex-direction: column; flex: 1; min-height: 0;">
+        <div class="topbar">
+          <span class="topbar-title">Review Queue</span>
+          <span class="topbar-count" id="reviewCount">0 pending</span>
+        </div>
+        <div class="review-list">
+          <p class="review-intro">These photos look nearly identical (≤5-bit perceptual difference). Nothing is deleted until you confirm — the copy you don't keep moves to quarantine, recoverable for 30 days.</p>
+          <div id="review-pairs"></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="drawer-scrim" id="drawerScrim"></div>
+  <div class="drawer" id="drawer">
+    <div class="drawer-preview" id="drawerPreview">
+      <button class="drawer-close" id="drawerCloseBtn">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+      <button class="drawer-expand" id="drawerExpandBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 3H5a2 2 0 00-2 2v4m18 0V5a2 2 0 00-2-2h-4m0 18h4a2 2 0 002-2v-4M3 15v4a2 2 0 002 2h4"/></svg>
+        View full size
+      </button>
+    </div>
+    <div class="drawer-body">
+      <div class="drawer-filename" id="d-filename"></div>
+      <div class="drawer-sub" id="d-sub"></div>
+
+      <table class="meta-table">
+        <tr><td>Integrity</td><td><span class="verified-row" id="d-verified">Hash verified</span></td></tr>
+        <tr><td>Captured</td><td id="d-captured">—</td></tr>
+        <tr><td>Camera</td><td id="d-camera">—</td></tr>
+        <tr><td>Original hash</td><td id="d-hash">—</td></tr>
+        <tr><td>File size</td><td id="d-size">—</td></tr>
+      </table>
+
+      <div class="section-label">Tags</div>
+      <div class="tag-row" id="d-tags"></div>
+
+      <div class="section-label">In this library since</div>
+      <table class="meta-table" style="margin-bottom:0">
+        <tr><td>Imported</td><td id="d-imported">—</td></tr>
+      </table>
+    </div>
+  </div>
+
+  <div class="modal-scrim" id="importModal">
+    <div class="modal">
+      <h3>Import a folder</h3>
+      <p>LumenVault moves files into the vault — the originals leave their current location. Nothing is deleted outright; anything replaced or superseded is kept in quarantine for 30 days.</p>
+      <div class="modal-drop" id="importStatus">Choose a folder to import</div>
+      <div class="modal-footer">
+        <button class="btn" id="importCancelBtn">Cancel</button>
+        <button class="btn btn-primary" id="importChooseBtn">Choose Folder…</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="lightbox" id="lightbox">
+    <div class="lightbox-topbar">
+      <span class="lightbox-filename" id="lb-filename"></span>
+      <span class="lightbox-counter" id="lb-counter"></span>
+      <div class="lightbox-topbar-spacer"></div>
+      <button class="lightbox-iconbtn" title="Copy file path" id="lbCopyBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><rect x="9" y="9" width="12" height="12" rx="2"/><path d="M5 15H4a1 1 0 01-1-1V4a1 1 0 011-1h10a1 1 0 011 1v1"/></svg>
+      </button>
+      <button class="lightbox-iconbtn" title="Export…" id="lbExportBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M12 3v12m0 0l-4-4m4 4l4-4M5 21h14"/></svg>
+      </button>
+      <button class="lightbox-iconbtn" title="Close (Esc)" id="lbCloseBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 6l12 12M18 6L6 18"/></svg>
+      </button>
+    </div>
+    <div class="lightbox-stage" id="lb-stage">
+      <button class="lightbox-nav prev" id="lbPrevBtn" title="Previous (←)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M15 18l-6-6 6-6"/></svg>
+      </button>
+      <img class="lightbox-img" id="lb-img" alt="">
+      <button class="lightbox-nav next" id="lbNextBtn" title="Next (→)">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 18l6-6-6-6"/></svg>
+      </button>
+    </div>
+    <div class="lightbox-toolbar">
+      <div class="lightbox-zoomgroup">
+        <button class="lightbox-iconbtn" title="Zoom out" id="lbZoomOutBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M8 11h6"/></svg>
+        </button>
+        <span class="lightbox-zoom-pct" id="lb-zoompct" title="Reset to fit (0)">100%</span>
+        <button class="lightbox-iconbtn" title="Zoom in" id="lbZoomInBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3M11 8v6M8 11h6"/></svg>
+        </button>
+      </div>
+      <span style="color: var(--text-faint); font-size: 11px;">Scroll to zoom · drag to pan · ← → to browse</span>
+    </div>
+  </div>
+
+  <div class="toast" id="toast"></div>
+
+  <script src="main.js"></script>
+</body>
 </html>

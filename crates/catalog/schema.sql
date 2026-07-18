@@ -111,7 +111,11 @@ CREATE TABLE image_tags (
     PRIMARY KEY (image_id, tag_id)
 );
 
--- Full-text search over filenames, camera info, and tag names
+-- Full-text search over filenames, camera info, and tag names.
+-- NOTE: redefined as a standard (non-contentless) table by
+-- migrations/0002_standard_fts.sql (Milestone 5) — see that file's comment.
+-- Left as originally drafted here since this file is an already-shipped
+-- migration step (per this file's own header comment: don't hand-edit it).
 CREATE VIRTUAL TABLE images_fts USING fts5(
     original_filename, camera_make, camera_model, tag_names,
     content='', tokenize='porter unicode61'

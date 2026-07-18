@@ -227,6 +227,10 @@ fn recover_one_blob(
          VALUES (?1, ?2, ?3, ?4)",
         params![image_id, batch_id, placeholder_name, blob_path.to_string_lossy()],
     )?;
+    // Keeps search (Milestone 5) working after a rebuild even for images
+    // with no tags at all — add_tag below already re-syncs when tags exist,
+    // but an untagged image otherwise never gets its filename indexed.
+    lumenvault_catalog::sync_fts_row(conn, image_id)?;
 
     // Re-import tags from the sidecar, if one exists next to this blob.
     let sidecar_path = blob_path.with_extension("xmp");
