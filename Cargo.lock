@@ -2373,6 +2373,8 @@ dependencies = [
  "tauri-plugin-dialog",
  "tauri-plugin-opener",
  "thiserror 2.0.18",
+ "webview2-com",
+ "windows",
 ]
 
 [[package]]
