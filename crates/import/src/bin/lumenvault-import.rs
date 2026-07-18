@@ -12,8 +12,8 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use lumenvault_import::{
-    FileOutcome, ImportContext, LibraryPaths, ensure_library, import_directory, start_or_resume_batch,
-    sweep_expired_quarantine,
+    FileOutcome, ImportContext, LibraryPaths, conversion_enabled, ensure_library, import_directory,
+    start_or_resume_batch, sweep_expired_quarantine,
 };
 use rusqlite::Connection;
 
@@ -50,7 +50,13 @@ fn run(source_dir: PathBuf, library_root: PathBuf) -> Result<(), Box<dyn std::er
 
     let library_id = ensure_library(&conn, &library_root)?;
     let batch_id = start_or_resume_batch(&conn, library_id, &source_dir)?;
-    let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id };
+    let ctx = ImportContext {
+        conn: &conn,
+        paths: &paths,
+        library_id,
+        batch_id,
+        conversion_enabled: conversion_enabled(&conn, library_id)?,
+    };
 
     let mut imported = 0;
     let mut collapsed = 0;

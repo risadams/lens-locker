@@ -8,3 +8,17 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+image = { version = "0.25.10", default-features = false, features = ["bmp"] }
+jpegxl-rs = { version = "0.15.0", features = ["vendored"] }
+jxl-oxide = "0.12.6"
+png = "0.18"
+thiserror = "2.0.18"
+tiff = "0.11.3"
+
+[dev-dependencies]
+# Test-fixture generation needs PNG/JPEG *encoding*, which the production
+# dependency above deliberately doesn't enable (production only decodes PNG
+# via the `png` crate directly, and JPEG bytes arrive pre-encoded from real
+# files) — Cargo unifies this into one feature set for test builds only.
+image = { version = "0.25.10", default-features = false, features = ["bmp", "jpeg", "png"] }
+tempfile = "3.27.0"

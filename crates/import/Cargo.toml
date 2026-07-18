@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 lumenvault-catalog = { version = "0.1.0", path = "../catalog" }
+lumenvault-convert = { version = "0.1.0", path = "../convert" }
 lumenvault-decode = { version = "0.1.0", path = "../decode" }
 lumenvault-hash = { version = "0.1.0", path = "../hash" }
 rusqlite = { version = "0.40.1", features = ["bundled"] }

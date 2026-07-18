@@ -2,9 +2,15 @@
 //! Camera RAW is deliberately excluded — see `lumenvault-raw-worker`.
 //! Per workplan/SPEC.md §5.
 //!
-//! Milestone 1 implements standard-format probing only (JPEG, PNG, WebP, GIF,
-//! BMP via the `image` crate) — everything else in §5's matrix (RAW, HEIC,
-//! AVIF, JPEG XL, SVG, TIFF) lands in later milestones.
+//! Milestone 1 implemented standard-format probing for JPEG, PNG, WebP, GIF,
+//! BMP via the `image` crate. Milestone 2 adds TIFF to that set — a
+//! deliberate, narrow extension (not the full §5 matrix, which still leaves
+//! RAW, HEIC, AVIF, JPEG XL, and SVG for later milestones): §4's conversion
+//! policy defines a TIFF→TIFF recompression path, and without decode-
+//! validating TIFF here it could never reach `lumenvault-convert` through
+//! the real import pipeline. This is a genuine ambiguity §4 doesn't
+//! resolve directly (only `lumenvault-convert`'s scope is named in the
+//! Milestone 2 line) — flagged here rather than silently assumed.
 
 use std::path::Path;
 
@@ -20,6 +26,7 @@ pub enum StandardFormat {
     WebP,
     Gif,
     Bmp,
+    Tiff,
 }
 
 impl StandardFormat {
@@ -32,6 +39,7 @@ impl StandardFormat {
             Self::WebP => "webp",
             Self::Gif => "gif",
             Self::Bmp => "bmp",
+            Self::Tiff => "tiff",
         }
     }
 
@@ -42,6 +50,7 @@ impl StandardFormat {
             ImageFormat::WebP => Some(Self::WebP),
             ImageFormat::Gif => Some(Self::Gif),
             ImageFormat::Bmp => Some(Self::Bmp),
+            ImageFormat::Tiff => Some(Self::Tiff),
             _ => None,
         }
     }
@@ -62,10 +71,10 @@ pub enum ProbeError {
         #[source]
         source: std::io::Error,
     },
-    /// Recognized by the `image` crate, but not one of this milestone's five
-    /// standard formats (e.g. TIFF, ICO) — a distinct condition from
+    /// Recognized by the `image` crate, but not one of this milestone's six
+    /// standard formats (e.g. ICO, AVIF) — a distinct condition from
     /// `Decode`, which is "the bytes don't parse as any image at all."
-    #[error("not a standard-format image (JPEG/PNG/WebP/GIF/BMP), got {0:?}")]
+    #[error("not a standard-format image (JPEG/PNG/WebP/GIF/BMP/TIFF), got {0:?}")]
     UnsupportedFormat(ImageFormat),
     #[error("no recognizable image format signature")]
     UnrecognizedFormat,
@@ -73,7 +82,7 @@ pub enum ProbeError {
     Decode(#[from] image::ImageError),
 }
 
-/// Attempts to decode `path` as one of the five standard formats and
+/// Attempts to decode `path` as one of the six standard formats and
 /// reports its format and pixel dimensions. A full decode (not just a
 /// header peek) is deliberate — it's the strongest signal available that
 /// the file isn't corrupt before the managed store takes custody of it.
@@ -114,6 +123,21 @@ mod tests {
         assert_eq!(probe.format, super::StandardFormat::Png);
         assert_eq!(probe.width, 64);
         assert_eq!(probe.height, 32);
+    }
+
+    #[test]
+    fn probing_a_valid_tiff_reports_its_format_and_dimensions() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("sample.tiff");
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(20, 10, |x, y| Rgb([(x % 256) as u8, (y % 256) as u8, 64]));
+        img.save(&path).unwrap();
+
+        let probe = super::probe(&path).unwrap();
+
+        assert_eq!(probe.format, super::StandardFormat::Tiff);
+        assert_eq!(probe.width, 20);
+        assert_eq!(probe.height, 10);
     }
 
     #[test]

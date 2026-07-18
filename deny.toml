@@ -72,11 +72,13 @@ allow = [
     "Zlib",
     "CC0-1.0",
     "MPL-2.0",
+    # jpegxl-rs/jpegxl-sys (workplan/tickets/009, 021, Milestone 2's JPEG XL
+    # conversion path) — acceptable per this project's personal-use-only
+    # scope (workplan/SPEC.md §1), not a project-wide obligation. Confirmed
+    # exact SPDX identifier via `cargo deny check`'s own rejection message
+    # rather than assumed.
+    "GPL-3.0-or-later",
 ]
-# GPL-3.0 is expected once jpegxl-rs is added (workplan/tickets/009, 021) —
-# acceptable per this project's personal-use-only scope, not a project-wide
-# obligation. Add it here explicitly when that dependency lands, rather than
-# leaving licenses unchecked.
 
 [licenses.private]
 # LumenVault's own crates are `publish = false` (workspace.package) — personal,

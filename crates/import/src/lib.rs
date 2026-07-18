@@ -83,15 +83,20 @@ pub enum FileOutcome {
     AlreadyDone { image_id: Option<i64> },
 }
 
-/// The (connection, store layout, library, batch) tuple every pipeline
-/// operation needs — bundled because `import_file` and `import_directory`
-/// both thread the same four values through every call.
+/// The (connection, store layout, library, batch, conversion setting) tuple
+/// every pipeline operation needs — bundled because `import_file` and
+/// `import_directory` both thread the same values through every call.
+/// `conversion_enabled` is read once by the caller (via
+/// [`conversion_enabled`]) rather than re-queried per file: it's a
+/// per-library, fixed-at-creation setting (workplan/SPEC.md §4), not
+/// per-file state.
 #[derive(Clone, Copy)]
 pub struct ImportContext<'a> {
     pub conn: &'a Connection,
     pub paths: &'a LibraryPaths,
     pub library_id: i64,
     pub batch_id: i64,
+    pub conversion_enabled: bool,
 }
 
 /// Finds or creates the `libraries` row for `root_path`. Idempotent —
@@ -111,6 +116,15 @@ pub fn ensure_library(conn: &Connection, root_path: &Path) -> rusqlite::Result<i
         params![root_path.file_name().map(|n| n.to_string_lossy()).unwrap_or(root.clone()), root.as_ref()],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+/// Reads `libraries.conversion_enabled` for `library_id` — the "opt-out
+/// granularity: per-library, fixed at library creation" setting from
+/// workplan/SPEC.md §4.
+pub fn conversion_enabled(conn: &Connection, library_id: i64) -> rusqlite::Result<bool> {
+    let enabled: i64 =
+        conn.query_row("SELECT conversion_enabled FROM libraries WHERE id = ?1", [library_id], |row| row.get(0))?;
+    Ok(enabled != 0)
 }
 
 /// Finds a still-`running` batch for this (library, source) pair to resume,
@@ -204,7 +218,7 @@ pub fn import_directory(
 /// every side effect below is idempotent, so re-running this on a file left
 /// mid-pipeline by a killed process is always safe.
 pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcome, ImportError> {
-    let ImportContext { conn, paths, library_id, batch_id } = *ctx;
+    let ImportContext { conn, paths, library_id, batch_id, conversion_enabled } = *ctx;
     let source_str = source_path.to_string_lossy();
 
     // Resume check: if a prior run already finished this file, don't redo it.
@@ -263,16 +277,32 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
     let (image_id, outcome) = if let Some((image_id, _)) = existing_image {
         (image_id, FileOutcome::Collapsed { image_id })
     } else {
-        let blob_path = paths.blob_path(&original_hash_hex, format);
-        write_blob_idempotent(source_path, &blob_path)?;
+        // Step: convert (§4's matrix, attempt→verify→never-degrade). Runs
+        // before the content-addressed write because *what* gets written
+        // depends on the outcome — the source bytes verbatim, or the
+        // already-verified converted bytes.
+        let conversion = resolve_conversion(format, conversion_enabled, source_path)?;
+        set_journal_step(conn, journal_id, "converted", None)?;
 
-        // Re-hash what's actually on disk — this is both stored_hash and
-        // the "verify the managed copy" check SPEC.md §3 requires before
-        // the original is touched. No conversion happens in this milestone,
-        // so the two hashes must be equal; a mismatch means the blob write
-        // was corrupted and we must not proceed to quarantine the original.
+        let blob_path = paths.blob_path(&original_hash_hex, conversion.stored_format);
+        match &conversion.bytes {
+            Some(bytes) => write_blob_bytes_idempotent(bytes, &blob_path)?,
+            None => write_blob_idempotent(source_path, &blob_path)?,
+        }
+        set_journal_step(conn, journal_id, "verified", None)?;
+
+        // Re-hash what's actually on disk — this is stored_hash. When
+        // nothing was converted, it also doubles as the "verify the
+        // managed copy" check SPEC.md §3 requires before the original is
+        // touched: the blob is supposed to be a verbatim copy, so a
+        // mismatch means the write itself was corrupted. When conversion
+        // *did* happen, stored_hash is expected to differ from
+        // original_hash by design (different bytes) — `lumenvault-convert`
+        // already did its own pixel/byte-exact verification internally
+        // before ever reporting success, so no further equality check
+        // applies here.
         let stored_hash = lumenvault_hash::hash_file(&blob_path)?;
-        if stored_hash != original_hash {
+        if conversion.bytes.is_none() && stored_hash != original_hash {
             return Err(ImportError::BlobIntegrity { path: blob_path });
         }
 
@@ -291,13 +321,15 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
                         library_id, original_hash, stored_hash, stored_path,
                         original_format, stored_format, conversion_status,
                         file_size_bytes, width, height
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?5, 'not_applicable', ?6, ?7, ?8)",
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                     params![
                         library_id,
                         original_hash.as_slice(),
                         stored_hash.as_slice(),
                         blob_path.to_string_lossy(),
                         format,
+                        conversion.stored_format,
+                        conversion.conversion_status,
                         fs::metadata(&blob_path)?.len() as i64,
                         probe.width,
                         probe.height,
@@ -353,6 +385,77 @@ fn write_blob_idempotent(source_path: &Path, blob_path: &Path) -> Result<(), Imp
     }
     fs::copy(source_path, blob_path)?;
     Ok(())
+}
+
+/// Writes `blob_path` from already-in-memory `bytes` (the converted output
+/// of [`resolve_conversion`]) if it doesn't already exist — same
+/// idempotency rationale as [`write_blob_idempotent`], just for bytes that
+/// don't already live at a source path on disk.
+fn write_blob_bytes_idempotent(bytes: &[u8], blob_path: &Path) -> Result<(), ImportError> {
+    if blob_path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = blob_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(blob_path, bytes)?;
+    Ok(())
+}
+
+/// Maps a decode-validated source format to the §4 conversion path that
+/// applies to it, if any. `None` means the format has no defined
+/// conversion path at all (WebP, GIF, or anything outside JPEG/PNG/BMP/
+/// TIFF) — exactly workplan/SPEC.md §4's `not_applicable` case.
+fn convertible_format(format: &str) -> Option<lumenvault_convert::ConvertibleFormat> {
+    use lumenvault_convert::ConvertibleFormat;
+    match format {
+        "jpeg" => Some(ConvertibleFormat::Jpeg),
+        "png" => Some(ConvertibleFormat::Png),
+        "bmp" => Some(ConvertibleFormat::Bmp),
+        "tiff" => Some(ConvertibleFormat::Tiff),
+        _ => None,
+    }
+}
+
+/// Outcome of the §4 conversion attempt for one file. `bytes: None` means
+/// "store the original bytes verbatim" (no conversion path, disabled by
+/// library setting, or the attempt failed verification) — `stored_format`
+/// and `conversion_status` together follow the mapping documented on
+/// `images.conversion_status` in `crates/catalog/schema.sql`.
+struct ConversionResult {
+    bytes: Option<Vec<u8>>,
+    stored_format: &'static str,
+    conversion_status: &'static str,
+}
+
+/// Runs the §4 conversion policy for one file: attempt → verify →
+/// never-degrade. Any verification failure inside `lumenvault-convert`, or
+/// a genuine encode/library error, is treated identically — the original
+/// is left untouched and `conversion_status` records `failed_kept_original`,
+/// never a partial/best-effort result.
+fn resolve_conversion(
+    format: &'static str,
+    conversion_enabled: bool,
+    source_path: &Path,
+) -> Result<ConversionResult, ImportError> {
+    let Some(convertible) = convertible_format(format) else {
+        return Ok(ConversionResult { bytes: None, stored_format: format, conversion_status: "not_applicable" });
+    };
+    if !conversion_enabled {
+        return Ok(ConversionResult { bytes: None, stored_format: format, conversion_status: "not_attempted" });
+    }
+
+    let source_bytes = fs::read(source_path)?;
+    Ok(match lumenvault_convert::convert(convertible, &source_bytes) {
+        Ok(Ok(converted)) => ConversionResult {
+            bytes: Some(converted.bytes),
+            stored_format: converted.stored_format,
+            conversion_status: "converted",
+        },
+        Ok(Err(_)) | Err(_) => {
+            ConversionResult { bytes: None, stored_format: format, conversion_status: "failed_kept_original" }
+        }
+    })
 }
 
 /// Quarantines the original: same-volume rename where possible, falling
@@ -464,6 +567,14 @@ mod tests {
         path
     }
 
+    fn write_jpeg(dir: &Path, name: &str, seed: u8) -> PathBuf {
+        let path = dir.join(name);
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(16, 16, |x, y| Rgb([seed, (x % 256) as u8, (y % 256) as u8]));
+        img.save(&path).unwrap();
+        path
+    }
+
     fn test_conn() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
         lumenvault_catalog::migrate(&mut conn).unwrap();
@@ -495,7 +606,7 @@ mod tests {
         let a = write_png(source_dir.path(), "a.png", 42);
         let b = write_png(source_dir.path(), "b.png", 42);
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id };
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
         let outcome_a = import_file(&ctx, &a).unwrap();
         let outcome_b = import_file(&ctx, &b).unwrap();
 
@@ -533,7 +644,7 @@ mod tests {
         let bogus = source_dir.path().join("not-an-image.txt");
         fs::write(&bogus, b"nope").unwrap();
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id };
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
         let outcome = import_file(&ctx, &bogus).unwrap();
 
         assert_eq!(outcome, FileOutcome::Failed);
@@ -555,7 +666,7 @@ mod tests {
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
         let path = write_png(source_dir.path(), "once.png", 7);
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id };
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
         let first = import_file(&ctx, &path).unwrap();
         // Second call simulates a resumed run re-scanning the same source
         // file after the batch was already fully processed for it.
@@ -592,7 +703,7 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id };
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
         let outcome = import_file(&ctx, &path).unwrap();
 
         assert!(matches!(outcome, FileOutcome::Imported { .. }));
@@ -633,5 +744,95 @@ mod tests {
         assert_eq!(purged, 1);
         assert!(!expired_path.exists());
         assert!(fresh_path.exists());
+    }
+
+    #[test]
+    fn a_jpeg_is_converted_to_jxl_through_the_real_pipeline() {
+        // Proves §4's conversion policy is actually wired into import_file,
+        // not just callable directly from lumenvault-convert: a JPEG source
+        // file, run through the real import pipeline, ends up stored as a
+        // .jxl blob with conversion_status = 'converted'.
+        let conn = test_conn();
+        let source_dir = tempfile::tempdir().unwrap();
+        let library_dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(library_dir.path());
+
+        let library_id = ensure_library(&conn, library_dir.path()).unwrap();
+        let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
+        let path = write_jpeg(source_dir.path(), "photo.jpg", 11);
+
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let outcome = import_file(&ctx, &path).unwrap();
+
+        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+        let (original_format, stored_format, conversion_status, stored_path): (String, String, String, String) = conn
+            .query_row(
+                "SELECT original_format, stored_format, conversion_status, stored_path FROM images WHERE id = ?1",
+                [image_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            )
+            .unwrap();
+
+        assert_eq!(original_format, "jpeg");
+        assert_eq!(stored_format, "jxl");
+        assert_eq!(conversion_status, "converted");
+        assert!(stored_path.ends_with(".jxl"), "blob path should carry the converted extension: {stored_path}");
+        assert!(std::path::Path::new(&stored_path).exists());
+    }
+
+    #[test]
+    fn conversion_disabled_on_the_library_leaves_the_format_untouched() {
+        // §4: "opt-out granularity: per-library, fixed at library creation."
+        let conn = test_conn();
+        let source_dir = tempfile::tempdir().unwrap();
+        let library_dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(library_dir.path());
+
+        let library_id = ensure_library(&conn, library_dir.path()).unwrap();
+        conn.execute("UPDATE libraries SET conversion_enabled = 0 WHERE id = ?1", [library_id]).unwrap();
+        assert!(!conversion_enabled(&conn, library_id).unwrap());
+
+        let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
+        let path = write_jpeg(source_dir.path(), "photo.jpg", 22);
+
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: false };
+        let outcome = import_file(&ctx, &path).unwrap();
+
+        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+        let (stored_format, conversion_status): (String, String) = conn
+            .query_row(
+                "SELECT stored_format, conversion_status FROM images WHERE id = ?1",
+                [image_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+
+        assert_eq!(stored_format, "jpeg", "conversion disabled must leave the original format in place");
+        assert_eq!(conversion_status, "not_attempted");
+    }
+
+    #[test]
+    fn a_format_with_no_conversion_path_is_not_applicable() {
+        // WebP has no §4 conversion path at all — distinct from
+        // 'not_attempted' (a setting) or 'failed_kept_original' (a verification
+        // failure): there was never a policy to attempt in the first place.
+        let conn = test_conn();
+        let source_dir = tempfile::tempdir().unwrap();
+        let library_dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(library_dir.path());
+
+        let library_id = ensure_library(&conn, library_dir.path()).unwrap();
+        let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
+        let path = source_dir.path().join("photo.webp");
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(8, 8, |x, y| Rgb([(x * y) as u8, 1, 2]));
+        img.save(&path).unwrap();
+
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let outcome = import_file(&ctx, &path).unwrap();
+
+        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+        let conversion_status: String =
+            conn.query_row("SELECT conversion_status FROM images WHERE id = ?1", [image_id], |row| row.get(0)).unwrap();
+        assert_eq!(conversion_status, "not_applicable");
     }
 }
