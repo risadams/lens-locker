@@ -11,6 +11,23 @@
 //! the real import pipeline. This is a genuine ambiguity §4 doesn't
 //! resolve directly (only `lumenvault-convert`'s scope is named in the
 //! Milestone 2 line) — flagged here rather than silently assumed.
+//!
+//! Milestone 3 adds [`raw_extension`] — filename-extension-only recognition
+//! of common camera RAW formats, **no pixel decode attempted**. This is a
+//! deliberate, narrow stand-in for real RAW support: §5's format matrix
+//! promises "Full" v1 support for camera RAW via the `rawler` crate in an
+//! isolated `lumenvault-raw-worker` process, but no milestone (0-7) in
+//! workplan/SPEC.md Part 2 ever schedules building that integration —
+//! `lumenvault-raw-worker` is still the Milestone 0 stub. Milestone 3's own
+//! exit criteria requires testing "a RAW+JPEG pair," which only needs
+//! RAW+JPEG *pairing* (filename stem matching, §3 step 2) to work, not full
+//! RAW pixel decode. Recognizing the extension is enough for that: a
+//! recognized RAW file gets `original_format` set to its extension, and
+//! `width`/`height`/`perceptual_hash` all stay `NULL` (the schema's own
+//! Milestone-0 comment anticipated exactly this: "nullable (e.g. RAW
+//! without a raster path yet)"). Full RAW rendering (rawler decode,
+//! thumbnails, real perceptual hashing of RAW content) remains unbuilt and
+//! un-scheduled — flagged here, not silently papered over.
 
 use std::path::Path;
 
@@ -61,6 +78,11 @@ pub struct Probe {
     pub format: StandardFormat,
     pub width: u32,
     pub height: u32,
+    /// The fully decoded image — probing already does a full decode (see
+    /// `probe`'s doc comment), so this is free to carry forward rather than
+    /// re-decoding later. Milestone 3 uses it to compute the perceptual
+    /// hash (`lumenvault-hash::perceptual_hash`) without a second decode.
+    pub image: image::DynamicImage,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -97,7 +119,30 @@ pub fn probe(path: &Path) -> Result<Probe, ProbeError> {
 
     let decoded = reader.decode()?;
 
-    Ok(Probe { format, width: decoded.width(), height: decoded.height() })
+    Ok(Probe { format, width: decoded.width(), height: decoded.height(), image: decoded })
+}
+
+/// Common camera RAW extensions, recognized by filename only — see the
+/// module doc for why this is deliberately not a real RAW decoder. Not
+/// exhaustive (real RAW support per §5 would use `rawler`'s own format
+/// detection); this is a short, easy-to-extend list covering the common
+/// camera vendors, sufficient for RAW+JPEG pairing (§3 step 2).
+const RAW_EXTENSIONS: &[&str] =
+    &["cr2", "cr3", "nef", "arw", "dng", "rw2", "raf", "orf", "pef", "srw"];
+
+/// Returns the lowercase extension of `path` if it's one of
+/// [`RAW_EXTENSIONS`], without attempting to decode any pixel data.
+pub fn raw_extension(path: &Path) -> Option<&'static str> {
+    let ext = path.extension()?.to_str()?.to_ascii_lowercase();
+    RAW_EXTENSIONS.iter().find(|&&candidate| candidate == ext).copied()
+}
+
+/// Whether `format` (an `images.original_format` value, already lowercase)
+/// is one of [`RAW_EXTENSIONS`] — used by `lumenvault-import`'s RAW+JPEG
+/// pairing to tell which side of a candidate pair is the RAW file, without
+/// re-deriving the extension from a path a second time.
+pub fn is_raw_extension(format: &str) -> bool {
+    RAW_EXTENSIONS.contains(&format)
 }
 
 #[cfg(test)]
@@ -155,5 +200,37 @@ mod tests {
     fn probing_a_missing_file_is_rejected() {
         let result = super::probe(std::path::Path::new("does-not-exist.png"));
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn probing_a_valid_image_also_returns_the_decoded_pixels() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_png(dir.path(), "sample.png", 4, 4);
+
+        let probe = super::probe(&path).unwrap();
+
+        assert_eq!((probe.image.width(), probe.image.height()), (4, 4));
+    }
+
+    #[test]
+    fn common_raw_extensions_are_recognized_case_insensitively() {
+        for ext in ["cr2", "CR3", "nef", "Arw", "dng", "rw2", "raf", "orf"] {
+            let path = std::path::Path::new("photo").with_extension(ext);
+            assert!(super::raw_extension(&path).is_some(), "expected {ext} to be recognized as RAW");
+        }
+    }
+
+    #[test]
+    fn standard_format_extensions_are_not_recognized_as_raw() {
+        for ext in ["jpg", "png", "webp", "txt"] {
+            let path = std::path::Path::new("photo").with_extension(ext);
+            assert_eq!(super::raw_extension(&path), None, "{ext} must not be recognized as RAW");
+        }
+    }
+
+    #[test]
+    fn is_raw_extension_matches_the_lowercase_format_strings_stored_in_the_catalog() {
+        assert!(super::is_raw_extension("cr2"));
+        assert!(!super::is_raw_extension("jpeg"));
     }
 }

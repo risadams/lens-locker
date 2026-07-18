@@ -1,10 +1,16 @@
 //! Import pipeline orchestration: journal, dedupe-check, quarantine, per
 //! workplan/SPEC.md §3.
 //!
-//! Milestone 1 scope: the six-step pipeline minus conversion (Milestone 2),
-//! perceptual dedupe/RAW+JPEG pairing (Milestone 3), and XMP sidecars
-//! (Milestone 4). What's left: hash → decode-validate → exact-hash collapse
-//! → content-addressed write → quarantine, all journaled for crash recovery.
+//! Milestone 1 built the six-step pipeline minus conversion, perceptual
+//! dedupe/RAW+JPEG pairing, and XMP sidecars. Milestone 2 added conversion.
+//! Milestone 3 (this milestone) adds:
+//! - Perceptual hashing of every decode-validated image (§3 step 3), via
+//!   [`lumenvault_hash::perceptual_hash`] over the already-decoded pixels
+//!   `lumenvault_decode::probe` returns.
+//! - RAW+JPEG pairing (§3 step 2) — see [`pair_raw_and_jpeg`].
+//! - The `dedupe_review_queue` (§6) — see [`record_near_duplicates`].
+//!
+//! What's left for later milestones: XMP sidecars (Milestone 4).
 //!
 //! **Design note on crash safety** (a genuine ambiguity SPEC.md §3 states as
 //! a property, not a mechanism): every physical side effect below — blob
@@ -252,16 +258,36 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
     let original_hash_hex = lumenvault_hash::to_hex(&original_hash);
     set_journal_step(conn, journal_id, "hashed", None)?;
 
-    // Step: decode-validate. A file this milestone can't decode is refused,
-    // not imported — the original is left untouched at its source path.
-    let probe = match lumenvault_decode::probe(source_path) {
-        Ok(probe) => probe,
-        Err(e) => {
-            set_journal_step(conn, journal_id, "failed", Some(&e.to_string()))?;
-            return Ok(FileOutcome::Failed);
+    // Step: decode-validate, or fall back to RAW-extension recognition
+    // (§5's "Full" RAW support isn't scheduled in any milestone yet — see
+    // lumenvault-decode's module doc). A file that's neither decodable nor
+    // a recognized RAW extension is refused, not imported — the original is
+    // left untouched at its source path. Perceptual hash (§3 step 3) is
+    // computed here too, from the pixels probe() already decoded; RAW files
+    // get `None`, which both keeps `perceptual_hash` NULL in the catalog
+    // and — since NULL never matches in `record_near_duplicates` — is what
+    // excludes them from perceptual dedupe candidacy without extra logic.
+    let classified = match lumenvault_decode::probe(source_path) {
+        Ok(probe) => {
+            let hash = lumenvault_hash::perceptual_hash(&probe.image);
+            Classified {
+                format: probe.format.as_str(),
+                width: Some(probe.width),
+                height: Some(probe.height),
+                perceptual_hash: Some(hash as i64),
+            }
         }
+        Err(e) => match lumenvault_decode::raw_extension(source_path) {
+            Some(raw_format) => {
+                Classified { format: raw_format, width: None, height: None, perceptual_hash: None }
+            }
+            None => {
+                set_journal_step(conn, journal_id, "failed", Some(&e.to_string()))?;
+                return Ok(FileOutcome::Failed);
+            }
+        },
     };
-    let format = probe.format.as_str();
+    let Classified { format, width, height, perceptual_hash } = classified;
 
     // Step: exact-hash dedupe check (§6's auto-collapse falls out of this
     // content-addressed UNIQUE constraint on images.original_hash).
@@ -320,8 +346,8 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
                     "INSERT INTO images (
                         library_id, original_hash, stored_hash, stored_path,
                         original_format, stored_format, conversion_status,
-                        file_size_bytes, width, height
-                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
+                        file_size_bytes, width, height, perceptual_hash
+                    ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11)",
                     params![
                         library_id,
                         original_hash.as_slice(),
@@ -331,8 +357,9 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
                         conversion.stored_format,
                         conversion.conversion_status,
                         fs::metadata(&blob_path)?.len() as i64,
-                        probe.width,
-                        probe.height,
+                        width,
+                        height,
+                        perceptual_hash,
                     ],
                 )?;
                 conn.last_insert_rowid()
@@ -367,10 +394,159 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
         )?;
     }
 
+    // §3 steps 2 and 3. Run unconditionally (not just for a fresh
+    // `Imported` outcome) so both stay correct under this module's
+    // idempotent-retry design: a crash could land between the images-row
+    // insert above and here, in which case a resumed run sees this content
+    // as `Collapsed` (the row already exists) even though pairing/dedupe
+    // matching for it never actually ran. Both helpers below guard their
+    // own inserts against re-running, so calling them again here is safe
+    // whether this is a fresh import, a resumed one, or a genuine
+    // exact-duplicate re-import under a new filename.
+    pair_raw_and_jpeg(conn, batch_id, image_id, format, source_path)?;
+    if let Some(hash) = perceptual_hash {
+        record_near_duplicates(conn, library_id, image_id, hash)?;
+    }
+
     quarantine_original(conn, paths, library_id, journal_id, image_id, source_path)?;
     set_journal_step(conn, journal_id, "done", None)?;
 
     Ok(outcome)
+}
+
+/// §3 step 2: RAW+JPEG camera-pair auto-detection, run before perceptual
+/// matching (§3 step 3) so a bonded pair never gets a chance to also land in
+/// the review queue. Matches this file's image against every other image
+/// already imported in the *same batch* whose filename stem (case-
+/// insensitive, extension stripped) is identical and whose format is the
+/// opposite side of a RAW/JPEG pair.
+///
+/// Capture-date proximity — §3's named secondary signal — isn't used: the
+/// RAW side never gets a decoded `capture_date` this milestone (extension-
+/// only recognition, no EXIF parsing for RAW), so it's never available to
+/// compare against. Stem-matching within the batch is sufficient signal on
+/// its own for the realistic camera case (a RAW+JPEG pair sharing one
+/// filename stem from the same shutter press) — building a proximity system
+/// on top of data that doesn't exist yet would be scope creep the spec
+/// doesn't demand.
+fn pair_raw_and_jpeg(
+    conn: &Connection,
+    batch_id: i64,
+    image_id: i64,
+    format: &str,
+    source_path: &Path,
+) -> rusqlite::Result<()> {
+    let is_raw = lumenvault_decode::is_raw_extension(format);
+    let is_jpeg = format == "jpeg";
+    if !is_raw && !is_jpeg {
+        return Ok(());
+    }
+    let stem = filename_stem_lower(source_path);
+
+    let mut stmt = conn.prepare(
+        "SELECT im.id, im.original_format, s.source_path
+         FROM images im
+         JOIN image_sources s ON s.image_id = im.id
+         WHERE s.import_batch_id = ?1 AND im.id != ?2",
+    )?;
+    let candidates: Vec<(i64, String, String)> = stmt
+        .query_map(params![batch_id, image_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+
+    for (other_id, other_format, other_source_path) in candidates {
+        if filename_stem_lower(Path::new(&other_source_path)) != stem {
+            continue;
+        }
+        let pair = if is_raw && other_format == "jpeg" {
+            Some((image_id, other_id))
+        } else if is_jpeg && lumenvault_decode::is_raw_extension(&other_format) {
+            Some((other_id, image_id))
+        } else {
+            continue;
+        };
+        let Some((raw_image_id, jpeg_image_id)) = pair else { continue };
+
+        let already_paired: bool = conn
+            .query_row(
+                "SELECT 1 FROM raw_jpeg_pairs WHERE raw_image_id = ?1 AND jpeg_image_id = ?2",
+                params![raw_image_id, jpeg_image_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !already_paired {
+            conn.execute(
+                "INSERT INTO raw_jpeg_pairs (raw_image_id, jpeg_image_id) VALUES (?1, ?2)",
+                params![raw_image_id, jpeg_image_id],
+            )?;
+        }
+    }
+    Ok(())
+}
+
+/// A path's filename stem (extension stripped), lowercased for
+/// case-insensitive comparison — `IMG_0001.CR2` must match `img_0001.jpg`.
+fn filename_stem_lower(path: &Path) -> String {
+    path.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default()
+}
+
+/// §3 step 3 + §6: compares this newly-hashed image against every other
+/// **active** (not `merged`) image in the same library and files a
+/// `dedupe_review_queue` row for every match within
+/// `app_settings.hamming_threshold` (a global setting, read here rather
+/// than hardcoded).
+///
+/// Deliberate choice, since §6 only says near-duplicates "always route to a
+/// human review queue" without saying whether that means every match or
+/// only the closest one: this records **every** match within threshold, not
+/// just the nearest. A human reviewing later should see all real
+/// candidates rather than have some silently dropped because a closer one
+/// happened to exist — the more literal reading of "always route to
+/// review," flagged here since the spec doesn't spell out this choice
+/// explicitly.
+fn record_near_duplicates(
+    conn: &Connection,
+    library_id: i64,
+    image_id: i64,
+    perceptual_hash: i64,
+) -> rusqlite::Result<()> {
+    let threshold: i64 =
+        conn.query_row("SELECT hamming_threshold FROM app_settings WHERE id = 1", [], |row| row.get(0))?;
+
+    let mut stmt = conn.prepare(
+        "SELECT id, perceptual_hash FROM images
+         WHERE library_id = ?1 AND id != ?2 AND status = 'active' AND perceptual_hash IS NOT NULL",
+    )?;
+    let candidates: Vec<(i64, i64)> = stmt
+        .query_map(params![library_id, image_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+
+    for (other_id, other_hash) in candidates {
+        let distance = lumenvault_hash::hamming_distance(perceptual_hash as u64, other_hash as u64);
+        if i64::from(distance) > threshold {
+            continue;
+        }
+
+        let already_queued: bool = conn
+            .query_row(
+                "SELECT 1 FROM dedupe_review_queue
+                 WHERE (image_a_id = ?1 AND image_b_id = ?2) OR (image_a_id = ?2 AND image_b_id = ?1)",
+                params![image_id, other_id],
+                |_| Ok(()),
+            )
+            .optional()?
+            .is_some();
+        if !already_queued {
+            conn.execute(
+                "INSERT INTO dedupe_review_queue (image_a_id, image_b_id, hamming_distance, status)
+                 VALUES (?1, ?2, ?3, 'pending')",
+                params![image_id, other_id, distance],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 /// Writes `blob_path` from `source_path` if it doesn't already exist —
@@ -415,6 +591,18 @@ fn convertible_format(format: &str) -> Option<lumenvault_convert::ConvertibleFor
         "tiff" => Some(ConvertibleFormat::Tiff),
         _ => None,
     }
+}
+
+/// What the decode-validate-or-RAW-recognize step (§3 steps 1-3's shared
+/// prelude) determined about one source file, before conversion or dedupe
+/// matching run. Grouped into a named struct — matching [`ConversionResult`]
+/// below — rather than a same-shaped tuple, since these four fields always
+/// travel together from here through the `images` row insert.
+struct Classified {
+    format: &'static str,
+    width: Option<u32>,
+    height: Option<u32>,
+    perceptual_hash: Option<i64>,
 }
 
 /// Outcome of the §4 conversion attempt for one file. `bytes: None` means
