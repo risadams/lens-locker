@@ -416,9 +416,148 @@
   }
   .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
   .toast svg { width: 13px; height: 13px; color: var(--accent); }
+
+  /* ── First-run: choose the vault location ────────────────────────── */
+  .firstrun {
+    position: fixed; inset: 0; z-index: 60; background: var(--bg);
+    display: flex; align-items: center; justify-content: center;
+  }
+  .firstrun.hidden { display: none; }
+  .app.hidden { display: none; }
+  .firstrun-card { width: 520px; }
+  .firstrun-mark {
+    width: 44px; height: 44px; border-radius: 10px;
+    background: linear-gradient(155deg, var(--accent), var(--accent-dim));
+    display: flex; align-items: center; justify-content: center;
+    font-family: var(--mono); font-weight: 700; font-size: 18px; color: #17151c;
+    margin-bottom: 22px;
+  }
+  .firstrun h1 { font-size: 20px; margin: 0 0 8px; font-weight: 600; }
+  .firstrun-lede {
+    color: var(--text-muted); font-size: 13px; line-height: 1.6; margin: 0 0 26px;
+    max-width: 440px;
+  }
+  .firstrun-lede b { color: var(--text); font-weight: 500; }
+  .picker-box {
+    border: 1.5px dashed var(--border); border-radius: 8px; padding: 22px;
+    display: flex; flex-direction: column; align-items: center; gap: 12px;
+    text-align: center; margin-bottom: 20px; transition: border-color 0.15s;
+  }
+  .picker-box.chosen {
+    border-style: solid; align-items: stretch; text-align: left; padding: 16px 18px;
+  }
+  .picker-empty-icon {
+    width: 34px; height: 34px; color: var(--text-faint);
+  }
+  .picker-empty-text { color: var(--text-faint); font-size: 12.5px; }
+  .picker-chosen-row { display: flex; align-items: center; gap: 12px; }
+  .picker-chosen-icon {
+    width: 34px; height: 34px; border-radius: 7px; background: var(--surface-raised);
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--accent);
+  }
+  .picker-chosen-path {
+    font-family: var(--mono); font-size: 12px; color: var(--text);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  .picker-chosen-meta { font-size: 11px; color: var(--text-faint); margin-top: 2px; display: flex; gap: 10px; align-items: center; }
+  .picker-chosen-meta .space-ok { color: #7fa87a; }
+  .picker-chosen-meta .space-warn { color: var(--danger); }
+  .picker-change-btn {
+    margin-left: auto; background: none; border: none; color: var(--text-faint);
+    font-size: 11px; cursor: pointer; text-decoration: underline; flex-shrink: 0;
+    align-self: center;
+  }
+  .picker-change-btn:hover { color: var(--accent); }
+
+  .firstrun-existing {
+    display: flex; align-items: center; gap: 8px; margin-top: 10px;
+    padding: 9px 12px; background: var(--accent-soft); border: 1px solid var(--accent-dim);
+    border-radius: 6px; font-size: 12px; color: var(--accent);
+  }
+  .firstrun-existing svg { width: 15px; height: 15px; flex-shrink: 0; }
+
+  .firstrun-option {
+    display: flex; align-items: flex-start; justify-content: space-between;
+    gap: 16px; padding: 14px 0; border-top: 1px solid var(--border-soft);
+  }
+  .firstrun-option-label { font-size: 12.5px; font-weight: 500; margin-bottom: 3px; }
+  .firstrun-option-sub { font-size: 11.5px; color: var(--text-faint); line-height: 1.5; }
+  .firstrun-actions { margin-top: 22px; display: flex; justify-content: flex-end; }
+  .firstrun-actions .btn { min-width: 160px; justify-content: center; }
+  .firstrun-actions .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+  .firstrun-actions .btn:disabled:hover { background: var(--surface); border-color: var(--border); }
+
+  /* Fake folder-picker menu, standing in for the native dialog this mockup can't open */
+  .fake-picker-menu {
+    position: absolute; margin-top: 6px; width: 380px;
+    background: var(--surface-raised); border: 1px solid var(--border); border-radius: 6px;
+    box-shadow: 0 16px 32px rgba(0,0,0,0.5); padding: 6px; display: none; z-index: 61;
+  }
+  .fake-picker-menu.open { display: block; }
+  .fake-picker-item { padding: 8px 10px; border-radius: 4px; cursor: pointer; font-size: 12px; }
+  .fake-picker-item:hover { background: var(--surface-hover); }
+  .fake-picker-item .path { font-family: var(--mono); color: var(--text); }
+  .fake-picker-item .note { color: var(--text-faint); font-size: 10.5px; margin-top: 1px; }
 </style>
 
-<div class="app">
+<div class="firstrun" id="firstrun">
+  <div class="firstrun-card">
+    <div class="firstrun-mark">LV</div>
+    <h1>Choose where your vault lives</h1>
+    <p class="firstrun-lede">
+      LumenVault <b>moves</b> your photos here — it doesn't copy them, so the
+      originals won't be left behind wherever they are now. Pick a drive with
+      room for your whole library; you can't change this later without moving
+      everything by hand.
+    </p>
+
+    <div style="position: relative;">
+      <div class="picker-box" id="pickerBox">
+        <svg class="picker-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+        <span class="picker-empty-text">No folder chosen yet</span>
+        <button class="btn" id="chooseFolderBtn">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+          Choose Folder…
+        </button>
+      </div>
+      <div class="fake-picker-menu" id="fakePickerMenu">
+        <div class="fake-picker-item" data-choice="empty-d">
+          <div class="path">D:\Photos\LumenVault</div>
+          <div class="note">empty folder · 812 GB free — simulates a fresh vault</div>
+        </div>
+        <div class="fake-picker-item" data-choice="existing">
+          <div class="path">E:\Backups\LumenVault</div>
+          <div class="note">contains catalog.sqlite · 340 GB free — simulates reopening an existing vault</div>
+        </div>
+        <div class="fake-picker-item" data-choice="low-space">
+          <div class="path">C:\Users\chris\LumenVault</div>
+          <div class="note">empty folder · 4.2 GB free — simulates picking the wrong drive</div>
+        </div>
+      </div>
+    </div>
+
+    <div id="firstrunExisting" class="firstrun-existing" style="display:none">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m5 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+      A LumenVault library already exists here — opening it, not creating a new one.
+    </div>
+
+    <div id="firstrunNewOptions" style="display:none">
+      <div class="firstrun-option">
+        <div>
+          <div class="firstrun-option-label">Convert to save space (lossless)</div>
+          <div class="firstrun-option-sub">JPEG/PNG/BMP transcode to JPEG XL, verified byte-for-byte or pixel-for-pixel before the original is touched. TIFF is recompressed in place. Fixed for this vault — can't be changed after creation.</div>
+        </div>
+        <div class="toggle on" id="conversionToggle"></div>
+      </div>
+    </div>
+
+    <div class="firstrun-actions">
+      <button class="btn btn-primary" id="firstrunConfirmBtn" disabled>Choose a folder first</button>
+    </div>
+  </div>
+</div>
+
+<div class="app hidden" id="mainApp">
   <div class="rail">
     <div class="rail-mark">LV</div>
     <button class="rail-btn active" data-view="grid" title="All Photos">
@@ -577,6 +716,102 @@ function vg(size) {
   return `<svg class="verified-glyph" width="${size}" height="${size}" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2"><path d="M12 2l7 3v6c0 5-3.5 8.5-7 10-3.5-1.5-7-5-7-10V5z"/><path d="M9 12l2 2 4-4"/></svg>`;
 }
 document.getElementById('d-verified').innerHTML = vg(13) + ' Hash verified';
+
+// ── First-run: choose the vault location ──────────────────────────────
+// Standing in for a real native folder-picker dialog (can't open one from
+// a sandboxed mockup). No option here is pre-selected — the whole point of
+// this screen is that the app never silently picks a location on its own.
+const FAKE_CHOICES = {
+  'empty-d': { path: 'D:\\Photos\\LumenVault', freeGb: 812, existing: false, low: false },
+  'existing': { path: 'E:\\Backups\\LumenVault', freeGb: 340, existing: true, low: false },
+  'low-space': { path: 'C:\\Users\\chris\\LumenVault', freeGb: 4.2, existing: false, low: true },
+};
+
+let firstrunChoice = null;
+
+document.getElementById('chooseFolderBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  document.getElementById('fakePickerMenu').classList.toggle('open');
+});
+document.addEventListener('click', () => document.getElementById('fakePickerMenu').classList.remove('open'));
+
+document.querySelectorAll('.fake-picker-item').forEach(item => {
+  item.addEventListener('click', (e) => {
+    e.stopPropagation();
+    firstrunChoice = FAKE_CHOICES[item.dataset.choice];
+    document.getElementById('fakePickerMenu').classList.remove('open');
+    renderFirstrunChoice();
+  });
+});
+
+function renderFirstrunChoice() {
+  const box = document.getElementById('pickerBox');
+  const existingBanner = document.getElementById('firstrunExisting');
+  const newOptions = document.getElementById('firstrunNewOptions');
+  const confirmBtn = document.getElementById('firstrunConfirmBtn');
+
+  box.classList.add('chosen');
+  const spaceClass = firstrunChoice.low ? 'space-warn' : 'space-ok';
+  const spaceNote = firstrunChoice.low
+    ? `⚠ only ${firstrunChoice.freeGb} GB free — this fills up fast`
+    : `${firstrunChoice.freeGb} GB free`;
+  box.innerHTML = `
+    <div class="picker-chosen-row">
+      <div class="picker-chosen-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+      </div>
+      <div style="min-width:0; flex:1">
+        <div class="picker-chosen-path">${firstrunChoice.path}</div>
+        <div class="picker-chosen-meta"><span class="${spaceClass}">${spaceNote}</span></div>
+      </div>
+      <button class="picker-change-btn" id="changeFolderBtn">Change</button>
+    </div>
+  `;
+  document.getElementById('changeFolderBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    resetFirstrunPicker();
+  });
+
+  existingBanner.style.display = firstrunChoice.existing ? 'flex' : 'none';
+  newOptions.style.display = firstrunChoice.existing ? 'none' : 'block';
+
+  confirmBtn.disabled = false;
+  confirmBtn.textContent = firstrunChoice.existing ? 'Open Vault' : 'Create Vault';
+}
+
+function resetFirstrunPicker() {
+  firstrunChoice = null;
+  const box = document.getElementById('pickerBox');
+  box.classList.remove('chosen');
+  box.innerHTML = `
+    <svg class="picker-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+    <span class="picker-empty-text">No folder chosen yet</span>
+    <button class="btn" id="chooseFolderBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+      Choose Folder…
+    </button>
+  `;
+  document.getElementById('chooseFolderBtn').addEventListener('click', (e) => {
+    e.stopPropagation();
+    document.getElementById('fakePickerMenu').classList.toggle('open');
+  });
+  document.getElementById('firstrunExisting').style.display = 'none';
+  document.getElementById('firstrunNewOptions').style.display = 'none';
+  document.getElementById('firstrunConfirmBtn').disabled = true;
+  document.getElementById('firstrunConfirmBtn').textContent = 'Choose a folder first';
+}
+
+document.getElementById('conversionToggle').addEventListener('click', () => {
+  document.getElementById('conversionToggle').classList.toggle('on');
+});
+
+document.getElementById('firstrunConfirmBtn').addEventListener('click', () => {
+  if (!firstrunChoice) return;
+  document.getElementById('firstrun').classList.add('hidden');
+  document.getElementById('mainApp').classList.remove('hidden');
+  const verb = firstrunChoice.existing ? 'Opened' : 'Created';
+  showToast(`${verb} vault at ${firstrunChoice.path}`);
+});
 
 const PALETTES = [
   ['#5b7a8a','#2e3f49'], ['#8a6a4f','#3f2f22'], ['#6b7a4f','#333f22'],

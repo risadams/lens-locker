@@ -376,6 +376,37 @@ its own effort: re-benchmark `sqlite-vec`, integrate `ort`+DirectML, bundle a
 SigLIP ONNX export, populate `embeddings`/`tag_scores`, build the similarity-search
 UI.
 
+**Milestone 5.5 — First-run vault setup & configuration** (added 2026-07-18,
+after all seven MVP milestones were built — a real gap in the original
+breakdown, not a deferred item). No milestone ever specified how a user
+*chooses* where the library lives; Milestone 5's own build session flagged this
+as an unresolved judgment call and defaulted to `<app-data-dir>/library` — which
+turned out to be a real problem, not a placeholder: AppData is typically a small
+system-drive folder, actively wrong for something meant to hold a large personal
+photo library. **The app must never silently default the library location
+anywhere, under any circumstance.** Owner-approved design:
+`workplan/design/lumenvault-design.html`'s first-run screen (no path
+pre-filled — a folder must be explicitly chosen; free space shown after
+choosing; an existing library at the chosen path is detected and opened rather
+than re-created).
+
+Scope: a first-run screen (folder picker via the existing dialog plugin, no
+default; free-space display; existing-library detection routes to "Open," not
+"Create"; the conversion toggle only appears for a genuinely new vault, since
+§4/ticket 009 fixes `conversion_enabled` at creation) plus the minimal
+app-level bootstrap needed to support it — a small config file *outside* the
+library (an ordinary AppData location is fine for this, since it holds only a
+path string, not photo data) recording which folder the real library lives in,
+checked on every launch before the catalog is opened. If the recorded path is
+missing or inaccessible (e.g. an external drive unplugged), the app must
+route back to this same screen — never fall back to a default location.
+
+Also scope: exposing `app_settings.hamming_threshold` and `.retention_days` —
+both explicitly decided as user-tunable (tickets 011, 005) but never given a
+UI in any milestone — via a Settings screen. `libraries.root_path` is
+**not** made changeable after creation in this pass; moving an existing
+library's data to a new location is real future work, not solved here.
+
 ---
 
 ## Judgment calls made during assembly (owner-confirmed)
