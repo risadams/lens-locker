@@ -8,3 +8,13 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+lumenvault-catalog = { version = "0.1.0", path = "../catalog" }
+lumenvault-decode = { version = "0.1.0", path = "../decode" }
+lumenvault-hash = { version = "0.1.0", path = "../hash" }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
+thiserror = "2.0.18"
+walkdir = "2.5.0"
+
+[dev-dependencies]
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "webp", "gif", "bmp"] }
+tempfile = "3.27.0"
