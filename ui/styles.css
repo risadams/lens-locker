@@ -422,4 +422,84 @@ button { font-family: inherit; }
   z-index: 50; display: flex; align-items: center; gap: 7px;
 }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+
+/* ── First-run: choose the vault location (Milestone 5.5) ────────────────
+   Ported from workplan/design/lumenvault-design.html's #firstrun screen
+   (owner-approved) — the design's FAKE_CHOICES/simulated picker menu is
+   replaced with real `pick_library_folder`/`inspect_library_folder`
+   backend calls; the fake-picker-menu markup itself isn't needed here. */
+.firstrun {
+  position: fixed; inset: 0; z-index: 60; background: var(--bg);
+  display: flex; align-items: center; justify-content: center;
+}
+.firstrun.hidden { display: none; }
+.app.hidden { display: none; }
+.firstrun-card { width: 520px; }
+.firstrun-mark {
+  width: 44px; height: 44px; border-radius: 10px;
+  background: linear-gradient(155deg, var(--accent), var(--accent-dim));
+  display: flex; align-items: center; justify-content: center;
+  font-family: var(--mono); font-weight: 700; font-size: 18px; color: #17151c;
+  margin-bottom: 22px;
+}
+.firstrun h1 { font-size: 20px; margin: 0 0 8px; font-weight: 600; }
+.firstrun-lede {
+  color: var(--text-muted); font-size: 13px; line-height: 1.6; margin: 0 0 26px;
+  max-width: 440px;
+}
+.firstrun-lede b { color: var(--text); font-weight: 500; }
+.picker-box {
+  border: 1.5px dashed var(--border); border-radius: 8px; padding: 22px;
+  display: flex; flex-direction: column; align-items: center; gap: 12px;
+  text-align: center; margin-bottom: 20px; transition: border-color 0.15s;
+}
+.picker-box.chosen {
+  border-style: solid; align-items: stretch; text-align: left; padding: 16px 18px;
+}
+.picker-empty-icon { width: 34px; height: 34px; color: var(--text-faint); }
+.picker-empty-text { color: var(--text-faint); font-size: 12.5px; }
+.picker-chosen-row { display: flex; align-items: center; gap: 12px; }
+.picker-chosen-icon {
+  width: 34px; height: 34px; border-radius: 7px; background: var(--surface-raised);
+  display: flex; align-items: center; justify-content: center; flex-shrink: 0; color: var(--accent);
+}
+.picker-chosen-path {
+  font-family: var(--mono); font-size: 12px; color: var(--text);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.picker-chosen-meta { font-size: 11px; color: var(--text-faint); margin-top: 2px; display: flex; gap: 10px; align-items: center; }
+.picker-chosen-meta .space-ok { color: #7fa87a; }
+.picker-chosen-meta .space-warn { color: var(--danger); }
+.picker-change-btn {
+  margin-left: auto; background: none; border: none; color: var(--text-faint);
+  font-size: 11px; cursor: pointer; text-decoration: underline; flex-shrink: 0;
+  align-self: center;
+}
+.picker-change-btn:hover { color: var(--accent); }
+
+.firstrun-existing {
+  display: flex; align-items: center; gap: 8px; margin-top: 10px; margin-bottom: 10px;
+  padding: 9px 12px; background: var(--accent-soft); border: 1px solid var(--accent-dim);
+  border-radius: 6px; font-size: 12px; color: var(--accent);
+}
+.firstrun-existing svg { width: 15px; height: 15px; flex-shrink: 0; }
+
+.firstrun-option {
+  display: flex; align-items: flex-start; justify-content: space-between;
+  gap: 16px; padding: 14px 0; border-top: 1px solid var(--border-soft);
+}
+.firstrun-option-label { font-size: 12.5px; font-weight: 500; margin-bottom: 3px; }
+.firstrun-option-sub { font-size: 11.5px; color: var(--text-faint); line-height: 1.5; }
+.firstrun-actions { margin-top: 22px; display: flex; justify-content: flex-end; }
+.firstrun-actions .btn { min-width: 160px; justify-content: center; }
+.firstrun-actions .btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.firstrun-actions .btn:disabled:hover { background: var(--surface); border-color: var(--border); }
+
+.toggle { width: 34px; height: 19px; border-radius: 999px; background: var(--border); position: relative; cursor: pointer; flex-shrink: 0; }
+.toggle.on { background: var(--accent-dim); }
+.toggle::after { content: ''; position: absolute; width: 15px; height: 15px; border-radius: 50%; background: var(--text); top: 2px; left: 2px; transition: left 0.12s; }
+.toggle.on::after { left: 17px; background: #17151c; }
+
+/* Settings modal number inputs reuse .search's look outside the search bar */
+input[type="number"].search { padding-left: 10px; }
 .toast svg { width: 13px; height: 13px; color: var(--accent); }

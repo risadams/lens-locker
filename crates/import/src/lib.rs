@@ -156,6 +156,27 @@ pub fn ensure_library(conn: &Connection, root_path: &Path) -> rusqlite::Result<i
     Ok(conn.last_insert_rowid())
 }
 
+/// Creates a fresh `libraries` row with `conversion_enabled` set explicitly
+/// at creation time (workplan/SPEC.md §4/ticket 009: the setting is fixed
+/// for the life of the vault, so it must be chosen *when the row is made*,
+/// not defaulted and edited later). Unlike [`ensure_library`] this is not
+/// idempotent — it's only called from the "new vault" branch of first-run
+/// setup (Milestone 5.5), where the caller has already confirmed (by
+/// checking for an existing `catalog.sqlite`) that no library exists at
+/// this path yet.
+pub fn create_library_row(conn: &Connection, root_path: &Path, conversion_enabled: bool) -> rusqlite::Result<i64> {
+    let root = root_path.to_string_lossy();
+    conn.execute(
+        "INSERT INTO libraries (name, root_path, conversion_enabled) VALUES (?1, ?2, ?3)",
+        params![
+            root_path.file_name().map(|n| n.to_string_lossy()).unwrap_or(root.clone()),
+            root.as_ref(),
+            conversion_enabled as i64,
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
 /// Reads `libraries.conversion_enabled` for `library_id` — the "opt-out
 /// granularity: per-library, fixed at library creation" setting from
 /// workplan/SPEC.md §4.
@@ -997,6 +1018,26 @@ mod tests {
         let second = ensure_library(&conn, root).unwrap();
 
         assert_eq!(first, second);
+    }
+
+    #[test]
+    fn create_library_row_sets_conversion_enabled_at_creation() {
+        let conn = test_conn();
+        let root = Path::new("A:/fake/library-off");
+
+        let library_id = create_library_row(&conn, root, false).unwrap();
+
+        assert_eq!(conversion_enabled(&conn, library_id).unwrap(), false);
+    }
+
+    #[test]
+    fn create_library_row_defaults_to_conversion_on_when_requested() {
+        let conn = test_conn();
+        let root = Path::new("A:/fake/library-on");
+
+        let library_id = create_library_row(&conn, root, true).unwrap();
+
+        assert_eq!(conversion_enabled(&conn, library_id).unwrap(), true);
     }
 
     #[test]

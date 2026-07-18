@@ -7,7 +7,55 @@
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <div class="app">
+  <div class="firstrun" id="firstrun">
+    <div class="firstrun-card">
+      <div class="firstrun-mark">LV</div>
+      <h1>Choose where your vault lives</h1>
+      <p class="firstrun-lede">
+        LumenVault <b>moves</b> your photos here — it doesn't copy them, so the
+        originals won't be left behind wherever they are now. Pick a drive with
+        room for your whole library; you can't change this later without moving
+        everything by hand.
+      </p>
+
+      <div id="firstrunUnreachable" class="firstrun-existing" style="display:none; background: var(--danger-soft); border-color: var(--danger); color: var(--danger);">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+        <span id="firstrunUnreachableText"></span>
+      </div>
+
+      <div style="position: relative;">
+        <div class="picker-box" id="pickerBox">
+          <svg class="picker-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+          <span class="picker-empty-text">No folder chosen yet</span>
+          <button class="btn" id="chooseFolderBtn">
+            <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+            Choose Folder…
+          </button>
+        </div>
+      </div>
+
+      <div id="firstrunExisting" class="firstrun-existing" style="display:none">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m5 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        A LumenVault library already exists here — opening it, not creating a new one.
+      </div>
+
+      <div id="firstrunNewOptions" style="display:none">
+        <div class="firstrun-option">
+          <div>
+            <div class="firstrun-option-label">Convert to save space (lossless)</div>
+            <div class="firstrun-option-sub">JPEG/PNG/BMP transcode to JPEG XL, verified byte-for-byte or pixel-for-pixel before the original is touched. TIFF is recompressed in place. Fixed for this vault — can't be changed after creation.</div>
+          </div>
+          <div class="toggle on" id="conversionToggle"></div>
+        </div>
+      </div>
+
+      <div class="firstrun-actions">
+        <button class="btn btn-primary" id="firstrunConfirmBtn" disabled>Choose a folder first</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="app hidden" id="mainApp">
     <div class="rail">
       <div class="rail-mark">LV</div>
       <button class="rail-btn active" data-view="grid" title="All Photos">
@@ -20,6 +68,9 @@
       <div class="rail-spacer"></div>
       <button class="rail-btn" title="Import" id="railImportBtn">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"/></svg>
+      </button>
+      <button class="rail-btn" title="Settings" id="railSettingsBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09A1.65 1.65 0 0015 4.6a1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
       </button>
     </div>
 
@@ -108,6 +159,34 @@
       <div class="modal-footer">
         <button class="btn" id="importCancelBtn">Cancel</button>
         <button class="btn btn-primary" id="importChooseBtn">Choose Folder…</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-scrim" id="settingsModal">
+    <div class="modal">
+      <h3>Settings</h3>
+      <p>These apply to the whole vault. Both are safe to change any time.</p>
+
+      <div class="firstrun-option" style="border-top: none; padding-top: 0;">
+        <div>
+          <div class="firstrun-option-label">Duplicate sensitivity</div>
+          <div class="firstrun-option-sub">Two photos land in the review queue when they differ by this many bits or fewer (0–20). Lower is stricter — fewer false matches, but some near-duplicates may be missed.</div>
+        </div>
+      </div>
+      <input type="number" class="search" style="width:100%; margin-bottom:14px;" id="settingsHammingInput" min="0" max="20" step="1">
+
+      <div class="firstrun-option">
+        <div>
+          <div class="firstrun-option-label">Quarantine retention (days)</div>
+          <div class="firstrun-option-sub">How long a replaced or superseded original stays recoverable in quarantine before being permanently deleted.</div>
+        </div>
+      </div>
+      <input type="number" class="search" style="width:100%;" id="settingsRetentionInput" min="1" step="1">
+
+      <div class="modal-footer">
+        <button class="btn" id="settingsCancelBtn">Cancel</button>
+        <button class="btn btn-primary" id="settingsSaveBtn">Save</button>
       </div>
     </div>
   </div>

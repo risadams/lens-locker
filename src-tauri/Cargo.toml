@@ -34,6 +34,12 @@ lumenvault-xmp = { version = "0.1.0", path = "../crates/xmp" }
 # (confirmed via `cargo tree`) — declaring them directly just gives lib.rs
 # access to the same COM interfaces Tauri itself uses internally, at the
 # same resolved version, rather than adding a new dependency to the graph.
+[dev-dependencies]
+tempfile = "3.27.0"
+
 [target.'cfg(windows)'.dependencies]
 webview2-com = "0.38"
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com"] }
+# Milestone 5.5 adds `Win32_Storage_FileSystem` for `GetDiskFreeSpaceExW`
+# (free-space reporting in `inspect_library_folder`) — reusing this already-
+# direct dependency rather than adding a new disk-space crate.
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_Storage_FileSystem"] }

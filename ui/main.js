@@ -37,6 +37,7 @@ function escapeHtml(s) {
 }
 function fmtDate(iso) { return iso ? iso.slice(0, 10) : '—'; }
 function fmtSize(bytes) { return bytes == null ? '—' : (bytes / 1_000_000).toFixed(1) + ' MB'; }
+function fmtGb(bytes) { return (bytes / 1_000_000_000).toFixed(1); }
 
 // ── Filter / sort / search state ─────────────────────────────────────────
 const state = {
@@ -778,7 +779,188 @@ document.getElementById('view-grid').style.minHeight = '0';
 // way view-grid's state is already established above.
 document.getElementById('view-review').style.display = 'none';
 
+// ── First-run vault setup (Milestone 5.5) ────────────────────────────────
+//
+// Ports workplan/design/lumenvault-design.html's #firstrun screen
+// (owner-approved) onto the real backend: `pick_library_folder` opens the
+// native folder dialog (tauri-plugin-dialog, no default/pre-filled path,
+// matching the design), `inspect_library_folder` replaces the design's
+// FAKE_CHOICES map with a real existing-catalog check and real free-space
+// number, and `create_library`/`open_existing_library` replace the design's
+// "just flip to the main app" simulation with an actual catalog swap.
+let firstrunChoice = null; // { path, existingLibrary, freeBytes } | null
+
+function showFirstRun(previousPathUnreachable) {
+  document.getElementById('firstrun').classList.remove('hidden');
+  document.getElementById('mainApp').classList.add('hidden');
+  const banner = document.getElementById('firstrunUnreachable');
+  if (previousPathUnreachable) {
+    document.getElementById('firstrunUnreachableText').textContent =
+      `Your previous vault at ${previousPathUnreachable} could not be found — it may be on a drive that's not connected. Choose a location to continue.`;
+    banner.style.display = 'flex';
+  } else {
+    banner.style.display = 'none';
+  }
+}
+
+function showMainApp() {
+  document.getElementById('firstrun').classList.add('hidden');
+  document.getElementById('mainApp').classList.remove('hidden');
+}
+
+async function chooseFolder() {
+  let path;
+  try { path = await invoke('pick_library_folder'); } catch (e) { return; }
+  if (!path) return; // user canceled
+
+  let inspected;
+  try { inspected = await invoke('inspect_library_folder', { path }); } catch (e) {
+    showToast('Could not read that folder');
+    return;
+  }
+  firstrunChoice = { path, existingLibrary: inspected.existingLibrary, freeBytes: inspected.freeBytes };
+  renderFirstrunChoice();
+}
+document.getElementById('chooseFolderBtn').addEventListener('click', chooseFolder);
+
+function renderFirstrunChoice() {
+  const box = document.getElementById('pickerBox');
+  const existingBanner = document.getElementById('firstrunExisting');
+  const newOptions = document.getElementById('firstrunNewOptions');
+  const confirmBtn = document.getElementById('firstrunConfirmBtn');
+
+  box.classList.add('chosen');
+  // No fixed "low space" threshold ships in the design beyond an
+  // illustrative fake value — 10 GB is a reasonable, clearly-documented
+  // floor for "this fills up fast" on a photo library.
+  const lowSpace = firstrunChoice.freeBytes < 10_000_000_000;
+  const spaceClass = lowSpace ? 'space-warn' : 'space-ok';
+  const spaceNote = lowSpace
+    ? `⚠ only ${fmtGb(firstrunChoice.freeBytes)} GB free — this fills up fast`
+    : `${fmtGb(firstrunChoice.freeBytes)} GB free`;
+  box.innerHTML = `
+    <div class="picker-chosen-row">
+      <div class="picker-chosen-icon">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+      </div>
+      <div style="min-width:0; flex:1">
+        <div class="picker-chosen-path">${escapeHtml(firstrunChoice.path)}</div>
+        <div class="picker-chosen-meta"><span class="${spaceClass}">${spaceNote}</span></div>
+      </div>
+      <button class="picker-change-btn" id="changeFolderBtn">Change</button>
+    </div>
+  `;
+  document.getElementById('changeFolderBtn').addEventListener('click', resetFirstrunPicker);
+
+  existingBanner.style.display = firstrunChoice.existingLibrary ? 'flex' : 'none';
+  newOptions.style.display = firstrunChoice.existingLibrary ? 'none' : 'block';
+
+  confirmBtn.disabled = false;
+  confirmBtn.textContent = firstrunChoice.existingLibrary ? 'Open Vault' : 'Create Vault';
+}
+
+function resetFirstrunPicker() {
+  firstrunChoice = null;
+  const box = document.getElementById('pickerBox');
+  box.classList.remove('chosen');
+  box.innerHTML = `
+    <svg class="picker-empty-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+    <span class="picker-empty-text">No folder chosen yet</span>
+    <button class="btn" id="chooseFolderBtn">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 7a2 2 0 012-2h4l2 2h8a2 2 0 012 2v9a2 2 0 01-2 2H5a2 2 0 01-2-2V7z"/></svg>
+      Choose Folder…
+    </button>
+  `;
+  // The innerHTML replace above tore out the original button's listener —
+  // re-bind to the same handler.
+  box.querySelector('#chooseFolderBtn').addEventListener('click', chooseFolder);
+  document.getElementById('firstrunExisting').style.display = 'none';
+  document.getElementById('firstrunNewOptions').style.display = 'none';
+  document.getElementById('firstrunConfirmBtn').disabled = true;
+  document.getElementById('firstrunConfirmBtn').textContent = 'Choose a folder first';
+}
+
+document.getElementById('conversionToggle').addEventListener('click', () => {
+  document.getElementById('conversionToggle').classList.toggle('on');
+});
+
+document.getElementById('firstrunConfirmBtn').addEventListener('click', async () => {
+  if (!firstrunChoice) return;
+  const btn = document.getElementById('firstrunConfirmBtn');
+  btn.disabled = true;
+  const verb = firstrunChoice.existingLibrary ? 'Opening' : 'Creating';
+  btn.textContent = `${verb}…`;
+  try {
+    if (firstrunChoice.existingLibrary) {
+      await invoke('open_existing_library', { path: firstrunChoice.path });
+    } else {
+      const conversionEnabled = document.getElementById('conversionToggle').classList.contains('on');
+      await invoke('create_library', { path: firstrunChoice.path, conversionEnabled });
+    }
+  } catch (e) {
+    showToast('Could not set up the vault at that location');
+    btn.disabled = false;
+    btn.textContent = firstrunChoice.existingLibrary ? 'Open Vault' : 'Create Vault';
+    return;
+  }
+  showMainApp();
+  const doneVerb = firstrunChoice.existingLibrary ? 'Opened' : 'Created';
+  showToast(`${doneVerb} vault at ${firstrunChoice.path}`);
+  startMainApp();
+});
+
+// ── Settings (Milestone 5.5) ──────────────────────────────────────────────
+// hamming_threshold/retention_days were both decided as user-tunable
+// (tickets 011, 005) but never given a UI until now — a minimal modal
+// reusing the existing .modal-scrim pattern.
+function openSettingsModal() {
+  document.getElementById('settingsModal').classList.add('open');
+  invoke('get_app_settings').then(s => {
+    document.getElementById('settingsHammingInput').value = s.hammingThreshold;
+    document.getElementById('settingsRetentionInput').value = s.retentionDays;
+  }).catch(() => showToast('Could not load settings'));
+}
+function closeSettingsModal() { document.getElementById('settingsModal').classList.remove('open'); }
+document.getElementById('railSettingsBtn').addEventListener('click', openSettingsModal);
+document.getElementById('settingsCancelBtn').addEventListener('click', closeSettingsModal);
+document.getElementById('settingsSaveBtn').addEventListener('click', async () => {
+  const hammingThreshold = Number(document.getElementById('settingsHammingInput').value);
+  const retentionDays = Number(document.getElementById('settingsRetentionInput').value);
+  try {
+    await invoke('update_app_settings', { hammingThreshold, retentionDays });
+    showToast('Settings saved');
+    closeSettingsModal();
+  } catch (e) {
+    showToast('Could not save settings');
+  }
+});
+
 // ── Boot ───────────────────────────────────────────────────────────────
-refresh();
+// `check_library_status` decides between the first-run screen (true first
+// run, or a previously-configured library whose path is no longer
+// reachable — an unplugged external drive, say) and the main app. Only
+// once a live library exists do we call anything that touches the
+// catalog — list_images/list_review_queue/etc. would otherwise error.
 renderSortPop();
-refreshReviewBadge();
+
+function startMainApp() {
+  refresh();
+  refreshReviewBadge();
+}
+
+async function boot() {
+  let status;
+  try {
+    status = await invoke('check_library_status');
+  } catch (e) {
+    console.error(e);
+    status = { ready: false, previousPathUnreachable: null };
+  }
+  if (status.ready) {
+    showMainApp();
+    startMainApp();
+  } else {
+    showFirstRun(status.previousPathUnreachable);
+  }
+}
+boot();

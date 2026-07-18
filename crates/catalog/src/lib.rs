@@ -429,6 +429,34 @@ pub fn record_thumbnail(conn: &Connection, image_id: i64, variant: &str, format:
     Ok(())
 }
 
+// ── App settings (workplan/SPEC.md §5.5, Milestone 5.5) ─────────────────
+//
+// `app_settings` is a singleton row (`id = 1`, seeded by schema.sql) holding
+// the two values tickets 011/005 explicitly called user-tunable but no
+// milestone ever gave a UI: dedupe sensitivity and quarantine retention.
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct AppSettings {
+    pub hamming_threshold: i64,
+    pub retention_days: i64,
+}
+
+pub fn get_app_settings(conn: &Connection) -> rusqlite::Result<AppSettings> {
+    conn.query_row(
+        "SELECT hamming_threshold, retention_days FROM app_settings WHERE id = 1",
+        [],
+        |row| Ok(AppSettings { hamming_threshold: row.get(0)?, retention_days: row.get(1)? }),
+    )
+}
+
+pub fn update_app_settings(conn: &Connection, settings: AppSettings) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE app_settings SET hamming_threshold = ?1, retention_days = ?2 WHERE id = 1",
+        params![settings.hamming_threshold, settings.retention_days],
+    )?;
+    Ok(())
+}
+
 // ── Review queue (workplan/SPEC.md §6, Milestone 5) ─────────────────────
 //
 // Milestone 3 built detection (`dedupe_review_queue` rows); resolution
@@ -889,5 +917,24 @@ mod tests {
         assert_eq!(entries[0].hamming_distance, 3);
         assert_eq!(entries[0].image_a.id, a);
         assert_eq!(entries[0].image_b.id, b);
+    }
+
+    #[test]
+    fn app_settings_read_the_schema_defaults() {
+        let conn = migrated_conn();
+
+        let settings = super::get_app_settings(&conn).unwrap();
+
+        assert_eq!(settings, super::AppSettings { hamming_threshold: 5, retention_days: 30 });
+    }
+
+    #[test]
+    fn app_settings_round_trip_through_update() {
+        let conn = migrated_conn();
+
+        super::update_app_settings(&conn, super::AppSettings { hamming_threshold: 8, retention_days: 14 }).unwrap();
+        let settings = super::get_app_settings(&conn).unwrap();
+
+        assert_eq!(settings, super::AppSettings { hamming_threshold: 8, retention_days: 14 });
     }
 }
