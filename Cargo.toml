@@ -1,0 +1,21 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/core",
+    "crates/catalog",
+    "crates/hash",
+    "crates/decode",
+    "crates/raw-worker",
+    "crates/convert",
+    "crates/xmp",
+    "crates/import",
+    "src-tauri",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+publish = false
+
+[workspace.lints.rust]
+unsafe_code = "deny"

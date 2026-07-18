@@ -1,0 +1,17 @@
+# Rust
+/target/
+crates/*/target/
+
+# Node / frontend tooling
+node_modules/
+/ui/dist/
+
+# Tauri
+/gen/schemas
+src-tauri/target/
+
+# Editor / OS noise
+.vscode/*
+!.vscode/extensions.json
+.DS_Store
+Thumbs.db

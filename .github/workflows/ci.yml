@@ -1,0 +1,30 @@
+name: CI
+
+# Dormant until this repo has a remote to run against (workplan/SPEC.md
+# Milestone 0) — the checks themselves already run locally via
+# `cargo check`, `cargo test`, and `cargo deny check`. This file activates
+# automatically the moment the repo is pushed anywhere that runs Actions.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - name: cargo check
+        run: cargo check --workspace --all-targets
+      - name: cargo test
+        run: cargo test --workspace
+
+  deny:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check
