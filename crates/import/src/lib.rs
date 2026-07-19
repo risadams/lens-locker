@@ -282,6 +282,42 @@ pub fn sweep_stale_previews(conn: &Connection) -> Result<usize, ImportError> {
     Ok(swept)
 }
 
+/// Launch-only repair (same pattern as [`sweep_expired_quarantine`]):
+/// generates the `grid256` thumbnail for any active image that doesn't
+/// have one yet, decoding straight from the stored blob. Exists for images
+/// already left in this state by the bug `import_file` fixed (see its
+/// thumbnail-generation comment): a crash between the `images` row INSERT
+/// and thumbnail generation, followed by a resume that took the
+/// "already exists" path, used to permanently skip the thumbnail — that
+/// resume-time gap is now closed, but an image already broken by it (in a
+/// vault from before this fix) has no source file left to re-walk, since
+/// import is destructive move-in. This sweep is the repair path for that
+/// case. Best-effort per image: an undecodable blob (RAW, or genuinely
+/// missing/corrupt) is skipped, not fatal to the sweep.
+pub fn backfill_missing_grid_thumbnails(conn: &Connection, paths: &LibraryPaths) -> Result<usize, ImportError> {
+    let mut stmt = conn.prepare(
+        "SELECT im.id, im.original_hash, im.stored_path FROM images im
+         LEFT JOIN thumbnails th ON th.image_id = im.id AND th.variant = 'grid256'
+         WHERE th.id IS NULL AND im.status = 'active'",
+    )?;
+    let candidates: Vec<(i64, Vec<u8>, String)> =
+        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect::<Result<_, _>>()?;
+    drop(stmt);
+
+    let mut backfilled = 0;
+    for (image_id, original_hash, stored_path) in candidates {
+        let Ok(probe) = lumenvault_decode::probe(Path::new(&stored_path)) else {
+            continue; // undecodable (missing file) or RAW with no pixels — nothing to generate from
+        };
+        let hash_hex: String = original_hash.iter().map(|b| format!("{b:02x}")).collect();
+        let thumb_path = paths.thumbnail_path(&hash_hex);
+        lumenvault_decode::write_jpeg_thumbnail(&probe.image, &thumb_path, 256)?;
+        lumenvault_catalog::record_thumbnail(conn, image_id, "grid256", "jpeg", &thumb_path.to_string_lossy())?;
+        backfilled += 1;
+    }
+    Ok(backfilled)
+}
+
 /// Decodes `image_id`'s stored blob and re-encodes it as a full-resolution,
 /// browser-displayable JPEG, entirely in memory — see
 /// `lumenvault_decode::encode_jpeg_bytes`'s doc for why this is generated
@@ -485,31 +521,44 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
                         perceptual_hash,
                     ],
                 )?;
-                let new_id = conn.last_insert_rowid();
-
-                // Thumbnail generation (§9), at import time — reuses the
-                // pixels `probe()` already decoded (see the module doc on
-                // `decoded_image`) rather than re-decoding the blob. Content-
-                // addressed by the *original* hash (same key as the blob
-                // path) so it's stable and collision-free; skipped for RAW
-                // files, which have no decoded pixels this milestone (see
-                // lumenvault-decode's module doc) — a genuine, documented gap,
-                // not silently swallowed.
-                // Full-resolution previews are generated JIT on full-size
-                // view instead (see `render_full_preview_bytes`'s doc for
-                // why: eager generation here used to roughly double the
-                // vault's disk footprint).
-                if let Some(image) = &decoded_image {
-                    let thumb_path = paths.thumbnail_path(&original_hash_hex);
-                    lumenvault_decode::write_jpeg_thumbnail(image, &thumb_path, 256)?;
-                    lumenvault_catalog::record_thumbnail(conn, new_id, "grid256", "jpeg", &thumb_path.to_string_lossy())?;
-                }
-
-                new_id
+                conn.last_insert_rowid()
             }
         };
         (image_id, FileOutcome::Imported { image_id })
     };
+
+    // Thumbnail generation (§9) — reuses the pixels `probe()` already
+    // decoded at the top of this function (see the module doc on
+    // `decoded_image`) rather than re-decoding the blob. Content-addressed
+    // by the *original* hash so it's stable and collision-free; skipped for
+    // RAW files, which have no decoded pixels this milestone (see
+    // lumenvault-decode's module doc) — a genuine, documented gap, not
+    // silently swallowed.
+    //
+    // Deliberately runs here, after `image_id` is resolved either way —
+    // *not* only inside the "genuinely new row" branch above. A crash
+    // between the `images` row INSERT above and this point (a real,
+    // observed failure mode: an OS-level "Application Hang" force-close
+    // mid-import) leaves a row with no thumbnail; resuming later re-walks
+    // the same source file (if it's still there) and finds that row via
+    // the `existing_image`/inner `original_hash` lookups above, taking the
+    // "already exists" path — which, before this fix, permanently skipped
+    // thumbnail generation for that image. Checking-then-generating here
+    // covers both a fresh insert and any duplicate/resume path uniformly;
+    // `has_grid_thumbnail` keeps the common case (a healthy existing
+    // thumbnail) a cheap no-op rather than redundantly re-encoding on every
+    // genuine content-duplicate import.
+    if let Some(image) = &decoded_image {
+        let has_grid_thumbnail: bool = conn
+            .query_row("SELECT 1 FROM thumbnails WHERE image_id = ?1 AND variant = 'grid256'", [image_id], |_| Ok(()))
+            .optional()?
+            .is_some();
+        if !has_grid_thumbnail {
+            let thumb_path = paths.thumbnail_path(&original_hash_hex);
+            lumenvault_decode::write_jpeg_thumbnail(image, &thumb_path, 256)?;
+            lumenvault_catalog::record_thumbnail(conn, image_id, "grid256", "jpeg", &thumb_path.to_string_lossy())?;
+        }
+    }
 
     // Record which image this journal entry resolved to, so a resumed run
     // reading a 'done' row back (see the resume check above) can report it.
@@ -1237,6 +1286,49 @@ mod tests {
     }
 
     #[test]
+    fn resuming_after_a_crash_between_the_row_insert_and_thumbnail_generation_still_gets_a_thumbnail() {
+        // Simulates a crash that got as far as inserting the `images` row
+        // but never reached thumbnail generation — a real observed failure
+        // mode (an OS "Application Hang" force-close mid-import). Resuming
+        // must not permanently skip the thumbnail just because the image
+        // now looks like an "already exists" duplicate.
+        let conn = test_conn();
+        let source_dir = tempfile::tempdir().unwrap();
+        let library_dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(library_dir.path());
+
+        let library_id = ensure_library(&conn, library_dir.path()).unwrap();
+        let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
+        let path = write_png(source_dir.path(), "crashed.png", 42);
+
+        let original_hash = lumenvault_hash::hash_file(&path).unwrap();
+        conn.execute(
+            "INSERT INTO images (
+                library_id, original_hash, stored_hash, stored_path,
+                original_format, stored_format, conversion_status,
+                file_size_bytes, width, height, perceptual_hash
+            ) VALUES (?1, ?2, ?2, 'A:/fake/stored.png', 'png', 'png', 'not_applicable', 1, 8, 8, 0)",
+            params![library_id, original_hash.as_slice()],
+        )
+        .unwrap();
+        let image_id = conn.last_insert_rowid();
+
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let outcome = import_file(&ctx, &path).unwrap();
+
+        assert!(matches!(outcome, FileOutcome::Collapsed { image_id: id } if id == image_id));
+
+        let thumb_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM thumbnails WHERE image_id = ?1 AND variant = 'grid256'",
+                [image_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(thumb_count, 1, "the missing thumbnail must be backfilled even though this resolved as a duplicate");
+    }
+
+    #[test]
     fn retention_sweep_purges_only_expired_entries() {
         let conn = test_conn();
         let library_dir = tempfile::tempdir().unwrap();
@@ -1265,6 +1357,42 @@ mod tests {
         assert_eq!(purged, 1);
         assert!(!expired_path.exists());
         assert!(fresh_path.exists());
+    }
+
+    #[test]
+    fn backfill_missing_grid_thumbnails_repairs_an_image_left_thumbnail_less() {
+        // Simulates a vault with an image already broken by the bug
+        // import_file's thumbnail-generation fix addresses at import time —
+        // a healthy `images` row (journal already 'done', so a normal
+        // resume wouldn't touch it) with no grid256 thumbnail and no
+        // source file left to re-walk.
+        let conn = test_conn();
+        let source_dir = tempfile::tempdir().unwrap();
+        let library_dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(library_dir.path());
+        let library_id = ensure_library(&conn, library_dir.path()).unwrap();
+        let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
+        let path = write_png(source_dir.path(), "photo.png", 5);
+
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let outcome = import_file(&ctx, &path).unwrap();
+        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+
+        // Hand-roll the broken state: the thumbnail this import legitimately
+        // created is deleted, simulating a vault from before the fix.
+        conn.execute("DELETE FROM thumbnails WHERE image_id = ?1 AND variant = 'grid256'", [image_id]).unwrap();
+
+        let backfilled = backfill_missing_grid_thumbnails(&conn, &paths).unwrap();
+
+        assert_eq!(backfilled, 1);
+        let thumb_path: String = conn
+            .query_row(
+                "SELECT path FROM thumbnails WHERE image_id = ?1 AND variant = 'grid256'",
+                [image_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(std::path::Path::new(&thumb_path).exists(), "the backfilled thumbnail file must actually exist");
     }
 
     #[test]

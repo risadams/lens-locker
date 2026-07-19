@@ -681,6 +681,10 @@ fn try_init_state(root: &Path) -> CmdResult<AppState> {
     // Launch-only cleanup: reclaim any preview_full files/rows left behind
     // by the old eager-generation design (see `sweep_stale_previews`'s doc).
     let _ = lumenvault_import::sweep_stale_previews(&conn);
+    // Launch-only repair: images left with no grid256 thumbnail by a fixed
+    // bug (see `backfill_missing_grid_thumbnails`'s doc) — a crash between
+    // the images row insert and thumbnail generation used to be permanent.
+    let _ = lumenvault_import::backfill_missing_grid_thumbnails(&conn, &paths);
     Ok(AppState { conn: Mutex::new(conn), paths, library_id })
 }
 
