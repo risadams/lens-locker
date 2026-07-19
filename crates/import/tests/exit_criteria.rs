@@ -123,7 +123,7 @@ fn importing_a_folder_with_known_dupes_and_a_raw_jpeg_pair_produces_a_correct_qu
     let library_id = ensure_library(&conn, library_dir.path()).unwrap();
     let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
     let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
-    import_directory(&ctx, source_dir.path(), |_, _| {}).unwrap();
+    import_directory(&ctx, source_dir.path(), |_, _| true).unwrap();
 
     // ── Exact-duplicate collapse (Milestone 1 behavior, re-verified under
     // Milestone 3's added logic) ────────────────────────────────────────

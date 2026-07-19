@@ -10,6 +10,7 @@
 // protocol (`convertFileSrc`) — see the deviation note below.
 
 const { invoke, convertFileSrc } = window.__TAURI__.core;
+const { listen } = window.__TAURI__.event;
 
 // ── Thumbnail serving — a documented judgment call ──────────────────────
 // workplan/research/thumbnail-grid-benchmark.md found that a *hand-rolled*
@@ -540,16 +541,32 @@ function closeLightbox() { lightboxEl.classList.remove('open'); }
 
 async function renderLightbox() {
   const detail = await invoke('get_image_detail', { id: lbCurrentId });
-  // `previewPath` is a full-resolution, browser-displayable JPEG cache of
-  // the blob (backend generates it at import time since WebView2 can't
-  // decode .jxl in an <img> at all) — falls back to the grid thumbnail only
-  // for images imported before this existed, or RAW files.
-  lbImgEl.src = assetSrc(detail.previewPath || thumbnailPathFor(lbCurrentId));
+  const requestedId = lbCurrentId;
+
+  // Show the grid thumbnail immediately (already on disk, instant), then
+  // swap in a full-resolution render once the backend finishes decoding
+  // it. `get_full_preview` generates it fresh on every call — nothing is
+  // cached to disk (see its doc: caching every viewed photo's full-res
+  // render used to roughly double the vault's disk footprint) — so this is
+  // a genuine async decode, not a cache lookup.
+  lbImgEl.src = assetSrc(thumbnailPathFor(lbCurrentId));
   document.getElementById('lb-filename').textContent = detail.filename;
 
   const idx = currentVisibleIndex(lbCurrentId);
   document.getElementById('lb-counter').textContent = idx >= 0 ? `${idx + 1} of ${total}` : '';
   applyLbTransform();
+
+  try {
+    const dataUrl = await invoke('get_full_preview', { id: requestedId });
+    // Only apply if still viewing the same image — the user may have
+    // paged on to another one while this was decoding.
+    if (dataUrl && lbCurrentId === requestedId) {
+      lbImgEl.src = dataUrl;
+    }
+  } catch (e) {
+    // Full-resolution render failed (e.g. a RAW file) — the thumbnail
+    // already showing is an acceptable fallback.
+  }
 }
 
 function currentVisibleIndex(id) {
@@ -665,22 +682,90 @@ document.getElementById('lbExportBtn').addEventListener('click', async () => {
 });
 
 // ── Import modal ──────────────────────────────────────────────────────────
-function openImportModal() { document.getElementById('importModal').classList.add('open'); }
+
+// Whether an import is actively running in the backend right now — lets
+// Cancel tell "stop a running import" apart from "just close this modal."
+let importRunning = false;
+
+function openImportModal() {
+  document.getElementById('importModal').classList.add('open');
+  // If an import is still running in the background (the user closed the
+  // modal on it earlier rather than canceling), reflect that truthfully
+  // instead of showing "Choose a folder to import" next to a button that's
+  // still disabled and would silently do nothing if clicked.
+  if (!importRunning) {
+    document.getElementById('importStatus').textContent = 'Choose a folder to import';
+    setImportProgress(0, 0);
+  }
+}
 function closeImportModal() { document.getElementById('importModal').classList.remove('open'); }
 document.getElementById('railImportBtn').addEventListener('click', openImportModal);
 document.getElementById('topbarImportBtn').addEventListener('click', openImportModal);
-document.getElementById('importCancelBtn').addEventListener('click', closeImportModal);
+
+document.getElementById('importCancelBtn').addEventListener('click', () => {
+  if (importRunning) {
+    // Fire-and-forget: `cancel_import` just sets a flag `import_directory`'s
+    // loop checks after its current file finishes, so this doesn't block —
+    // the in-flight invoke('import_directory') call's own `finally` handles
+    // cleanup (re-enabling the Choose Folder button, resetting progress)
+    // once the backend actually winds down, whether or not this modal is
+    // still open to see it happen.
+    invoke('cancel_import').catch(() => {});
+    document.getElementById('importStatus').textContent = 'Canceling…';
+  }
+  closeImportModal();
+});
+
+function setImportProgress(current, total) {
+  const box = document.getElementById('importProgress');
+  const fill = document.getElementById('importProgressFill');
+  const label = document.getElementById('importProgressLabel');
+  box.style.display = total > 0 ? 'block' : 'none';
+  fill.style.width = total > 0 ? `${Math.min(100, (current / total) * 100)}%` : '0%';
+  label.textContent = total > 0 ? `${current} of ${total}` : '';
+}
+
 document.getElementById('importChooseBtn').addEventListener('click', async () => {
   const status = document.getElementById('importStatus');
-  status.textContent = 'Importing…';
+  const chooseBtn = document.getElementById('importChooseBtn');
+  status.textContent = 'Choose a folder…';
+  setImportProgress(0, 0);
+  chooseBtn.disabled = true;
+
+  let unlisten = null;
   try {
-    const importedCount = await invoke('import_directory');
-    showToast(`Imported ${importedCount} photo${importedCount === 1 ? '' : 's'}`);
+    // `import_directory` reports its own progress via the `import-progress`
+    // event (backend counts the folder up front, since its own file walk is
+    // lazy and doesn't know a total until it's done) rather than a return
+    // value, since the command doesn't resolve until the whole import
+    // finishes. Setting this up inside the try means a failure here still
+    // hits `finally` and re-enables the button, instead of leaving it
+    // permanently disabled.
+    unlisten = await listen('import-progress', (event) => {
+      const { current, total } = event.payload;
+      status.textContent = `Importing…`;
+      setImportProgress(current, total);
+    });
+    importRunning = true;
+    const { imported, canceled } = await invoke('import_directory');
+    if (canceled) {
+      showToast(`Import canceled — ${imported} photo${imported === 1 ? '' : 's'} imported so far`);
+    } else {
+      showToast(`Imported ${imported} photo${imported === 1 ? '' : 's'}`);
+    }
     closeImportModal();
     refreshGrid();
     refreshReviewBadge();
   } catch (e) {
-    status.textContent = 'Import canceled or failed.';
+    // Backend errors (CmdError) serialize as plain strings — surface the
+    // real one (e.g. "an import is already in progress") rather than a
+    // generic message that would mask it.
+    status.textContent = typeof e === 'string' ? e : 'Import canceled or failed.';
+  } finally {
+    importRunning = false;
+    if (unlisten) unlisten();
+    chooseBtn.disabled = false;
+    setImportProgress(0, 0);
   }
 });
 

@@ -87,6 +87,7 @@ fn run(source_dir: PathBuf, library_root: PathBuf) -> Result<(), Box<dyn std::er
         if delay > 0 {
             std::thread::sleep(Duration::from_millis(delay));
         }
+        true
     })?;
 
     println!(

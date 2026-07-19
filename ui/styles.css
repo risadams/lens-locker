@@ -288,6 +288,10 @@ button { font-family: inherit; }
   text-align: center; color: var(--text-faint); font-size: 12px; margin-bottom: 16px;
 }
 .modal-footer { display: flex; justify-content: flex-end; gap: 8px; margin-top: 18px; }
+.import-progress { margin: -6px 0 16px; }
+.import-progress-bar { height: 6px; border-radius: 999px; background: var(--border); overflow: hidden; }
+.import-progress-fill { height: 100%; width: 0%; background: var(--accent); transition: width 0.15s ease-out; }
+.import-progress-label { font-family: var(--mono); font-size: 11px; color: var(--text-faint); text-align: center; margin-top: 8px; }
 
 /* Filter popovers */
 .popover {

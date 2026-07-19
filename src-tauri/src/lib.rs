@@ -32,10 +32,12 @@
 use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
 use lumenvault_catalog::{GridImage, ImageFilters, SortOrder};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
-use tauri::Manager;
+use tauri::{Emitter, Manager};
 
 #[cfg(windows)]
 mod webview2_hardening;
@@ -44,6 +46,71 @@ struct AppState {
     conn: Mutex<Connection>,
     paths: lumenvault_import::LibraryPaths,
     library_id: i64,
+}
+
+/// Guards against two `import_directory` calls running concurrently.
+///
+/// A real bug, not just a hypothetical: `import_directory` holds
+/// `AppState.conn`'s mutex (a plain `std::sync::Mutex`, not an async one)
+/// for its entire — potentially long — synchronous, CPU-heavy run (decode,
+/// hash, convert, write thumbnails/previews for every file). Running that
+/// *inline* inside an `async fn` command, on Tauri's shared tokio worker
+/// pool, means a second concurrent import doesn't just wait politely: it
+/// parks a worker thread on `.lock()`, and if enough ordinary commands
+/// (`list_images`, `list_review_queue`, …) pile up doing the same while
+/// that pool is small, the whole app can stop processing IPC messages
+/// entirely — observed as a genuine Windows "Application Hang," not a
+/// graceful error. Making a second import impossible to *start* (rather
+/// than just visually discouraged via a disabled frontend button, which a
+/// user can route around by reopening the modal) removes the contention at
+/// its source. See also `import_directory`'s use of
+/// `tauri::async_runtime::spawn_blocking`, which keeps a single import from
+/// starving the worker pool even on its own.
+///
+/// Also carries `cancel_requested`: clicking Cancel in the import modal
+/// used to only hide the frontend UI, leaving the backend import running
+/// (still holding `AppState.conn`'s mutex) with no way to actually stop it
+/// — the exact trap that produced the worker-pool contention above in
+/// practice, since the frontend has no way to tell a second import attempt
+/// apart from "the first one is stuck." `cancel_import` sets this flag;
+/// `import_directory`'s per-file callback checks it and stops the walk
+/// early, safe by the crate's own crash-safety design (see
+/// `lumenvault_import::import_directory`'s doc) — a canceled import needs
+/// no special cleanup, it's resumable exactly like a killed process would
+/// leave it.
+#[derive(Default)]
+struct ImportLock {
+    running: std::sync::atomic::AtomicBool,
+    cancel_requested: std::sync::atomic::AtomicBool,
+}
+
+/// RAII handle on a successful [`ImportLock`] acquisition — releases
+/// automatically on drop, including on early return via `?`, so there's no
+/// path that leaves the lock held after `import_directory` exits.
+struct ImportGuard<'a>(&'a ImportLock);
+
+impl ImportLock {
+    fn try_acquire(&self) -> Option<ImportGuard<'_>> {
+        self.running
+            .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+            .ok()
+            .map(|_| {
+                // Clear any stale request from a previous run — this run
+                // hasn't been asked to cancel yet.
+                self.cancel_requested.store(false, std::sync::atomic::Ordering::SeqCst);
+                ImportGuard(self)
+            })
+    }
+
+    fn is_cancel_requested(&self) -> bool {
+        self.cancel_requested.load(std::sync::atomic::Ordering::SeqCst)
+    }
+}
+
+impl Drop for ImportGuard<'_> {
+    fn drop(&mut self) {
+        self.0.running.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
 }
 
 /// Whether a live library is available yet. Replaces the Milestone 5
@@ -79,6 +146,10 @@ enum CmdError {
     MissingKeeper,
     #[error("no library is configured yet")]
     LibraryNotConfigured,
+    #[error("an import is already in progress")]
+    ImportAlreadyRunning,
+    #[error("background task panicked: {0}")]
+    TaskPanicked(String),
     #[error("a LumenVault library already exists at this location — open it instead of creating a new one")]
     LibraryAlreadyExists,
     #[error("no LumenVault library was found at this location")]
@@ -173,6 +244,27 @@ fn with_ready<T>(
     }
 }
 
+/// A native folder-picker builder, parented to the main window.
+///
+/// `tauri_plugin_dialog`'s `FileDialogBuilder` has `parent: None` by
+/// default — `app.dialog().file()` alone does *not* make the dialog
+/// application-modal to any window. On Windows that means the picker can
+/// end up behind the main window with no OS-enforced link between the two:
+/// the user can keep interacting with (and closing) LumenVault's own modals
+/// while the real native dialog is still open elsewhere, waiting on a
+/// choice that never comes — the backend command stays blocked on it
+/// forever, and any UI state gated on that command (e.g. a disabled
+/// "Choose Folder…" button) never recovers. Every `pick_folder` call must
+/// go through this helper instead of `app.dialog().file()` directly.
+fn file_dialog(app: &tauri::AppHandle) -> tauri_plugin_dialog::FileDialogBuilder<tauri::Wry> {
+    use tauri_plugin_dialog::DialogExt;
+    let builder = app.dialog().file();
+    match app.get_webview_window("main") {
+        Some(window) => builder.set_parent(&window),
+        None => builder,
+    }
+}
+
 #[tauri::command]
 fn list_images(
     state: tauri::State<Mutex<LibraryState>>,
@@ -214,7 +306,6 @@ struct ImageDetailDto {
     stored_path: String,
     tags: Vec<String>,
     first_imported_at: String,
-    preview_path: Option<String>,
 }
 
 #[tauri::command]
@@ -238,9 +329,30 @@ fn get_image_detail(state: tauri::State<Mutex<LibraryState>>, id: i64) -> CmdRes
             stored_path: d.stored_path,
             tags: d.tags,
             first_imported_at: d.first_imported_at,
-            preview_path: d.preview_path,
         })
     })
+}
+
+/// Renders `id`'s stored blob as a full-resolution, browser-displayable
+/// JPEG and returns it as a `data:` URL — generated fresh on every call,
+/// nothing is written to disk (see `lumenvault_import::render_full_preview_bytes`'s
+/// doc for why: an earlier design cached this to disk at import time and it
+/// roughly doubled the vault's footprint for photos nobody ever opened
+/// full-size). Run via `spawn_blocking` since decode+encode is real,
+/// synchronous CPU work — same reasoning as `import_directory`'s use of it.
+/// `Ok(None)` if the blob can't be decoded (RAW, or missing/corrupt); the
+/// frontend falls back to the grid thumbnail in that case.
+#[tauri::command]
+async fn get_full_preview(app: tauri::AppHandle, id: i64) -> CmdResult<Option<String>> {
+    tauri::async_runtime::spawn_blocking(move || {
+        with_ready(&app.state::<Mutex<LibraryState>>(), |app_state| {
+            let conn = app_state.conn.lock().unwrap();
+            let bytes = lumenvault_import::render_full_preview_bytes(&conn, id)?;
+            Ok(bytes.map(|b| format!("data:image/jpeg;base64,{}", BASE64_STANDARD.encode(b))))
+        })
+    })
+    .await
+    .map_err(|e| CmdError::TaskPanicked(e.to_string()))?
 }
 
 #[tauri::command]
@@ -349,56 +461,123 @@ fn copy_file_path(state: tauri::State<Mutex<LibraryState>>, id: i64) -> CmdResul
     })
 }
 
-#[tauri::command]
-async fn import_directory(app: tauri::AppHandle, state: tauri::State<'_, Mutex<LibraryState>>) -> CmdResult<usize> {
-    use tauri_plugin_dialog::DialogExt;
+/// Emitted to the `import-progress` frontend event as each source file is
+/// processed, so the import modal can show "X of Y" / a progress bar rather
+/// than sitting on an indefinite "Importing…" — `total` is a plain
+/// filesystem walk done up front (`count_importable_files`), not the
+/// import's own lazy `walkdir` traversal, since that one doesn't know its
+/// total until it's finished.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportProgressPayload {
+    current: usize,
+    total: usize,
+    imported: usize,
+}
 
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ImportResultDto {
+    imported: usize,
+    canceled: bool,
+}
+
+/// Sets the flag `import_directory`'s per-file callback checks after every
+/// file, stopping the walk early — safe with no cleanup needed, since a
+/// canceled import is resumable exactly like one left behind by a killed
+/// process (see `lumenvault_import::import_directory`'s doc). A no-op if no
+/// import is currently running. Cannot close a native folder-picker dialog
+/// that hasn't resolved yet (there's no API for that here) — it only stops
+/// an already-running import loop, which is the case the frontend's Cancel
+/// button actually needs to handle.
+#[tauri::command]
+fn cancel_import(import_lock: tauri::State<ImportLock>) {
+    import_lock.cancel_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+}
+
+#[tauri::command]
+async fn import_directory(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<LibraryState>>,
+    import_lock: tauri::State<'_, ImportLock>,
+) -> CmdResult<ImportResultDto> {
     // Fail fast, before ever popping a native dialog, if there's no live
     // library to import into.
     if !matches!(&*state.lock().unwrap(), LibraryState::Ready(_)) {
         return Err(CmdError::LibraryNotConfigured);
     }
+    // Held for this whole command, across both blocking sections below —
+    // see ImportLock's doc for why a second concurrent import must be
+    // impossible to *start*, not just discouraged by a disabled button.
+    let _guard = import_lock.try_acquire().ok_or(CmdError::ImportAlreadyRunning)?;
 
-    let (tx, rx) = std::sync::mpsc::channel();
-    app.dialog().file().pick_folder(move |folder| {
-        let _ = tx.send(folder);
-    });
-    let folder = rx.recv().map_err(|_| CmdError::NoFolderChosen)?.ok_or(CmdError::NoFolderChosen)?;
-    let source_root: PathBuf = folder.into_path().map_err(|_| CmdError::NoFolderChosen)?;
-
-    with_ready(&state, |app_state| {
-        let conn = app_state.conn.lock().unwrap();
-        let batch_id = lumenvault_import::start_or_resume_batch(&conn, app_state.library_id, &source_root)?;
-        let conversion_enabled = lumenvault_import::conversion_enabled(&conn, app_state.library_id)?;
-        let ctx = lumenvault_import::ImportContext {
-            conn: &conn,
-            paths: &app_state.paths,
-            library_id: app_state.library_id,
-            batch_id,
-            conversion_enabled,
-        };
-
-        let mut imported = 0usize;
-        lumenvault_import::import_directory(&ctx, &source_root, |_path, outcome| {
-            if matches!(outcome, lumenvault_import::FileOutcome::Imported { .. }) {
-                imported += 1;
-            }
-        })?;
-
-        Ok(imported)
+    // The folder-picker wait and the import loop below are both long,
+    // fully synchronous blocking work (an indefinite wait on user input,
+    // then CPU-heavy decode/hash/convert per file) — run on Tauri's
+    // dedicated blocking-task pool via `spawn_blocking` rather than inline
+    // on the async command's own worker thread, so neither one can starve
+    // the pool other commands (list_images, list_review_queue, …) share.
+    let dialog_app = app.clone();
+    let source_root: PathBuf = tauri::async_runtime::spawn_blocking(move || -> CmdResult<PathBuf> {
+        let (tx, rx) = std::sync::mpsc::channel();
+        file_dialog(&dialog_app).pick_folder(move |folder| {
+            let _ = tx.send(folder);
+        });
+        let folder = rx.recv().map_err(|_| CmdError::NoFolderChosen)?.ok_or(CmdError::NoFolderChosen)?;
+        folder.into_path().map_err(|_| CmdError::NoFolderChosen)
     })
+    .await
+    .map_err(|e| CmdError::TaskPanicked(e.to_string()))??;
+
+    let total = lumenvault_import::count_importable_files(&source_root)?;
+    let _ = app.emit("import-progress", ImportProgressPayload { current: 0, total, imported: 0 });
+
+    let import_app = app.clone();
+    tauri::async_runtime::spawn_blocking(move || {
+        with_ready(&import_app.state::<Mutex<LibraryState>>(), |app_state| {
+            let conn = app_state.conn.lock().unwrap();
+            let batch_id = lumenvault_import::start_or_resume_batch(&conn, app_state.library_id, &source_root)?;
+            let conversion_enabled = lumenvault_import::conversion_enabled(&conn, app_state.library_id)?;
+            let ctx = lumenvault_import::ImportContext {
+                conn: &conn,
+                paths: &app_state.paths,
+                library_id: app_state.library_id,
+                batch_id,
+                conversion_enabled,
+            };
+
+            let cancel_flag = import_app.state::<ImportLock>();
+            let mut current = 0usize;
+            let mut imported = 0usize;
+            let mut canceled = false;
+            lumenvault_import::import_directory(&ctx, &source_root, |_path, outcome| {
+                current += 1;
+                if matches!(outcome, lumenvault_import::FileOutcome::Imported { .. }) {
+                    imported += 1;
+                }
+                let _ = import_app.emit("import-progress", ImportProgressPayload { current, total, imported });
+                if cancel_flag.is_cancel_requested() {
+                    canceled = true;
+                    return false;
+                }
+                true
+            })?;
+
+            Ok(ImportResultDto { imported, canceled })
+        })
+    })
+    .await
+    .map_err(|e| CmdError::TaskPanicked(e.to_string()))?
 }
 
 #[tauri::command]
 async fn export_image(app: tauri::AppHandle, state: tauri::State<'_, Mutex<LibraryState>>, id: i64) -> CmdResult<String> {
-    use tauri_plugin_dialog::DialogExt;
-
     if !matches!(&*state.lock().unwrap(), LibraryState::Ready(_)) {
         return Err(CmdError::LibraryNotConfigured);
     }
 
     let (tx, rx) = std::sync::mpsc::channel();
-    app.dialog().file().pick_folder(move |folder| {
+    file_dialog(&app).pick_folder(move |folder| {
         let _ = tx.send(folder);
     });
     let folder = rx.recv().map_err(|_| CmdError::NoFolderChosen)?.ok_or(CmdError::NoFolderChosen)?;
@@ -499,9 +678,9 @@ fn try_init_state(root: &Path) -> CmdResult<AppState> {
     let library_id = lumenvault_import::ensure_library(&conn, root)?;
     // Launch-only retention sweep (workplan/SPEC.md §3).
     let _ = lumenvault_import::sweep_expired_quarantine(&conn);
-    // Launch-only backfill: images imported before the `preview_full`
-    // thumbnail variant existed get one now (see `backfill_previews`'s doc).
-    let _ = lumenvault_import::backfill_previews(&conn, &paths);
+    // Launch-only cleanup: reclaim any preview_full files/rows left behind
+    // by the old eager-generation design (see `sweep_stale_previews`'s doc).
+    let _ = lumenvault_import::sweep_stale_previews(&conn);
     Ok(AppState { conn: Mutex::new(conn), paths, library_id })
 }
 
@@ -569,10 +748,8 @@ fn check_library_status(state: tauri::State<Mutex<LibraryState>>) -> LibraryStat
 /// path, matching the approved design. Returns `None` if the user cancels.
 #[tauri::command]
 async fn pick_library_folder(app: tauri::AppHandle) -> CmdResult<Option<String>> {
-    use tauri_plugin_dialog::DialogExt;
-
     let (tx, rx) = std::sync::mpsc::channel();
-    app.dialog().file().pick_folder(move |folder| {
+    file_dialog(&app).pick_folder(move |folder| {
         let _ = tx.send(folder);
     });
     let folder = rx.recv().map_err(|_| CmdError::NoFolderChosen)?;
@@ -768,12 +945,14 @@ pub fn run() {
             let app_handle = app.handle().clone();
             let library_state = load_initial_library_state(&app_handle);
             app.manage(Mutex::new(library_state));
+            app.manage(ImportLock::default());
             #[cfg(windows)]
             create_hardened_main_window(app)?;
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             check_library_status,
+            cancel_import,
             pick_library_folder,
             inspect_library_folder,
             create_library,
@@ -782,6 +961,7 @@ pub fn run() {
             update_app_settings,
             list_images,
             get_image_detail,
+            get_full_preview,
             add_tag,
             remove_tag,
             list_tags,

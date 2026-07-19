@@ -228,15 +228,26 @@ pub fn write_jpeg_thumbnail(
     encode_jpeg(&resized, dest, 85)
 }
 
-/// Writes `image` as a full-resolution (no downsizing) quality-92 JPEG to
-/// `dest`. Not a "thumbnail" at all — this exists because WebView2/Chromium
-/// cannot decode `.jxl` in an `<img>` tag, so a stored JPEG XL blob has no
-/// browser-displayable form at *any* size without a decode+re-encode step.
-/// The blob itself already holds the image at its full, original quality;
-/// this is purely a format workaround, not a size reduction, so it does not
-/// resize.
-pub fn write_jpeg_preview(image: &image::DynamicImage, dest: &Path) -> Result<(), ThumbnailError> {
-    encode_jpeg(image, dest, 92)
+/// Encodes `image` as a full-resolution (no downsizing) quality-92 JPEG,
+/// entirely in memory — no file is written. This exists because
+/// WebView2/Chromium cannot decode `.jxl` in an `<img>` tag, so a stored
+/// JPEG XL blob has no browser-displayable form at *any* size without a
+/// decode+re-encode step. The blob itself already holds the image at its
+/// full, original quality; this is purely a format workaround, not a size
+/// reduction, so it does not resize.
+///
+/// Deliberately in-memory rather than a cached file on disk: an earlier
+/// version of this wrote one such file per image at import time, and it
+/// turned out to roughly *double* the vault's disk footprint (near-full-size
+/// JPEG next to every JXL blob) for photos that were often never viewed
+/// full-size at all. The caller (`get_full_preview`) re-encodes on every
+/// full-size view instead — a fresh decode+encode per view, but zero
+/// persistent disk cost for photos nobody opens.
+pub fn encode_jpeg_bytes(image: &image::DynamicImage, quality: u8) -> Result<Vec<u8>, ThumbnailError> {
+    let mut bytes = Vec::new();
+    let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality);
+    encoder.encode_image(image).map_err(|source| ThumbnailError::EncodeBytes { source })?;
+    Ok(bytes)
 }
 
 fn encode_jpeg(image: &image::DynamicImage, dest: &Path, quality: u8) -> Result<(), ThumbnailError> {
@@ -264,6 +275,11 @@ pub enum ThumbnailError {
     #[error("could not encode thumbnail to {path}: {source}")]
     Encode {
         path: std::path::PathBuf,
+        #[source]
+        source: image::ImageError,
+    },
+    #[error("could not encode preview: {source}")]
+    EncodeBytes {
         #[source]
         source: image::ImageError,
     },
@@ -388,6 +404,19 @@ mod tests {
         let decoded = image::open(&thumb_path).unwrap();
         assert!(decoded.width() <= 256 && decoded.height() <= 256);
         assert_eq!(decoded.width() * 400, decoded.height() * 800, "aspect ratio must be preserved");
+    }
+
+    #[test]
+    fn encode_jpeg_bytes_produces_a_decodable_full_resolution_jpeg() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = write_png(dir.path(), "big.png", 800, 400);
+        let probe = super::probe(&source).unwrap();
+
+        let bytes = super::encode_jpeg_bytes(&probe.image, 92).unwrap();
+
+        let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
+        assert_eq!(decoded.width(), 800, "must not be downsized — this is a format workaround, not a thumbnail");
+        assert_eq!(decoded.height(), 400);
     }
 
     #[test]

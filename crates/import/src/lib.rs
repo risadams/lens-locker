@@ -81,15 +81,6 @@ impl LibraryPaths {
     fn thumbnail_path(&self, hash_hex: &str) -> PathBuf {
         self.root.join("thumbnails").join(&hash_hex[0..2]).join(format!("{hash_hex}.jpg"))
     }
-
-    /// Where a generated full-resolution browser-displayable preview lives —
-    /// see [`lumenvault_decode::write_jpeg_preview`] for why this exists
-    /// (a `.jxl` blob has no browser-native form, at any size). Same
-    /// content-addressing scheme as `thumbnail_path`, in its own `previews/`
-    /// subtree so the two variants never collide.
-    fn preview_path(&self, hash_hex: &str) -> PathBuf {
-        self.root.join("previews").join(&hash_hex[0..2]).join(format!("{hash_hex}.jpg"))
-    }
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -262,52 +253,89 @@ pub fn sweep_expired_quarantine(conn: &Connection) -> Result<usize, ImportError>
     Ok(purged)
 }
 
-/// Launch-only backfill (same pattern as [`sweep_expired_quarantine`]):
-/// generates the `preview_full` thumbnail variant (see
-/// `LibraryPaths::preview_path` / `lumenvault_decode::write_jpeg_preview`)
-/// for any active image that doesn't have one yet — images imported before
-/// that variant existed. Best-effort per image: a blob that fails to
-/// re-decode (missing file, RAW with no decoded pixels) is skipped rather
-/// than aborting the whole backfill, since one bad image shouldn't block
-/// previews for the rest of the library.
-pub fn backfill_previews(conn: &Connection, paths: &LibraryPaths) -> Result<usize, ImportError> {
-    let mut stmt = conn.prepare(
-        "SELECT im.id, im.original_hash, im.stored_path FROM images im
-         LEFT JOIN thumbnails th ON th.image_id = im.id AND th.variant = 'preview_full'
-         WHERE th.id IS NULL AND im.status = 'active'",
-    )?;
-    let candidates: Vec<(i64, Vec<u8>, String)> =
-        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect::<Result<_, _>>()?;
+/// Launch-only cleanup (same pattern as [`sweep_expired_quarantine`]):
+/// deletes any leftover `preview_full` thumbnail rows and their on-disk
+/// files. This variant used to be generated eagerly at import time for
+/// every image — a full-resolution JPEG cache next to every JXL blob,
+/// purely to work around WebView2 not being able to decode `.jxl` in an
+/// `<img>` tag — but that turned out to roughly double the vault's disk
+/// footprint for photos that were often never viewed full-size at all.
+/// Previews are now generated JIT and in memory, on full-size view
+/// (see [`render_full_preview_bytes`]), never written to disk — this sweep
+/// just reclaims whatever the old design left behind. Best-effort: a file
+/// that's already gone is fine, not an error.
+pub fn sweep_stale_previews(conn: &Connection) -> Result<usize, ImportError> {
+    let mut stmt = conn.prepare("SELECT id, path FROM thumbnails WHERE variant = 'preview_full'")?;
+    let rows: Vec<(i64, String)> = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?;
     drop(stmt);
 
-    let mut backfilled = 0;
-    for (image_id, original_hash, stored_path) in candidates {
-        let Ok(probe) = lumenvault_decode::probe(Path::new(&stored_path)) else {
-            continue; // undecodable (missing file) or RAW with no pixels — nothing to generate from
-        };
-        let original_hash_hex: String = original_hash.iter().map(|b| format!("{b:02x}")).collect();
-        let preview_path = paths.preview_path(&original_hash_hex);
-        lumenvault_decode::write_jpeg_preview(&probe.image, &preview_path)?;
-        lumenvault_catalog::record_thumbnail(conn, image_id, "preview_full", "jpeg", &preview_path.to_string_lossy())?;
-        backfilled += 1;
+    let mut swept = 0;
+    for (id, path) in rows {
+        match fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(ImportError::Io(e)),
+        }
+        conn.execute("DELETE FROM thumbnails WHERE id = ?1", [id])?;
+        swept += 1;
     }
-    Ok(backfilled)
+    Ok(swept)
+}
+
+/// Decodes `image_id`'s stored blob and re-encodes it as a full-resolution,
+/// browser-displayable JPEG, entirely in memory — see
+/// `lumenvault_decode::encode_jpeg_bytes`'s doc for why this is generated
+/// fresh on every call (JIT) rather than cached to disk. `Ok(None)` if the
+/// blob can't be decoded (a RAW file, or a genuinely missing/corrupt one) —
+/// the frontend falls back to the grid thumbnail in that case.
+pub fn render_full_preview_bytes(conn: &Connection, image_id: i64) -> Result<Option<Vec<u8>>, ImportError> {
+    let stored_path: String =
+        conn.query_row("SELECT stored_path FROM images WHERE id = ?1", [image_id], |row| row.get(0))?;
+    let Ok(probe) = lumenvault_decode::probe(Path::new(&stored_path)) else {
+        return Ok(None);
+    };
+    Ok(Some(lumenvault_decode::encode_jpeg_bytes(&probe.image, 92)?))
+}
+
+/// Counts regular files under `source_root` — a plain filesystem walk, no
+/// decoding, so cheap relative to the import itself. Exists purely for
+/// progress reporting (e.g. an "X of Y" import modal): [`import_directory`]
+/// doesn't know its own total in advance since it streams `walkdir` lazily
+/// rather than collecting first.
+pub fn count_importable_files(source_root: &Path) -> Result<usize, ImportError> {
+    let mut count = 0;
+    for entry in walkdir::WalkDir::new(source_root) {
+        let entry = entry.map_err(|source| ImportError::Walk { root: source_root.to_path_buf(), source })?;
+        if entry.file_type().is_file() {
+            count += 1;
+        }
+    }
+    Ok(count)
 }
 
 /// Recursively imports every regular file under `source_root`, invoking
 /// `on_outcome` after each one (callers that don't need progress reporting
-/// can pass `|_, _| {}`). Files that aren't decodable standard-format images
-/// are skipped (journaled `failed`), not fatal to the batch.
+/// or cancellation can pass `|_, _| true`). Files that aren't decodable
+/// standard-format images are skipped (journaled `failed`), not fatal to
+/// the batch.
+///
+/// `on_outcome` returning `false` stops the walk early — safe by the module
+/// doc's crash-safety design: every file not yet journaled `done` is picked
+/// up cleanly by a later `import_directory` run over the same folder, the
+/// same as a killed process would be. A canceled import therefore needs no
+/// special cleanup, just an early `break`.
 pub fn import_directory(
     ctx: &ImportContext,
     source_root: &Path,
-    mut on_outcome: impl FnMut(&Path, &FileOutcome),
+    mut on_outcome: impl FnMut(&Path, &FileOutcome) -> bool,
 ) -> Result<(), ImportError> {
     for entry in walkdir::WalkDir::new(source_root) {
         let entry = entry.map_err(|source| ImportError::Walk { root: source_root.to_path_buf(), source })?;
         if entry.file_type().is_file() {
             let outcome = import_file(ctx, entry.path())?;
-            on_outcome(entry.path(), &outcome);
+            if !on_outcome(entry.path(), &outcome) {
+                break;
+            }
         }
     }
     complete_batch(ctx.conn, ctx.batch_id)?;
@@ -467,19 +495,14 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
                 // files, which have no decoded pixels this milestone (see
                 // lumenvault-decode's module doc) — a genuine, documented gap,
                 // not silently swallowed.
+                // Full-resolution previews are generated JIT on full-size
+                // view instead (see `render_full_preview_bytes`'s doc for
+                // why: eager generation here used to roughly double the
+                // vault's disk footprint).
                 if let Some(image) = &decoded_image {
                     let thumb_path = paths.thumbnail_path(&original_hash_hex);
                     lumenvault_decode::write_jpeg_thumbnail(image, &thumb_path, 256)?;
                     lumenvault_catalog::record_thumbnail(conn, new_id, "grid256", "jpeg", &thumb_path.to_string_lossy())?;
-
-                    // Full-resolution browser-displayable preview (see
-                    // `LibraryPaths::preview_path`) — a stored `.jxl` blob
-                    // has no form WebView2 can show in an `<img>` at all,
-                    // regardless of size, so the lightbox needs this to show
-                    // more than the 256px grid thumbnail.
-                    let preview_path = paths.preview_path(&original_hash_hex);
-                    lumenvault_decode::write_jpeg_preview(image, &preview_path)?;
-                    lumenvault_catalog::record_thumbnail(conn, new_id, "preview_full", "jpeg", &preview_path.to_string_lossy())?;
                 }
 
                 new_id
@@ -1245,6 +1268,86 @@ mod tests {
     }
 
     #[test]
+    fn count_importable_files_counts_regular_files_recursively_but_not_directories() {
+        let source_dir = tempfile::tempdir().unwrap();
+        write_png(source_dir.path(), "a.png", 1);
+        write_png(source_dir.path(), "b.png", 2);
+        let nested = source_dir.path().join("nested");
+        fs::create_dir_all(&nested).unwrap();
+        write_png(&nested, "c.png", 3);
+
+        let count = count_importable_files(source_dir.path()).unwrap();
+
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn import_directory_stops_early_when_on_outcome_returns_false() {
+        let conn = test_conn();
+        let source_dir = tempfile::tempdir().unwrap();
+        let library_dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(library_dir.path());
+        write_png(source_dir.path(), "a.png", 1);
+        write_png(source_dir.path(), "b.png", 2);
+        write_png(source_dir.path(), "c.png", 3);
+
+        let library_id = ensure_library(&conn, library_dir.path()).unwrap();
+        let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+
+        let mut seen = 0;
+        import_directory(&ctx, source_dir.path(), |_, _| {
+            seen += 1;
+            seen < 2 // stop as soon as the second file has been processed
+        })
+        .unwrap();
+
+        assert_eq!(seen, 2, "must stop the walk as soon as on_outcome returns false");
+    }
+
+    #[test]
+    fn a_canceled_import_can_be_resumed_and_finishes_the_rest() {
+        // Proves cancellation relies on the same crash-safety property as a
+        // killed process (module doc): stopping early leaves nothing to
+        // clean up, a later run over the same folder just picks up where
+        // it left off. Note this is a *destructive move-in* import — each
+        // file's original is gone from source_dir the moment it completes
+        // (moved into the blob store / quarantine), so a resumed walk over
+        // the same folder naturally only finds what's left, not the files
+        // already finished before cancellation.
+        let conn = test_conn();
+        let source_dir = tempfile::tempdir().unwrap();
+        let library_dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(library_dir.path());
+        write_png(source_dir.path(), "a.png", 1);
+        write_png(source_dir.path(), "b.png", 2);
+        write_png(source_dir.path(), "c.png", 3);
+
+        let library_id = ensure_library(&conn, library_dir.path()).unwrap();
+        let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+
+        let mut seen = 0;
+        import_directory(&ctx, source_dir.path(), |_, _| {
+            seen += 1;
+            seen < 2
+        })
+        .unwrap();
+        assert_eq!(seen, 2);
+
+        let mut resumed_seen = 0;
+        import_directory(&ctx, source_dir.path(), |_, _| {
+            resumed_seen += 1;
+            true
+        })
+        .unwrap();
+        assert_eq!(resumed_seen, 1, "only the one file not yet moved out of source_dir remains to be walked");
+
+        let imported_count: i64 = conn.query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0)).unwrap();
+        assert_eq!(imported_count, 3, "all three files must have ended up imported across both runs");
+    }
+
+    #[test]
     fn a_jpeg_is_converted_to_jxl_through_the_real_pipeline() {
         // Proves §4's conversion policy is actually wired into import_file,
         // not just callable directly from lumenvault-convert: a JPEG source
@@ -1362,6 +1465,102 @@ mod tests {
         // A real, decodable JPEG — not just a placeholder file.
         let decoded = image::open(&thumb_path).unwrap();
         assert!(decoded.width() > 0 && decoded.height() > 0);
+    }
+
+    #[test]
+    fn importing_does_not_generate_a_full_preview_eagerly() {
+        // Previews are JIT-only now (render_full_preview_bytes, called on
+        // full-size view) — import must not write a preview_full row or
+        // file at all, since that eager generation was the whole disk-
+        // bloat problem this design replaced.
+        let conn = test_conn();
+        let source_dir = tempfile::tempdir().unwrap();
+        let library_dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(library_dir.path());
+
+        let library_id = ensure_library(&conn, library_dir.path()).unwrap();
+        let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
+        let path = write_png(source_dir.path(), "photo.png", 5);
+
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let outcome = import_file(&ctx, &path).unwrap();
+        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+
+        let preview_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM thumbnails WHERE image_id = ?1 AND variant = 'preview_full'",
+                [image_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(preview_count, 0);
+    }
+
+    #[test]
+    fn render_full_preview_bytes_decodes_the_stored_blob_at_full_resolution() {
+        let conn = test_conn();
+        let source_dir = tempfile::tempdir().unwrap();
+        let library_dir = tempfile::tempdir().unwrap();
+        let paths = LibraryPaths::new(library_dir.path());
+
+        let library_id = ensure_library(&conn, library_dir.path()).unwrap();
+        let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
+        let path = write_png(source_dir.path(), "photo.png", 5);
+
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let outcome = import_file(&ctx, &path).unwrap();
+        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+
+        let bytes = render_full_preview_bytes(&conn, image_id).unwrap().expect("must decode a standard image");
+        let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
+        assert!(decoded.width() > 0 && decoded.height() > 0);
+
+        // Nothing gets written to disk or recorded in the catalog — purely
+        // an in-memory render.
+        let preview_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM thumbnails WHERE variant = 'preview_full'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(preview_count, 0);
+    }
+
+    #[test]
+    fn sweep_stale_previews_deletes_leftover_preview_full_rows_and_files() {
+        let conn = test_conn();
+        let library_dir = tempfile::tempdir().unwrap();
+        let library_id = ensure_library(&conn, library_dir.path()).unwrap();
+        let source_dir = tempfile::tempdir().unwrap();
+        let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
+        let path = write_png(source_dir.path(), "photo.png", 5);
+        let paths = LibraryPaths::new(library_dir.path());
+        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let outcome = import_file(&ctx, &path).unwrap();
+        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+
+        // Hand-roll a leftover preview_full row/file, simulating an older
+        // vault created before this design change.
+        let stale_path = library_dir.path().join("previews").join("stale.jpg");
+        fs::create_dir_all(stale_path.parent().unwrap()).unwrap();
+        fs::write(&stale_path, b"fake jpeg bytes").unwrap();
+        lumenvault_catalog::record_thumbnail(&conn, image_id, "preview_full", "jpeg", &stale_path.to_string_lossy()).unwrap();
+
+        let swept = sweep_stale_previews(&conn).unwrap();
+
+        assert_eq!(swept, 1);
+        assert!(!stale_path.exists(), "the stale preview file must actually be deleted");
+        let remaining: i64 = conn
+            .query_row("SELECT COUNT(*) FROM thumbnails WHERE variant = 'preview_full'", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(remaining, 0);
+
+        // The grid256 thumbnail (a real, still-used variant) must survive.
+        let grid_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM thumbnails WHERE image_id = ?1 AND variant = 'grid256'",
+                [image_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(grid_count, 1);
     }
 
     /// Two distinct-bytes, perceptually-identical images (same

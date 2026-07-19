@@ -24,6 +24,10 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 thiserror = "2.0.18"
+# For get_full_preview's data: URL encoding — 0.22 is already resolved
+# transitively at this exact version (confirmed via Cargo.lock), so this
+# adds no new version to the dependency graph, just direct access to it.
+base64 = "0.22"
 
 lumenvault-catalog = { version = "0.1.0", path = "../crates/catalog" }
 lumenvault-import = { version = "0.1.0", path = "../crates/import" }

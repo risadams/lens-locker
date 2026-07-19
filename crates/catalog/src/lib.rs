@@ -318,14 +318,6 @@ pub struct ImageDetail {
     pub stored_path: String,
     pub tags: Vec<String>,
     pub first_imported_at: String,
-    /// The `preview_full` thumbnail variant's path — a full-resolution,
-    /// browser-displayable JPEG cache of the blob (see
-    /// `lumenvault_decode::write_jpeg_preview`), since a stored `.jxl` blob
-    /// has no form WebView2 can render in an `<img>` at all. `None` for
-    /// images imported before this existed, or RAW files (no decoded pixels
-    /// to generate one from) — the frontend falls back to the grid
-    /// thumbnail in that case.
-    pub preview_path: Option<String>,
 }
 
 pub fn get_image_detail(conn: &Connection, image_id: i64) -> rusqlite::Result<Option<ImageDetail>> {
@@ -365,14 +357,6 @@ pub fn get_image_detail(conn: &Connection, image_id: i64) -> rusqlite::Result<Op
     let original_hash_hex = original_hash.iter().map(|b| format!("{b:02x}")).collect();
     let tags = tags_for_image(conn, image_id)?;
 
-    let preview_path: Option<String> = conn
-        .query_row(
-            "SELECT path FROM thumbnails WHERE image_id = ?1 AND variant = 'preview_full'",
-            [image_id],
-            |row| row.get(0),
-        )
-        .optional()?;
-
     Ok(Some(ImageDetail {
         id: image_id,
         filename,
@@ -389,7 +373,6 @@ pub fn get_image_detail(conn: &Connection, image_id: i64) -> rusqlite::Result<Op
         stored_path,
         tags,
         first_imported_at,
-        preview_path,
     }))
 }
 

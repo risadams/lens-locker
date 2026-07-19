@@ -156,6 +156,10 @@
       <h3>Import a folder</h3>
       <p>LumenVault moves files into the vault — the originals leave their current location. Nothing is deleted outright; anything replaced or superseded is kept in quarantine for 30 days.</p>
       <div class="modal-drop" id="importStatus">Choose a folder to import</div>
+      <div class="import-progress" id="importProgress" style="display:none">
+        <div class="import-progress-bar"><div class="import-progress-fill" id="importProgressFill"></div></div>
+        <div class="import-progress-label" id="importProgressLabel"></div>
+      </div>
       <div class="modal-footer">
         <button class="btn" id="importCancelBtn">Cancel</button>
         <button class="btn btn-primary" id="importChooseBtn">Choose Folder…</button>
