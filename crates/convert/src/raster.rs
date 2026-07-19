@@ -50,7 +50,10 @@ fn first_unrecognized_chunk(png_bytes: &[u8]) -> Option<[u8; 4]> {
         let mut chunk_type = [0u8; 4];
         chunk_type.copy_from_slice(&png_bytes[pos + 4..pos + 8]);
 
-        if !PNG_CHUNK_ALLOWLIST.iter().any(|allowed| **allowed == chunk_type) {
+        if !PNG_CHUNK_ALLOWLIST
+            .iter()
+            .any(|allowed| **allowed == chunk_type)
+        {
             return Some(chunk_type);
         }
 
@@ -85,8 +88,12 @@ pub fn convert_png(source_bytes: &[u8]) -> Result<ConversionOutcome, ConvertErro
     let mut decoder = png::Decoder::new(Cursor::new(source_bytes));
     decoder.set_transformations(png::Transformations::ALPHA | png::Transformations::EXPAND);
     let mut reader = decoder.read_info()?;
-    let mut buf =
-        vec![0; reader.output_buffer_size().expect("read_info() has already parsed the header")];
+    let mut buf = vec![
+        0;
+        reader
+            .output_buffer_size()
+            .expect("read_info() has already parsed the header")
+    ];
     let frame_info = reader.next_frame(&mut buf)?;
     buf.truncate(frame_info.buffer_size());
 
@@ -110,9 +117,8 @@ pub fn convert_png(source_bytes: &[u8]) -> Result<ConversionOutcome, ConvertErro
     // ALPHA|EXPAND transformations above already do this for us, but pin
     // it down explicitly via `image`'s RgbaImage so PNG and BMP share one
     // pixel representation.
-    let pixels = image::RgbaImage::from_raw(frame_info.width, frame_info.height, buf).expect(
-        "ALPHA|EXPAND transformations guarantee width*height*4 RGBA8 bytes",
-    );
+    let pixels = image::RgbaImage::from_raw(frame_info.width, frame_info.height, buf)
+        .expect("ALPHA|EXPAND transformations guarantee width*height*4 RGBA8 bytes");
 
     convert_pixels(DecodedSource { pixels, exif, xmp })
 }
@@ -124,7 +130,11 @@ pub fn convert_bmp(source_bytes: &[u8]) -> Result<ConversionOutcome, ConvertErro
     // module doc) the only verification that applies is pixel-exactness.
     let img = image::load_from_memory_with_format(source_bytes, image::ImageFormat::Bmp)?;
     let pixels = img.to_rgba8();
-    convert_pixels(DecodedSource { pixels, exif: None, xmp: None })
+    convert_pixels(DecodedSource {
+        pixels,
+        exif: None,
+        xmp: None,
+    })
 }
 
 fn convert_pixels(source: DecodedSource) -> Result<ConversionOutcome, ConvertError> {
@@ -157,18 +167,26 @@ fn convert_pixels(source: DecodedSource) -> Result<ConversionOutcome, ConvertErr
     let Ok((meta, decoded_pixels)) = decoder.decode_with::<u8>(&encoded.data) else {
         return Ok(Err(SkipReason::PixelMismatch));
     };
-    if meta.width != width || meta.height != height || decoded_pixels != source.pixels.as_raw().as_slice() {
+    if meta.width != width
+        || meta.height != height
+        || decoded_pixels != source.pixels.as_raw().as_slice()
+    {
         return Ok(Err(SkipReason::PixelMismatch));
     }
 
     // Check 2: independent metadata readback via jxl-oxide (a different
     // decoder than the one libjxl/jpegxl-rs used above) — pixel-exactness
     // alone does not prove the EXIF/XMP boxes survived.
-    if let Err(reason) = verify_metadata_survived(&encoded.data, source.exif.as_deref(), source.xmp.as_deref()) {
+    if let Err(reason) =
+        verify_metadata_survived(&encoded.data, source.exif.as_deref(), source.xmp.as_deref())
+    {
         return Ok(Err(reason));
     }
 
-    Ok(Ok(Converted { bytes: encoded.data, stored_format: "jxl" }))
+    Ok(Ok(Converted {
+        bytes: encoded.data,
+        stored_format: "jxl",
+    }))
 }
 
 fn verify_metadata_survived(
@@ -182,7 +200,9 @@ fn verify_metadata_survived(
 
     let image = jxl_oxide::JxlImage::builder()
         .read(Cursor::new(jxl_bytes))
-        .map_err(|e| SkipReason::MetadataMismatch(format!("failed to open JXL container for readback: {e}")))?;
+        .map_err(|e| {
+            SkipReason::MetadataMismatch(format!("failed to open JXL container for readback: {e}"))
+        })?;
     let aux = image.aux_boxes();
 
     if let Some(expected) = expected_exif {
@@ -191,14 +211,22 @@ fn verify_metadata_survived(
             _ => None,
         };
         if actual.as_deref() != Some(expected) {
-            return Err(SkipReason::MetadataMismatch("EXIF did not read back unchanged".to_string()));
+            return Err(SkipReason::MetadataMismatch(
+                "EXIF did not read back unchanged".to_string(),
+            ));
         }
     }
     if let Some(expected) = expected_xmp {
         let xml = aux.first_xml();
-        let actual: Option<Vec<u8>> = if xml.has_data() { Some(xml.unwrap().to_vec()) } else { None };
+        let actual: Option<Vec<u8>> = if xml.has_data() {
+            Some(xml.unwrap().to_vec())
+        } else {
+            None
+        };
         if actual.as_deref() != Some(expected) {
-            return Err(SkipReason::MetadataMismatch("XMP did not read back unchanged".to_string()));
+            return Err(SkipReason::MetadataMismatch(
+                "XMP did not read back unchanged".to_string(),
+            ));
         }
     }
 
@@ -210,22 +238,22 @@ mod tests {
     use super::*;
 
     fn write_png(width: u32, height: u32, seed: u8) -> Vec<u8> {
-        let img: image::RgbaImage =
-            image::ImageBuffer::from_fn(width, height, |x, y| {
-                image::Rgba([seed, (x % 256) as u8, (y % 256) as u8, 255])
-            });
+        let img: image::RgbaImage = image::ImageBuffer::from_fn(width, height, |x, y| {
+            image::Rgba([seed, (x % 256) as u8, (y % 256) as u8, 255])
+        });
         let mut buf = Vec::new();
-        img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png).unwrap();
+        img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Png)
+            .unwrap();
         buf
     }
 
     fn write_bmp(width: u32, height: u32, seed: u8) -> Vec<u8> {
-        let img: image::RgbImage =
-            image::ImageBuffer::from_fn(width, height, |x, y| {
-                image::Rgb([seed, (x % 256) as u8, (y % 256) as u8])
-            });
+        let img: image::RgbImage = image::ImageBuffer::from_fn(width, height, |x, y| {
+            image::Rgb([seed, (x % 256) as u8, (y % 256) as u8])
+        });
         let mut buf = Vec::new();
-        img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Bmp).unwrap();
+        img.write_to(&mut Cursor::new(&mut buf), image::ImageFormat::Bmp)
+            .unwrap();
         buf
     }
 
@@ -241,7 +269,9 @@ mod tests {
         let (meta, pixels) = decoder.decode_with::<u8>(&converted.bytes).unwrap();
         assert_eq!((meta.width, meta.height), (37, 23));
 
-        let expected = image::load_from_memory_with_format(&source, image::ImageFormat::Png).unwrap().to_rgba8();
+        let expected = image::load_from_memory_with_format(&source, image::ImageFormat::Png)
+            .unwrap()
+            .to_rgba8();
         assert_eq!(pixels, expected.into_raw());
     }
 
@@ -256,7 +286,9 @@ mod tests {
         let (meta, pixels) = decoder.decode_with::<u8>(&converted.bytes).unwrap();
         assert_eq!((meta.width, meta.height), (20, 15));
 
-        let expected = image::load_from_memory_with_format(&source, image::ImageFormat::Bmp).unwrap().to_rgba8();
+        let expected = image::load_from_memory_with_format(&source, image::ImageFormat::Bmp)
+            .unwrap()
+            .to_rgba8();
         assert_eq!(pixels, expected.into_raw());
     }
 
@@ -278,7 +310,9 @@ mod tests {
 
         assert_eq!(
             outcome.unwrap_err(),
-            SkipReason::UnrecognizedAncillaryChunk { chunk_type: "prVt".to_string() }
+            SkipReason::UnrecognizedAncillaryChunk {
+                chunk_type: "prVt".to_string()
+            }
         );
     }
 }

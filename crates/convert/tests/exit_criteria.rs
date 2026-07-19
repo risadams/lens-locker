@@ -24,7 +24,11 @@ const CAMERA_LIKE_JPEG: &[u8] = include_bytes!("fixtures/camera_like.jpg");
 /// one IFD0 with Make/Model/Orientation/DateTime) and splices it in right
 /// after the JPEG SOI marker — where real cameras place it.
 fn jpeg_with_injected_exif(jpeg: &[u8]) -> Vec<u8> {
-    assert_eq!(&jpeg[0..2], &[0xFF, 0xD8], "fixture must start with a JPEG SOI marker");
+    assert_eq!(
+        &jpeg[0..2],
+        &[0xFF, 0xD8],
+        "fixture must start with a JPEG SOI marker"
+    );
 
     fn ascii_entry(tag: u16, value: &str) -> (u16, Vec<u8>) {
         let mut bytes = value.as_bytes().to_vec();
@@ -91,7 +95,8 @@ fn real_camera_like_jpeg_reconstructs_byte_exact_and_metadata_survives() {
     assert_eq!((probe.width(), probe.height()), (640, 480));
 
     let outcome = convert(ConvertibleFormat::Jpeg, &source).unwrap();
-    let converted = outcome.expect("a real baseline JPEG with injected EXIF must convert successfully");
+    let converted =
+        outcome.expect("a real baseline JPEG with injected EXIF must convert successfully");
     assert_eq!(converted.stored_format, "jxl");
     println!(
         "camera_like.jpg: {} bytes source -> {} bytes JPEG XL ({:.1}% of original)",
@@ -111,15 +116,24 @@ fn real_camera_like_jpeg_reconstructs_byte_exact_and_metadata_survives() {
         panic!("expected JPEG bitstream reconstruction data, got pixels only");
     };
 
-    assert_eq!(reconstructed.len(), source.len(), "reconstructed JPEG has a different length than the source");
-    assert_eq!(reconstructed, source, "reconstructed JPEG must be byte-for-byte identical to the source");
+    assert_eq!(
+        reconstructed.len(),
+        source.len(),
+        "reconstructed JPEG has a different length than the source"
+    );
+    assert_eq!(
+        reconstructed, source,
+        "reconstructed JPEG must be byte-for-byte identical to the source"
+    );
 
     // Belt-and-suspenders: independently confirm the injected EXIF bytes
     // specifically are present at the expected offset in the reconstructed
     // output (not just "the whole file happens to match").
     let exif_app1 = &source[2..2 + 2 + u16::from_be_bytes([source[4], source[5]]) as usize];
     assert!(
-        reconstructed.windows(exif_app1.len()).any(|w| w == exif_app1),
+        reconstructed
+            .windows(exif_app1.len())
+            .any(|w| w == exif_app1),
         "the injected EXIF APP1 segment must be present, byte-for-byte, in the reconstructed JPEG"
     );
 }
@@ -134,7 +148,12 @@ fn real_png_with_exif_and_xmp_round_trips_pixel_exact_and_metadata_survives() {
         .flat_map(|i| {
             let x = i % width;
             let y = i / width;
-            [((x * 3) % 256) as u8, ((y * 5) % 256) as u8, ((x + y) % 256) as u8, 255]
+            [
+                ((x * 3) % 256) as u8,
+                ((y * 5) % 256) as u8,
+                ((x + y) % 256) as u8,
+                255,
+            ]
         })
         .collect();
 
@@ -162,7 +181,8 @@ fn real_png_with_exif_and_xmp_round_trips_pixel_exact_and_metadata_survives() {
         info.color_type = png::ColorType::Rgba;
         info.bit_depth = png::BitDepth::Eight;
         info.exif_metadata = Some(exif.clone().into());
-        info.utf8_text.push(ITXtChunk::new("XML:com.adobe.xmp", xmp));
+        info.utf8_text
+            .push(ITXtChunk::new("XML:com.adobe.xmp", xmp));
 
         let encoder = png::Encoder::with_info(Cursor::new(&mut png_bytes), info).unwrap();
         let mut writer = encoder.write_header().unwrap();
@@ -170,46 +190,77 @@ fn real_png_with_exif_and_xmp_round_trips_pixel_exact_and_metadata_survives() {
     }
 
     let outcome = convert(ConvertibleFormat::Png, &png_bytes).unwrap();
-    let converted = outcome.expect("a real PNG with EXIF+XMP and only allowlisted chunks must convert");
+    let converted =
+        outcome.expect("a real PNG with EXIF+XMP and only allowlisted chunks must convert");
     assert_eq!(converted.stored_format, "jxl");
 
     // Pixel-exactness, checked independently.
     let decoder = jpegxl_rs::decoder_builder().build().unwrap();
     let (meta, decoded_pixels) = decoder.decode_with::<u8>(&converted.bytes).unwrap();
     assert_eq!((meta.width, meta.height), (width, height));
-    assert_eq!(decoded_pixels, pixels, "decoded pixels must exactly match the source PNG");
+    assert_eq!(
+        decoded_pixels, pixels,
+        "decoded pixels must exactly match the source PNG"
+    );
 
     // Metadata survival, checked independently via jxl-oxide (not the same
     // decoder that did the encoding-side bookkeeping).
-    let jxl_image = jxl_oxide::JxlImage::builder().read(Cursor::new(&converted.bytes)).unwrap();
+    let jxl_image = jxl_oxide::JxlImage::builder()
+        .read(Cursor::new(&converted.bytes))
+        .unwrap();
     let aux = jxl_image.aux_boxes();
     let actual_exif = aux.first_exif().unwrap().unwrap().payload().to_vec();
-    assert_eq!(actual_exif, exif, "EXIF must survive PNG -> JPEG XL conversion, byte-for-byte");
+    assert_eq!(
+        actual_exif, exif,
+        "EXIF must survive PNG -> JPEG XL conversion, byte-for-byte"
+    );
     let actual_xmp = aux.first_xml().unwrap().to_vec();
-    assert_eq!(actual_xmp, xmp.as_bytes(), "XMP must survive PNG -> JPEG XL conversion, byte-for-byte");
+    assert_eq!(
+        actual_xmp,
+        xmp.as_bytes(),
+        "XMP must survive PNG -> JPEG XL conversion, byte-for-byte"
+    );
 }
 
 #[test]
 fn real_tiff_with_metadata_recompresses_and_metadata_survives() {
-    use tiff::encoder::{colortype, Compression, Rational, TiffEncoder};
+    use tiff::encoder::{Compression, Rational, TiffEncoder, colortype};
     use tiff::tags::Tag;
 
     let width = 40;
     let height = 30;
-    let pixels: Vec<u8> = (0..width * height * 3).map(|i| ((i * 7) % 256) as u8).collect();
+    let pixels: Vec<u8> = (0..width * height * 3)
+        .map(|i| ((i * 7) % 256) as u8)
+        .collect();
 
     let mut source = Cursor::new(Vec::new());
     {
-        let mut enc = TiffEncoder::new(&mut source).unwrap().with_compression(Compression::Uncompressed);
+        let mut enc = TiffEncoder::new(&mut source)
+            .unwrap()
+            .with_compression(Compression::Uncompressed);
         let exif = {
             let mut extra = enc.extra_directory().unwrap();
-            extra.write_tag(Tag::Unknown(0x829A) /* ExposureTime */, Rational { n: 1, d: 200 }).unwrap();
+            extra
+                .write_tag(
+                    Tag::Unknown(0x829A), /* ExposureTime */
+                    Rational { n: 1, d: 200 },
+                )
+                .unwrap();
             extra.finish_with_offsets().unwrap()
         };
         let mut image = enc.new_image::<colortype::RGB8>(width, height).unwrap();
-        image.encoder().write_tag(Tag::ExifDirectory, exif.offset).unwrap();
-        image.encoder().write_tag(Tag::Make, "LumenVault Test Co").unwrap();
-        image.encoder().write_tag(Tag::Unknown(700) /* XMP */, "<xmp>real</xmp>").unwrap();
+        image
+            .encoder()
+            .write_tag(Tag::ExifDirectory, exif.offset)
+            .unwrap();
+        image
+            .encoder()
+            .write_tag(Tag::Make, "LumenVault Test Co")
+            .unwrap();
+        image
+            .encoder()
+            .write_tag(Tag::Unknown(700) /* XMP */, "<xmp>real</xmp>")
+            .unwrap();
         image.write_data(&pixels).unwrap();
     }
     let source = source.into_inner();
@@ -224,12 +275,28 @@ fn real_tiff_with_metadata_recompresses_and_metadata_survives() {
     let tiff::decoder::DecodingResult::U8(out_pixels) = decoder.read_image().unwrap() else {
         panic!("expected 8-bit pixel data");
     };
-    assert_eq!(out_pixels, pixels, "recompressed TIFF must decode to the exact same pixels");
+    assert_eq!(
+        out_pixels, pixels,
+        "recompressed TIFF must decode to the exact same pixels"
+    );
 
-    let make = decoder.find_tag(Tag::Make).unwrap().unwrap().into_string().unwrap();
+    let make = decoder
+        .find_tag(Tag::Make)
+        .unwrap()
+        .unwrap()
+        .into_string()
+        .unwrap();
     assert_eq!(make, "LumenVault Test Co");
-    let xmp = decoder.find_tag(Tag::Unknown(700)).unwrap().unwrap().into_string().unwrap();
-    assert_eq!(xmp, "<xmp>real</xmp>", "XMP tag value must survive recompression");
+    let xmp = decoder
+        .find_tag(Tag::Unknown(700))
+        .unwrap()
+        .unwrap()
+        .into_string()
+        .unwrap();
+    assert_eq!(
+        xmp, "<xmp>real</xmp>",
+        "XMP tag value must survive recompression"
+    );
 }
 
 #[test]
@@ -243,7 +310,8 @@ fn a_png_with_a_deliberately_unsafe_ancillary_chunk_is_never_converted() {
     let img: image::RgbImage =
         image::ImageBuffer::from_fn(width, height, |x, y| image::Rgb([(x * y) as u8, 1, 2]));
     let mut png_bytes = Vec::new();
-    img.write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png).unwrap();
+    img.write_to(&mut Cursor::new(&mut png_bytes), image::ImageFormat::Png)
+        .unwrap();
 
     let ihdr_end = 8 + 8 + 13 + 4; // signature + (len+type) + IHDR data + crc
     let mut spliced = png_bytes[..ihdr_end].to_vec();
@@ -256,7 +324,9 @@ fn a_png_with_a_deliberately_unsafe_ancillary_chunk_is_never_converted() {
 
     assert_eq!(
         outcome.unwrap_err(),
-        SkipReason::UnrecognizedAncillaryChunk { chunk_type: "prVt".to_string() }
+        SkipReason::UnrecognizedAncillaryChunk {
+            chunk_type: "prVt".to_string()
+        }
     );
     // Never-convert is a hard stop: nothing about the file's original bytes
     // is touched by this crate (it only ever returns bytes-or-a-reason —

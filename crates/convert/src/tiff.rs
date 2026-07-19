@@ -28,7 +28,9 @@ use std::io::{Cursor, Read, Seek};
 use tiff::Directory;
 use tiff::decoder::ifd::{Entry, Value};
 use tiff::decoder::{Decoder, DecodingResult};
-use tiff::encoder::{Compression, DeflateLevel, DirectoryEncoder, TiffEncoder, TiffKindStandard, colortype};
+use tiff::encoder::{
+    Compression, DeflateLevel, DirectoryEncoder, TiffEncoder, TiffKindStandard, colortype,
+};
 use tiff::tags::{IfdPointer, Tag, Type};
 
 use crate::{ConversionOutcome, ConvertError, Converted, SkipReason};
@@ -122,7 +124,9 @@ fn copy_tags<W: std::io::Write + Seek>(
         if skip(tag.to_u16()) {
             continue;
         }
-        let Some((ty, bytes)) = value_bytes(value) else { continue };
+        let Some((ty, bytes)) = value_bytes(value) else {
+            continue;
+        };
         let entry: Entry = enc.write_entry_bytes(ty, &bytes)?;
         let mut tmp = Directory::empty();
         tmp.extend([(*tag, entry)]);
@@ -137,7 +141,10 @@ fn copy_tags<W: std::io::Write + Seek>(
 /// and the EXIF pointer tag itself, whose raw offset value is expected to
 /// differ between the source and output files even when its *contents*
 /// (verified separately) are identical.
-fn comparable_tags<R: Read + Seek>(decoder: &mut Decoder<R>, ifd: &Directory) -> tiff::TiffResult<Vec<(Tag, Value)>> {
+fn comparable_tags<R: Read + Seek>(
+    decoder: &mut Decoder<R>,
+    ifd: &Directory,
+) -> tiff::TiffResult<Vec<(Tag, Value)>> {
     let mut tags: Vec<(Tag, Value)> = decoder
         .read_directory_tags(ifd)
         .tag_iter()
@@ -152,14 +159,16 @@ fn comparable_tags<R: Read + Seek>(decoder: &mut Decoder<R>, ifd: &Directory) ->
 /// so this goes through the public `ifd_pointer`/`read_directory` pair
 /// instead).
 fn current_directory<R: Read + Seek>(decoder: &mut Decoder<R>) -> tiff::TiffResult<Directory> {
-    let ptr = decoder
-        .ifd_pointer()
-        .ok_or(tiff::TiffError::FormatError(tiff::TiffFormatError::ImageFileDirectoryNotFound))?;
+    let ptr = decoder.ifd_pointer().ok_or(tiff::TiffError::FormatError(
+        tiff::TiffFormatError::ImageFileDirectoryNotFound,
+    ))?;
     decoder.read_directory(ptr)
 }
 
 fn exif_directory<R: Read + Seek>(decoder: &mut Decoder<R>) -> tiff::TiffResult<Option<Directory>> {
-    let Some(value) = decoder.find_tag(Tag::ExifDirectory)? else { return Ok(None) };
+    let Some(value) = decoder.find_tag(Tag::ExifDirectory)? else {
+        return Ok(None);
+    };
     // A pointer tag's on-disk `Type` is conventionally LONG (decodes as
     // `Value::Unsigned`) for TiffKindStandard files — including ones this
     // crate's own encoder produces, see `TiffKindStandard::OffsetType = u32`
@@ -183,31 +192,48 @@ pub fn convert(source_bytes: &[u8]) -> Result<ConversionOutcome, ConvertError> {
         _ => {
             return Ok(Err(SkipReason::EncodeFailed(
                 "only 8-bit-per-sample TIFF images are supported this milestone".to_string(),
-            )))
+            )));
         }
     };
 
     let source_ifd0_dir = current_directory(&mut decoder)?;
-    let source_ifd0_tags: Vec<(Tag, Value)> =
-        decoder.read_directory_tags(&source_ifd0_dir).tag_iter().collect::<tiff::TiffResult<_>>()?;
+    let source_ifd0_tags: Vec<(Tag, Value)> = decoder
+        .read_directory_tags(&source_ifd0_dir)
+        .tag_iter()
+        .collect::<tiff::TiffResult<_>>()?;
     let source_exif_dir = exif_directory(&mut decoder)?;
     let source_exif_tags = source_exif_dir
         .as_ref()
-        .map(|dir| decoder.read_directory_tags(dir).tag_iter().collect::<tiff::TiffResult<Vec<_>>>())
+        .map(|dir| {
+            decoder
+                .read_directory_tags(dir)
+                .tag_iter()
+                .collect::<tiff::TiffResult<Vec<_>>>()
+        })
         .transpose()?;
 
     let mut out = Cursor::new(Vec::new());
     let build_result = match colortype {
-        tiff::ColorType::RGB(8) => {
-            build::<colortype::RGB8>(&mut out, width, height, &pixels, &source_ifd0_tags, source_exif_tags.as_deref())
-        }
-        tiff::ColorType::Gray(8) => {
-            build::<colortype::Gray8>(&mut out, width, height, &pixels, &source_ifd0_tags, source_exif_tags.as_deref())
-        }
+        tiff::ColorType::RGB(8) => build::<colortype::RGB8>(
+            &mut out,
+            width,
+            height,
+            &pixels,
+            &source_ifd0_tags,
+            source_exif_tags.as_deref(),
+        ),
+        tiff::ColorType::Gray(8) => build::<colortype::Gray8>(
+            &mut out,
+            width,
+            height,
+            &pixels,
+            &source_ifd0_tags,
+            source_exif_tags.as_deref(),
+        ),
         other => {
             return Ok(Err(SkipReason::EncodeFailed(format!(
                 "unsupported TIFF color type for this milestone: {other:?}"
-            ))))
+            ))));
         }
     };
     if let Err(e) = build_result {
@@ -252,7 +278,10 @@ pub fn convert(source_bytes: &[u8]) -> Result<ConversionOutcome, ConvertError> {
         }
     }
 
-    Ok(Ok(Converted { bytes: converted_bytes, stored_format: "tiff" }))
+    Ok(Ok(Converted {
+        bytes: converted_bytes,
+        stored_format: "tiff",
+    }))
 }
 
 fn build<C: colortype::ColorType<Inner = u8>>(
@@ -266,7 +295,8 @@ fn build<C: colortype::ColorType<Inner = u8>>(
 where
     [u8]: tiff::encoder::TiffValue,
 {
-    let mut enc = TiffEncoder::new(out)?.with_compression(Compression::Deflate(DeflateLevel::default()));
+    let mut enc =
+        TiffEncoder::new(out)?.with_compression(Compression::Deflate(DeflateLevel::default()));
 
     let exif_offset = if let Some(exif_tags) = source_exif_tags {
         let mut extra = enc.extra_directory()?;
@@ -278,9 +308,13 @@ where
 
     let mut image = enc.new_image::<C>(width, height)?;
     if let Some(offset) = exif_offset {
-        image.encoder().write_tag(Tag::ExifDirectory, offset.offset)?;
+        image
+            .encoder()
+            .write_tag(Tag::ExifDirectory, offset.offset)?;
     }
-    copy_tags(image.encoder(), source_ifd0_tags, |id| is_structural_tag(id) || id == EXIF_DIRECTORY_TAG)?;
+    copy_tags(image.encoder(), source_ifd0_tags, |id| {
+        is_structural_tag(id) || id == EXIF_DIRECTORY_TAG
+    })?;
     image.write_data(pixels)?;
 
     Ok(())
@@ -298,17 +332,30 @@ mod tests {
         let pixels: Vec<u8> = (0..width * height * 3).map(|i| (i % 256) as u8).collect();
         let mut buf = Cursor::new(Vec::new());
         {
-            let mut enc = TiffEncoder::new(&mut buf).unwrap().with_compression(Compression::Lzw);
+            let mut enc = TiffEncoder::new(&mut buf)
+                .unwrap()
+                .with_compression(Compression::Lzw);
 
             let exif = {
                 let mut extra = enc.extra_directory().unwrap();
-                extra.write_tag(Tag::Unknown(0x829A) /* ExposureTime */, tiff::encoder::Rational { n: 1, d: 125 }).unwrap();
+                extra
+                    .write_tag(
+                        Tag::Unknown(0x829A), /* ExposureTime */
+                        tiff::encoder::Rational { n: 1, d: 125 },
+                    )
+                    .unwrap();
                 extra.finish_with_offsets().unwrap()
             };
 
             let mut image = enc.new_image::<colortype::RGB8>(width, height).unwrap();
-            image.encoder().write_tag(Tag::ExifDirectory, exif.offset).unwrap();
-            image.encoder().write_tag(Tag::Make, "LumenVault Test Co").unwrap();
+            image
+                .encoder()
+                .write_tag(Tag::ExifDirectory, exif.offset)
+                .unwrap();
+            image
+                .encoder()
+                .write_tag(Tag::Make, "LumenVault Test Co")
+                .unwrap();
             image.write_data(&pixels).unwrap();
         }
         buf.into_inner()
@@ -319,7 +366,10 @@ mod tests {
         let mut buf = Cursor::new(Vec::new());
         {
             let mut enc = TiffEncoder::new(&mut buf).unwrap();
-            enc.new_image::<colortype::Gray16>(width, height).unwrap().write_data(&pixels).unwrap();
+            enc.new_image::<colortype::Gray16>(width, height)
+                .unwrap()
+                .write_data(&pixels)
+                .unwrap();
         }
         buf.into_inner()
     }
@@ -336,10 +386,21 @@ mod tests {
         // a fresh decode of what convert() produced.
         let mut decoder = Decoder::new(Cursor::new(&converted.bytes)).unwrap();
         assert_eq!(decoder.dimensions().unwrap(), (12, 9));
-        let make = decoder.find_tag(Tag::Make).unwrap().unwrap().into_string().unwrap();
+        let make = decoder
+            .find_tag(Tag::Make)
+            .unwrap()
+            .unwrap()
+            .into_string()
+            .unwrap();
         assert_eq!(make, "LumenVault Test Co");
-        let exif_dir = exif_directory(&mut decoder).unwrap().expect("EXIF sub-IFD must survive");
-        let exposure = decoder.read_directory_tags(&exif_dir).find_tag(Tag::Unknown(0x829A) /* ExposureTime */).unwrap().unwrap();
+        let exif_dir = exif_directory(&mut decoder)
+            .unwrap()
+            .expect("EXIF sub-IFD must survive");
+        let exposure = decoder
+            .read_directory_tags(&exif_dir)
+            .find_tag(Tag::Unknown(0x829A) /* ExposureTime */)
+            .unwrap()
+            .unwrap();
         assert_eq!(exposure, Value::Rational(1, 125));
     }
 
@@ -349,6 +410,9 @@ mod tests {
 
         let outcome = convert(&source).unwrap();
 
-        assert!(outcome.is_err(), "16-bit TIFF is out of this milestone's scope and must not be converted");
+        assert!(
+            outcome.is_err(),
+            "16-bit TIFF is out of this milestone's scope and must not be converted"
+        );
     }
 }

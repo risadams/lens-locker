@@ -2,7 +2,7 @@
 //! workplan/SPEC.md §10; DDL sourced from workplan/prototypes/017-catalog-schema.md.
 
 use rusqlite::{Connection, OptionalExtension, params};
-use rusqlite_migration::{Migrations, M};
+use rusqlite_migration::{M, Migrations};
 
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
@@ -35,7 +35,9 @@ pub fn migrate(conn: &mut Connection) -> rusqlite_migration::Result<()> {
 /// Finds or creates the `tags` row for `name` and returns its id.
 fn find_or_create_tag(conn: &Connection, name: &str) -> rusqlite::Result<i64> {
     if let Some(id) = conn
-        .query_row("SELECT id FROM tags WHERE name = ?1", [name], |row| row.get(0))
+        .query_row("SELECT id FROM tags WHERE name = ?1", [name], |row| {
+            row.get(0)
+        })
         .optional()?
     {
         return Ok(id);
@@ -110,9 +112,11 @@ pub fn sync_fts_row(conn: &Connection, image_id: i64) -> rusqlite::Result<()> {
         )
         .optional()?;
     let (camera_make, camera_model): (Option<String>, Option<String>) = conn
-        .query_row("SELECT camera_make, camera_model FROM images WHERE id = ?1", [image_id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
-        })
+        .query_row(
+            "SELECT camera_make, camera_model FROM images WHERE id = ?1",
+            [image_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
         .optional()?
         .unwrap_or((None, None));
     let tags = tags_for_image(conn, image_id)?;
@@ -122,7 +126,13 @@ pub fn sync_fts_row(conn: &Connection, image_id: i64) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO images_fts (rowid, original_filename, camera_make, camera_model, tag_names)
          VALUES (?1, ?2, ?3, ?4, ?5)",
-        params![image_id, filename.unwrap_or_default(), camera_make.unwrap_or_default(), camera_model.unwrap_or_default(), tag_names],
+        params![
+            image_id,
+            filename.unwrap_or_default(),
+            camera_make.unwrap_or_default(),
+            camera_model.unwrap_or_default(),
+            tag_names
+        ],
     )?;
     Ok(())
 }
@@ -256,15 +266,18 @@ pub fn list_images(
         // a "search box" experience needs (match this text), not a
         // FTS5-query-language experience.
         let escaped = q.replace('"', "\"\"");
-        where_clauses.push(
-            "im.id IN (SELECT rowid FROM images_fts WHERE images_fts MATCH ?)".to_string(),
-        );
+        where_clauses
+            .push("im.id IN (SELECT rowid FROM images_fts WHERE images_fts MATCH ?)".to_string());
         args.push(Box::new(format!("\"{escaped}\"")));
     }
 
     let where_sql = where_clauses.join(" AND ");
     let count_sql = format!("SELECT COUNT(*) FROM images im WHERE {where_sql}");
-    let total: i64 = conn.query_row(&count_sql, rusqlite::params_from_iter(args.iter().map(|b| b.as_ref())), |row| row.get(0))?;
+    let total: i64 = conn.query_row(
+        &count_sql,
+        rusqlite::params_from_iter(args.iter().map(|b| b.as_ref())),
+        |row| row.get(0),
+    )?;
 
     let sql = format!(
         "SELECT im.id, th.path, im.capture_date,
@@ -293,7 +306,13 @@ pub fn list_images(
     let mut page = Vec::with_capacity(rows.len());
     for (id, thumbnail_path, capture_date) in rows {
         let tags = tags_for_image(conn, id)?;
-        page.push(GridImage { id, thumbnail_path, capture_date, tags, verified: true });
+        page.push(GridImage {
+            id,
+            thumbnail_path,
+            capture_date,
+            tags,
+            verified: true,
+        });
     }
 
     Ok((page, total))
@@ -338,8 +357,18 @@ pub fn get_image_detail(conn: &Connection, image_id: i64) -> rusqlite::Result<Op
         .optional()?;
 
     let Some((
-        original_format, stored_format, conversion_status, capture_date, camera_make,
-        camera_model, width, height, original_hash, file_size_bytes, stored_path, first_imported_at,
+        original_format,
+        stored_format,
+        conversion_status,
+        capture_date,
+        camera_make,
+        camera_model,
+        width,
+        height,
+        original_hash,
+        file_size_bytes,
+        stored_path,
+        first_imported_at,
     )) = row
     else {
         return Ok(None);
@@ -391,7 +420,13 @@ pub fn list_tags(conn: &Connection) -> rusqlite::Result<Vec<TagCount>> {
          JOIN images im ON im.id = it.image_id AND im.status = 'active'
          GROUP BY t.id ORDER BY COUNT(*) DESC, t.name ASC",
     )?;
-    stmt.query_map([], |row| Ok(TagCount { name: row.get(0)?, count: row.get(1)? }))?.collect()
+    stmt.query_map([], |row| {
+        Ok(TagCount {
+            name: row.get(0)?,
+            count: row.get(1)?,
+        })
+    })?
+    .collect()
 }
 
 #[derive(Debug, Clone)]
@@ -411,14 +446,26 @@ pub fn list_sources(conn: &Connection) -> rusqlite::Result<Vec<SourceCount>> {
          JOIN images im ON im.id = s.image_id AND im.status = 'active'
          GROUP BY b.source_root ORDER BY COUNT(DISTINCT im.id) DESC",
     )?;
-    stmt.query_map([], |row| Ok(SourceCount { source_root: row.get(0)?, count: row.get(1)? }))?.collect()
+    stmt.query_map([], |row| {
+        Ok(SourceCount {
+            source_root: row.get(0)?,
+            count: row.get(1)?,
+        })
+    })?
+    .collect()
 }
 
 /// Records a generated thumbnail (workplan/SPEC.md §9's `thumbnails` table)
 /// — upserts on `(image_id, variant)` so regenerating a thumbnail (e.g. a
 /// future eviction/regen pass) doesn't violate the schema's `UNIQUE`
 /// constraint.
-pub fn record_thumbnail(conn: &Connection, image_id: i64, variant: &str, format: &str, path: &str) -> rusqlite::Result<()> {
+pub fn record_thumbnail(
+    conn: &Connection,
+    image_id: i64,
+    variant: &str,
+    format: &str,
+    path: &str,
+) -> rusqlite::Result<()> {
     conn.execute(
         "INSERT INTO thumbnails (image_id, variant, format, path)
          VALUES (?1, ?2, ?3, ?4)
@@ -445,7 +492,12 @@ pub fn get_app_settings(conn: &Connection) -> rusqlite::Result<AppSettings> {
     conn.query_row(
         "SELECT hamming_threshold, retention_days FROM app_settings WHERE id = 1",
         [],
-        |row| Ok(AppSettings { hamming_threshold: row.get(0)?, retention_days: row.get(1)? }),
+        |row| {
+            Ok(AppSettings {
+                hamming_threshold: row.get(0)?,
+                retention_days: row.get(1)?,
+            })
+        },
     )
 }
 
@@ -478,15 +530,26 @@ pub fn list_review_queue(conn: &Connection) -> rusqlite::Result<Vec<ReviewQueueE
          WHERE status = 'pending' ORDER BY created_at ASC",
     )?;
     let rows: Vec<(i64, i64, i64, i64)> = stmt
-        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)))?
+        .query_map([], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?))
+        })?
         .collect::<Result<_, _>>()?;
     drop(stmt);
 
     let mut entries = Vec::with_capacity(rows.len());
     for (queue_id, a_id, b_id, hamming_distance) in rows {
-        let Some(image_a) = grid_image_by_id(conn, a_id)? else { continue };
-        let Some(image_b) = grid_image_by_id(conn, b_id)? else { continue };
-        entries.push(ReviewQueueEntry { queue_id, hamming_distance, image_a, image_b });
+        let Some(image_a) = grid_image_by_id(conn, a_id)? else {
+            continue;
+        };
+        let Some(image_b) = grid_image_by_id(conn, b_id)? else {
+            continue;
+        };
+        entries.push(ReviewQueueEntry {
+            queue_id,
+            hamming_distance,
+            image_a,
+            image_b,
+        });
     }
     Ok(entries)
 }
@@ -501,9 +564,17 @@ fn grid_image_by_id(conn: &Connection, image_id: i64) -> rusqlite::Result<Option
             |row| Ok((row.get(0)?, row.get(1)?)),
         )
         .optional()?;
-    let Some((thumbnail_path, capture_date)) = row else { return Ok(None) };
+    let Some((thumbnail_path, capture_date)) = row else {
+        return Ok(None);
+    };
     let tags = tags_for_image(conn, image_id)?;
-    Ok(Some(GridImage { id: image_id, thumbnail_path, capture_date, tags, verified: true }))
+    Ok(Some(GridImage {
+        id: image_id,
+        thumbnail_path,
+        capture_date,
+        tags,
+        verified: true,
+    }))
 }
 
 #[cfg(test)]
@@ -546,7 +617,10 @@ mod tests {
             "embeddings",
             "tag_scores",
         ] {
-            assert!(table_exists(table), "expected table `{table}` to exist after migration");
+            assert!(
+                table_exists(table),
+                "expected table `{table}` to exist after migration"
+            );
         }
     }
 
@@ -577,18 +651,30 @@ mod tests {
     /// `root_path` is `UNIQUE` and some tests call this more than once.
     fn insert_test_image(conn: &Connection) -> i64 {
         let library_id: i64 = conn
-            .query_row("SELECT id FROM libraries WHERE root_path = 'A:/lib'", [], |row| row.get(0))
+            .query_row(
+                "SELECT id FROM libraries WHERE root_path = 'A:/lib'",
+                [],
+                |row| row.get(0),
+            )
             .optional()
             .unwrap()
             .unwrap_or_else(|| {
-                conn.execute("INSERT INTO libraries (name, root_path) VALUES ('lib', 'A:/lib')", [])
-                    .unwrap();
+                conn.execute(
+                    "INSERT INTO libraries (name, root_path) VALUES ('lib', 'A:/lib')",
+                    [],
+                )
+                .unwrap();
                 conn.last_insert_rowid()
             });
         // original_hash is UNIQUE — a fresh random-ish value per call so
         // tests inserting more than one image against the shared library
         // above don't collide.
-        let unique_hash: i64 = conn.query_row("SELECT COUNT(*) FROM images", [], |row| row.get::<_, i64>(0)).unwrap() + 1;
+        let unique_hash: i64 = conn
+            .query_row("SELECT COUNT(*) FROM images", [], |row| {
+                row.get::<_, i64>(0)
+            })
+            .unwrap()
+            + 1;
         conn.execute(
             "INSERT INTO images (
                 library_id, original_hash, stored_hash, stored_path,
@@ -608,9 +694,17 @@ mod tests {
         super::add_tag(&conn, image_id, "sunset").unwrap();
         super::add_tag(&conn, image_id, "sunset").unwrap();
 
-        assert_eq!(super::tags_for_image(&conn, image_id).unwrap(), vec!["sunset".to_string()]);
-        let tag_count: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0)).unwrap();
-        assert_eq!(tag_count, 1, "re-tagging must not create a duplicate tags row");
+        assert_eq!(
+            super::tags_for_image(&conn, image_id).unwrap(),
+            vec!["sunset".to_string()]
+        );
+        let tag_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            tag_count, 1,
+            "re-tagging must not create a duplicate tags row"
+        );
     }
 
     #[test]
@@ -624,7 +718,11 @@ mod tests {
 
         assert_eq!(
             super::tags_for_image(&conn, image_id).unwrap(),
-            vec!["apple".to_string(), "mango".to_string(), "zebra".to_string()]
+            vec![
+                "apple".to_string(),
+                "mango".to_string(),
+                "zebra".to_string()
+            ]
         );
     }
 
@@ -647,7 +745,10 @@ mod tests {
         super::add_tag(&conn, image_id, "drop").unwrap();
         super::remove_tag(&conn, image_id, "drop").unwrap();
 
-        assert_eq!(super::tags_for_image(&conn, image_id).unwrap(), vec!["keep".to_string()]);
+        assert_eq!(
+            super::tags_for_image(&conn, image_id).unwrap(),
+            vec!["keep".to_string()]
+        );
     }
 
     #[test]
@@ -661,7 +762,10 @@ mod tests {
         super::remove_tag(&conn, image_a, "shared").unwrap();
 
         assert!(super::tags_for_image(&conn, image_a).unwrap().is_empty());
-        assert_eq!(super::tags_for_image(&conn, image_b).unwrap(), vec!["shared".to_string()]);
+        assert_eq!(
+            super::tags_for_image(&conn, image_b).unwrap(),
+            vec!["shared".to_string()]
+        );
     }
 
     // ── Milestone 5: grid queries, review queue ─────────────────────────
@@ -685,7 +789,14 @@ mod tests {
                 library_id, original_hash, stored_hash, stored_path,
                 original_format, stored_format, file_size_bytes, capture_date
             ) VALUES (?1, ?2, x'00', ?3, ?4, ?4, ?5, ?6)",
-            params![library_id, [original_hash; 32].to_vec(), format!("blob-{original_hash}"), original_format, size_bytes, capture_date],
+            params![
+                library_id,
+                [original_hash; 32].to_vec(),
+                format!("blob-{original_hash}"),
+                original_format,
+                size_bytes,
+                capture_date
+            ],
         )
         .unwrap();
         let image_id = conn.last_insert_rowid();
@@ -699,14 +810,23 @@ mod tests {
         conn.execute(
             "INSERT INTO image_sources (image_id, import_batch_id, original_filename, source_path)
              VALUES (?1, ?2, ?3, ?4)",
-            params![image_id, batch_id, filename, format!("{source_root}/{filename}")],
+            params![
+                image_id,
+                batch_id,
+                filename,
+                format!("{source_root}/{filename}")
+            ],
         )
         .unwrap();
         image_id
     }
 
     fn test_library(conn: &Connection) -> i64 {
-        conn.execute("INSERT INTO libraries (name, root_path) VALUES ('lib', 'A:/lib')", []).unwrap();
+        conn.execute(
+            "INSERT INTO libraries (name, root_path) VALUES ('lib', 'A:/lib')",
+            [],
+        )
+        .unwrap();
         conn.last_insert_rowid()
     }
 
@@ -714,11 +834,34 @@ mod tests {
     fn list_images_filters_by_format_and_returns_total_count() {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
-        insert_full_image(&conn, library_id, 1, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
-        insert_full_image(&conn, library_id, 2, "png", "2026-01-02T00:00:00Z", 200, "D:/src", "b.png");
+        insert_full_image(
+            &conn,
+            library_id,
+            1,
+            "jpeg",
+            "2026-01-01T00:00:00Z",
+            100,
+            "D:/src",
+            "a.jpg",
+        );
+        insert_full_image(
+            &conn,
+            library_id,
+            2,
+            "png",
+            "2026-01-02T00:00:00Z",
+            200,
+            "D:/src",
+            "b.png",
+        );
 
-        let filters = super::ImageFilters { formats: vec!["jpeg".to_string()], ..Default::default() };
-        let (page, total) = super::list_images(&conn, &filters, super::SortOrder::CapturedDesc, None, 0, 10).unwrap();
+        let filters = super::ImageFilters {
+            formats: vec!["jpeg".to_string()],
+            ..Default::default()
+        };
+        let (page, total) =
+            super::list_images(&conn, &filters, super::SortOrder::CapturedDesc, None, 0, 10)
+                .unwrap();
 
         assert_eq!(total, 1);
         assert_eq!(page.len(), 1);
@@ -730,26 +873,80 @@ mod tests {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
         for i in 0..5u8 {
-            insert_full_image(&conn, library_id, i + 10, "jpeg", &format!("2026-01-0{}T00:00:00Z", i + 1), 100, "D:/src", "x.jpg");
+            insert_full_image(
+                &conn,
+                library_id,
+                i + 10,
+                "jpeg",
+                &format!("2026-01-0{}T00:00:00Z", i + 1),
+                100,
+                "D:/src",
+                "x.jpg",
+            );
         }
 
-        let (page1, total) = super::list_images(&conn, &super::ImageFilters::default(), super::SortOrder::CapturedAsc, None, 0, 2).unwrap();
-        let (page2, _) = super::list_images(&conn, &super::ImageFilters::default(), super::SortOrder::CapturedAsc, None, 2, 2).unwrap();
+        let (page1, total) = super::list_images(
+            &conn,
+            &super::ImageFilters::default(),
+            super::SortOrder::CapturedAsc,
+            None,
+            0,
+            2,
+        )
+        .unwrap();
+        let (page2, _) = super::list_images(
+            &conn,
+            &super::ImageFilters::default(),
+            super::SortOrder::CapturedAsc,
+            None,
+            2,
+            2,
+        )
+        .unwrap();
 
         assert_eq!(total, 5);
         assert_eq!(page1.len(), 2);
         assert_eq!(page2.len(), 2);
-        assert_ne!(page1[0].id, page2[0].id, "different pages must return different rows");
+        assert_ne!(
+            page1[0].id, page2[0].id,
+            "different pages must return different rows"
+        );
     }
 
     #[test]
     fn list_images_sorts_by_captured_date_descending() {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
-        let older = insert_full_image(&conn, library_id, 20, "jpeg", "2020-01-01T00:00:00Z", 100, "D:/src", "old.jpg");
-        let newer = insert_full_image(&conn, library_id, 21, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "new.jpg");
+        let older = insert_full_image(
+            &conn,
+            library_id,
+            20,
+            "jpeg",
+            "2020-01-01T00:00:00Z",
+            100,
+            "D:/src",
+            "old.jpg",
+        );
+        let newer = insert_full_image(
+            &conn,
+            library_id,
+            21,
+            "jpeg",
+            "2026-01-01T00:00:00Z",
+            100,
+            "D:/src",
+            "new.jpg",
+        );
 
-        let (page, _) = super::list_images(&conn, &super::ImageFilters::default(), super::SortOrder::CapturedDesc, None, 0, 10).unwrap();
+        let (page, _) = super::list_images(
+            &conn,
+            &super::ImageFilters::default(),
+            super::SortOrder::CapturedDesc,
+            None,
+            0,
+            10,
+        )
+        .unwrap();
 
         assert_eq!(page[0].id, newer);
         assert_eq!(page[1].id, older);
@@ -759,14 +956,46 @@ mod tests {
     fn list_images_filters_by_tag_with_or_semantics_within_the_facet() {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
-        let sunset = insert_full_image(&conn, library_id, 30, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "s.jpg");
-        let beach = insert_full_image(&conn, library_id, 31, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/src", "b.jpg");
-        let untagged = insert_full_image(&conn, library_id, 32, "jpeg", "2026-01-03T00:00:00Z", 100, "D:/src", "u.jpg");
+        let sunset = insert_full_image(
+            &conn,
+            library_id,
+            30,
+            "jpeg",
+            "2026-01-01T00:00:00Z",
+            100,
+            "D:/src",
+            "s.jpg",
+        );
+        let beach = insert_full_image(
+            &conn,
+            library_id,
+            31,
+            "jpeg",
+            "2026-01-02T00:00:00Z",
+            100,
+            "D:/src",
+            "b.jpg",
+        );
+        let untagged = insert_full_image(
+            &conn,
+            library_id,
+            32,
+            "jpeg",
+            "2026-01-03T00:00:00Z",
+            100,
+            "D:/src",
+            "u.jpg",
+        );
         super::add_tag(&conn, sunset, "sunset").unwrap();
         super::add_tag(&conn, beach, "beach").unwrap();
 
-        let filters = super::ImageFilters { tags: vec!["sunset".to_string(), "beach".to_string()], ..Default::default() };
-        let (page, total) = super::list_images(&conn, &filters, super::SortOrder::CapturedDesc, None, 0, 10).unwrap();
+        let filters = super::ImageFilters {
+            tags: vec!["sunset".to_string(), "beach".to_string()],
+            ..Default::default()
+        };
+        let (page, total) =
+            super::list_images(&conn, &filters, super::SortOrder::CapturedDesc, None, 0, 10)
+                .unwrap();
 
         let ids: Vec<i64> = page.iter().map(|g| g.id).collect();
         assert_eq!(total, 2);
@@ -777,11 +1006,34 @@ mod tests {
     fn list_images_filters_by_source_root() {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
-        let from_a = insert_full_image(&conn, library_id, 40, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/tripA", "a.jpg");
-        let _from_b = insert_full_image(&conn, library_id, 41, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/tripB", "b.jpg");
+        let from_a = insert_full_image(
+            &conn,
+            library_id,
+            40,
+            "jpeg",
+            "2026-01-01T00:00:00Z",
+            100,
+            "D:/tripA",
+            "a.jpg",
+        );
+        let _from_b = insert_full_image(
+            &conn,
+            library_id,
+            41,
+            "jpeg",
+            "2026-01-02T00:00:00Z",
+            100,
+            "D:/tripB",
+            "b.jpg",
+        );
 
-        let filters = super::ImageFilters { sources: vec!["D:/tripA".to_string()], ..Default::default() };
-        let (page, total) = super::list_images(&conn, &filters, super::SortOrder::CapturedDesc, None, 0, 10).unwrap();
+        let filters = super::ImageFilters {
+            sources: vec!["D:/tripA".to_string()],
+            ..Default::default()
+        };
+        let (page, total) =
+            super::list_images(&conn, &filters, super::SortOrder::CapturedDesc, None, 0, 10)
+                .unwrap();
 
         assert_eq!(total, 1);
         assert_eq!(page[0].id, from_a);
@@ -791,15 +1043,41 @@ mod tests {
     fn list_images_excludes_merged_images() {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
-        let keeper = insert_full_image(&conn, library_id, 50, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "k.jpg");
-        let loser = insert_full_image(&conn, library_id, 51, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/src", "l.jpg");
+        let keeper = insert_full_image(
+            &conn,
+            library_id,
+            50,
+            "jpeg",
+            "2026-01-01T00:00:00Z",
+            100,
+            "D:/src",
+            "k.jpg",
+        );
+        let loser = insert_full_image(
+            &conn,
+            library_id,
+            51,
+            "jpeg",
+            "2026-01-02T00:00:00Z",
+            100,
+            "D:/src",
+            "l.jpg",
+        );
         conn.execute(
             "UPDATE images SET status = 'merged', merged_into_id = ?1 WHERE id = ?2",
             params![keeper, loser],
         )
         .unwrap();
 
-        let (page, total) = super::list_images(&conn, &super::ImageFilters::default(), super::SortOrder::CapturedDesc, None, 0, 10).unwrap();
+        let (page, total) = super::list_images(
+            &conn,
+            &super::ImageFilters::default(),
+            super::SortOrder::CapturedDesc,
+            None,
+            0,
+            10,
+        )
+        .unwrap();
 
         assert_eq!(total, 1);
         assert_eq!(page[0].id, keeper);
@@ -809,14 +1087,48 @@ mod tests {
     fn text_search_matches_synced_filenames_and_tags() {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
-        let sunset_pic = insert_full_image(&conn, library_id, 60, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "vacation_beach.jpg");
-        let other = insert_full_image(&conn, library_id, 61, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/src", "receipt_scan.jpg");
+        let sunset_pic = insert_full_image(
+            &conn,
+            library_id,
+            60,
+            "jpeg",
+            "2026-01-01T00:00:00Z",
+            100,
+            "D:/src",
+            "vacation_beach.jpg",
+        );
+        let other = insert_full_image(
+            &conn,
+            library_id,
+            61,
+            "jpeg",
+            "2026-01-02T00:00:00Z",
+            100,
+            "D:/src",
+            "receipt_scan.jpg",
+        );
         super::add_tag(&conn, sunset_pic, "sunset").unwrap();
         super::sync_fts_row(&conn, sunset_pic).unwrap();
         super::sync_fts_row(&conn, other).unwrap();
 
-        let (by_tag, _) = super::list_images(&conn, &super::ImageFilters::default(), super::SortOrder::CapturedDesc, Some("sunset"), 0, 10).unwrap();
-        let (by_filename, _) = super::list_images(&conn, &super::ImageFilters::default(), super::SortOrder::CapturedDesc, Some("vacation"), 0, 10).unwrap();
+        let (by_tag, _) = super::list_images(
+            &conn,
+            &super::ImageFilters::default(),
+            super::SortOrder::CapturedDesc,
+            Some("sunset"),
+            0,
+            10,
+        )
+        .unwrap();
+        let (by_filename, _) = super::list_images(
+            &conn,
+            &super::ImageFilters::default(),
+            super::SortOrder::CapturedDesc,
+            Some("vacation"),
+            0,
+            10,
+        )
+        .unwrap();
 
         assert_eq!(by_tag.len(), 1);
         assert_eq!(by_tag[0].id, sunset_pic);
@@ -828,7 +1140,16 @@ mod tests {
     fn get_image_detail_returns_full_metadata_including_tags() {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
-        let image_id = insert_full_image(&conn, library_id, 70, "jpeg", "2026-01-01T00:00:00Z", 1234, "D:/src", "photo.jpg");
+        let image_id = insert_full_image(
+            &conn,
+            library_id,
+            70,
+            "jpeg",
+            "2026-01-01T00:00:00Z",
+            1234,
+            "D:/src",
+            "photo.jpg",
+        );
         super::add_tag(&conn, image_id, "family").unwrap();
 
         let detail = super::get_image_detail(&conn, image_id).unwrap().unwrap();
@@ -850,8 +1171,26 @@ mod tests {
     fn list_tags_returns_counts_across_active_images_only() {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
-        let a = insert_full_image(&conn, library_id, 80, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
-        let b = insert_full_image(&conn, library_id, 81, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/src", "b.jpg");
+        let a = insert_full_image(
+            &conn,
+            library_id,
+            80,
+            "jpeg",
+            "2026-01-01T00:00:00Z",
+            100,
+            "D:/src",
+            "a.jpg",
+        );
+        let b = insert_full_image(
+            &conn,
+            library_id,
+            81,
+            "jpeg",
+            "2026-01-02T00:00:00Z",
+            100,
+            "D:/src",
+            "b.jpg",
+        );
         super::add_tag(&conn, a, "family").unwrap();
         super::add_tag(&conn, b, "family").unwrap();
 
@@ -866,14 +1205,44 @@ mod tests {
     fn list_sources_returns_distinct_import_roots_with_counts() {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
-        insert_full_image(&conn, library_id, 90, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/tripA", "a.jpg");
-        insert_full_image(&conn, library_id, 91, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/tripA", "b.jpg");
-        insert_full_image(&conn, library_id, 92, "jpeg", "2026-01-03T00:00:00Z", 100, "D:/tripB", "c.jpg");
+        insert_full_image(
+            &conn,
+            library_id,
+            90,
+            "jpeg",
+            "2026-01-01T00:00:00Z",
+            100,
+            "D:/tripA",
+            "a.jpg",
+        );
+        insert_full_image(
+            &conn,
+            library_id,
+            91,
+            "jpeg",
+            "2026-01-02T00:00:00Z",
+            100,
+            "D:/tripA",
+            "b.jpg",
+        );
+        insert_full_image(
+            &conn,
+            library_id,
+            92,
+            "jpeg",
+            "2026-01-03T00:00:00Z",
+            100,
+            "D:/tripB",
+            "c.jpg",
+        );
 
         let sources = super::list_sources(&conn).unwrap();
 
         assert_eq!(sources.len(), 2);
-        let trip_a = sources.iter().find(|s| s.source_root == "D:/tripA").unwrap();
+        let trip_a = sources
+            .iter()
+            .find(|s| s.source_root == "D:/tripA")
+            .unwrap();
         assert_eq!(trip_a.count, 2);
     }
 
@@ -885,9 +1254,24 @@ mod tests {
         super::record_thumbnail(&conn, image_id, "grid256", "jpeg", "/a/b.jpg").unwrap();
         super::record_thumbnail(&conn, image_id, "grid256", "jpeg", "/a/c.jpg").unwrap();
 
-        let count: i64 = conn.query_row("SELECT COUNT(*) FROM thumbnails WHERE image_id = ?1", [image_id], |r| r.get(0)).unwrap();
-        let path: String = conn.query_row("SELECT path FROM thumbnails WHERE image_id = ?1", [image_id], |r| r.get(0)).unwrap();
-        assert_eq!(count, 1, "re-recording the same variant must not duplicate the row");
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM thumbnails WHERE image_id = ?1",
+                [image_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let path: String = conn
+            .query_row(
+                "SELECT path FROM thumbnails WHERE image_id = ?1",
+                [image_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, 1,
+            "re-recording the same variant must not duplicate the row"
+        );
         assert_eq!(path, "/a/c.jpg");
     }
 
@@ -895,16 +1279,52 @@ mod tests {
     fn list_review_queue_returns_only_pending_entries_with_both_sides() {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
-        let a = insert_full_image(&conn, library_id, 100, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
-        let b = insert_full_image(&conn, library_id, 101, "jpeg", "2026-01-01T00:00:01Z", 100, "D:/src", "b.jpg");
+        let a = insert_full_image(
+            &conn,
+            library_id,
+            100,
+            "jpeg",
+            "2026-01-01T00:00:00Z",
+            100,
+            "D:/src",
+            "a.jpg",
+        );
+        let b = insert_full_image(
+            &conn,
+            library_id,
+            101,
+            "jpeg",
+            "2026-01-01T00:00:01Z",
+            100,
+            "D:/src",
+            "b.jpg",
+        );
         conn.execute(
             "INSERT INTO dedupe_review_queue (image_a_id, image_b_id, hamming_distance) VALUES (?1, ?2, 3)",
             params![a, b],
         )
         .unwrap();
         // A resolved entry must not show up.
-        let c = insert_full_image(&conn, library_id, 102, "jpeg", "2026-01-01T00:00:02Z", 100, "D:/src", "c.jpg");
-        let d = insert_full_image(&conn, library_id, 103, "jpeg", "2026-01-01T00:00:03Z", 100, "D:/src", "d.jpg");
+        let c = insert_full_image(
+            &conn,
+            library_id,
+            102,
+            "jpeg",
+            "2026-01-01T00:00:02Z",
+            100,
+            "D:/src",
+            "c.jpg",
+        );
+        let d = insert_full_image(
+            &conn,
+            library_id,
+            103,
+            "jpeg",
+            "2026-01-01T00:00:03Z",
+            100,
+            "D:/src",
+            "d.jpg",
+        );
         conn.execute(
             "INSERT INTO dedupe_review_queue (image_a_id, image_b_id, hamming_distance, status) VALUES (?1, ?2, 2, 'dismissed')",
             params![c, d],
@@ -925,16 +1345,35 @@ mod tests {
 
         let settings = super::get_app_settings(&conn).unwrap();
 
-        assert_eq!(settings, super::AppSettings { hamming_threshold: 5, retention_days: 30 });
+        assert_eq!(
+            settings,
+            super::AppSettings {
+                hamming_threshold: 5,
+                retention_days: 30
+            }
+        );
     }
 
     #[test]
     fn app_settings_round_trip_through_update() {
         let conn = migrated_conn();
 
-        super::update_app_settings(&conn, super::AppSettings { hamming_threshold: 8, retention_days: 14 }).unwrap();
+        super::update_app_settings(
+            &conn,
+            super::AppSettings {
+                hamming_threshold: 8,
+                retention_days: 14,
+            },
+        )
+        .unwrap();
         let settings = super::get_app_settings(&conn).unwrap();
 
-        assert_eq!(settings, super::AppSettings { hamming_threshold: 8, retention_days: 14 });
+        assert_eq!(
+            settings,
+            super::AppSettings {
+                hamming_threshold: 8,
+                retention_days: 14
+            }
+        );
     }
 }

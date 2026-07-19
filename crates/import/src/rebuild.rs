@@ -81,7 +81,10 @@ pub struct RebuildReport {
 ///
 /// `conn` must already be freshly migrated (`lumenvault_catalog::migrate`)
 /// — this function only populates rows, it doesn't apply the schema.
-pub fn rebuild_from_store(conn: &Connection, paths: &LibraryPaths) -> Result<RebuildReport, ImportError> {
+pub fn rebuild_from_store(
+    conn: &Connection,
+    paths: &LibraryPaths,
+) -> Result<RebuildReport, ImportError> {
     let library_id = crate::ensure_library(conn, paths.root())?;
     let batch_id = create_recovery_batch(conn, library_id)?;
 
@@ -92,7 +95,10 @@ pub fn rebuild_from_store(conn: &Connection, paths: &LibraryPaths) -> Result<Reb
     }
 
     for entry in walkdir::WalkDir::new(&blobs_dir) {
-        let entry = entry.map_err(|source| ImportError::Walk { root: blobs_dir.clone(), source })?;
+        let entry = entry.map_err(|source| ImportError::Walk {
+            root: blobs_dir.clone(),
+            source,
+        })?;
         if !entry.file_type().is_file() {
             continue;
         }
@@ -148,7 +154,8 @@ fn recover_one_blob(
 ) -> Result<RecoverOutcome, ImportError> {
     let Some(original_hash) = hash_from_blob_path(blob_path) else {
         return Ok(RecoverOutcome::Skipped {
-            reason: "filename is not a valid content-addressed blob name (64 hex chars)".to_string(),
+            reason: "filename is not a valid content-addressed blob name (64 hex chars)"
+                .to_string(),
         });
     };
 
@@ -164,11 +171,19 @@ fn recover_one_blob(
         .optional()?
         .is_some();
     if already_recovered {
-        return Ok(RecoverOutcome::Skipped { reason: "already recovered".to_string() });
+        return Ok(RecoverOutcome::Skipped {
+            reason: "already recovered".to_string(),
+        });
     }
 
-    let Some(stored_format) = blob_path.extension().and_then(|e| e.to_str()).map(str::to_ascii_lowercase) else {
-        return Ok(RecoverOutcome::Skipped { reason: "blob has no file extension".to_string() });
+    let Some(stored_format) = blob_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(str::to_ascii_lowercase)
+    else {
+        return Ok(RecoverOutcome::Skipped {
+            reason: "blob has no file extension".to_string(),
+        });
     };
 
     let stored_hash = lumenvault_hash::hash_file(blob_path)?;
@@ -184,7 +199,9 @@ fn recover_one_blob(
             if lumenvault_decode::raw_extension(blob_path).is_some() {
                 (None, None, None)
             } else {
-                return Ok(RecoverOutcome::Skipped { reason: format!("undecodable and not a recognized RAW extension: {e}") });
+                return Ok(RecoverOutcome::Skipped {
+                    reason: format!("undecodable and not a recognized RAW extension: {e}"),
+                });
             }
         }
     };
@@ -193,7 +210,11 @@ fn recover_one_blob(
     // converted (stored_format IS the original) — see module doc for the
     // jxl case, where it genuinely isn't.
     let original_format = stored_format.clone();
-    let conversion_status = if stored_format == "jxl" { "converted" } else { "not_applicable" };
+    let conversion_status = if stored_format == "jxl" {
+        "converted"
+    } else {
+        "not_applicable"
+    };
 
     let file_size_bytes = fs::metadata(blob_path)?.len() as i64;
 
@@ -221,11 +242,19 @@ fn recover_one_blob(
 
     // Placeholder provenance (module doc point 2): the blob's own on-disk
     // filename stands in for the real, unrecoverable original filename.
-    let placeholder_name = blob_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default();
+    let placeholder_name = blob_path
+        .file_name()
+        .map(|n| n.to_string_lossy())
+        .unwrap_or_default();
     conn.execute(
         "INSERT INTO image_sources (image_id, import_batch_id, original_filename, source_path)
          VALUES (?1, ?2, ?3, ?4)",
-        params![image_id, batch_id, placeholder_name, blob_path.to_string_lossy()],
+        params![
+            image_id,
+            batch_id,
+            placeholder_name,
+            blob_path.to_string_lossy()
+        ],
     )?;
     // Keeps search (Milestone 5) working after a rebuild even for images
     // with no tags at all — add_tag below already re-syncs when tags exist,

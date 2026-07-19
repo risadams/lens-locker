@@ -46,8 +46,8 @@ use webview2_com::Microsoft::Web::WebView2::Win32::{
     CreateCoreWebView2EnvironmentWithOptions, ICoreWebView2Environment, ICoreWebView2Settings8,
 };
 use webview2_com::{CoreWebView2EnvironmentOptions, CreateCoreWebView2EnvironmentCompletedHandler};
-use windows::core::{Interface, HSTRING, PCWSTR};
 use windows::Win32::Foundation::{E_POINTER, E_UNEXPECTED};
+use windows::core::{HSTRING, Interface, PCWSTR};
 
 /// Build a WebView2 environment with `IsCustomCrashReportingEnabled` set —
 /// i.e. WebView2's own minidump-upload-to-Microsoft path disabled. Must run

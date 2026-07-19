@@ -48,7 +48,9 @@ pub type PerceptualHash = u64;
 /// any external dependency beyond `image`'s own generic resize/grayscale
 /// support.
 pub fn perceptual_hash(image: &image::DynamicImage) -> PerceptualHash {
-    let small = image.resize_exact(9, 8, image::imageops::FilterType::Triangle).into_luma8();
+    let small = image
+        .resize_exact(9, 8, image::imageops::FilterType::Triangle)
+        .into_luma8();
 
     let mut hash: u64 = 0;
     for y in 0..8u32 {
@@ -92,7 +94,11 @@ mod tests {
 
     fn checkerboard(width: u32, height: u32) -> DynamicImage {
         let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(width, height, |x, y| {
-            if (x / 4 + y / 4) % 2 == 0 { Rgb([255, 255, 255]) } else { Rgb([0, 0, 0]) }
+            if (x / 4 + y / 4) % 2 == 0 {
+                Rgb([255, 255, 255])
+            } else {
+                Rgb([0, 0, 0])
+            }
         });
         DynamicImage::ImageRgb8(img)
     }
@@ -125,7 +131,10 @@ mod tests {
         let a = super::perceptual_hash(&gradient(64, 64));
         let b = super::perceptual_hash(&gradient(256, 256));
         let distance = super::hamming_distance(a, b);
-        assert!(distance <= 5, "expected a resized duplicate to stay within the default threshold, got {distance}");
+        assert!(
+            distance <= 5,
+            "expected a resized duplicate to stay within the default threshold, got {distance}"
+        );
     }
 
     #[test]
@@ -133,7 +142,10 @@ mod tests {
         let a = super::perceptual_hash(&gradient(64, 64));
         let b = super::perceptual_hash(&checkerboard(64, 64));
         let distance = super::hamming_distance(a, b);
-        assert!(distance > 5, "expected visually distinct images to exceed the default threshold, got {distance}");
+        assert!(
+            distance > 5,
+            "expected visually distinct images to exceed the default threshold, got {distance}"
+        );
     }
 
     #[test]
@@ -166,7 +178,11 @@ mod tests {
     fn to_hex_round_trips_through_a_known_length() {
         let digest = super::hash_bytes(b"lumenvault");
         let hex = super::to_hex(&digest);
-        assert_eq!(hex.len(), 64, "a 32-byte digest must hex-encode to 64 characters");
+        assert_eq!(
+            hex.len(),
+            64,
+            "a 32-byte digest must hex-encode to 64 characters"
+        );
         assert!(hex.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }

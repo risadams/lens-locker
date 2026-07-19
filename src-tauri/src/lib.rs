@@ -92,24 +92,33 @@ struct ImportGuard<'a>(&'a ImportLock);
 impl ImportLock {
     fn try_acquire(&self) -> Option<ImportGuard<'_>> {
         self.running
-            .compare_exchange(false, true, std::sync::atomic::Ordering::SeqCst, std::sync::atomic::Ordering::SeqCst)
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
             .ok()
             .map(|_| {
                 // Clear any stale request from a previous run — this run
                 // hasn't been asked to cancel yet.
-                self.cancel_requested.store(false, std::sync::atomic::Ordering::SeqCst);
+                self.cancel_requested
+                    .store(false, std::sync::atomic::Ordering::SeqCst);
                 ImportGuard(self)
             })
     }
 
     fn is_cancel_requested(&self) -> bool {
-        self.cancel_requested.load(std::sync::atomic::Ordering::SeqCst)
+        self.cancel_requested
+            .load(std::sync::atomic::Ordering::SeqCst)
     }
 }
 
 impl Drop for ImportGuard<'_> {
     fn drop(&mut self) {
-        self.0.running.store(false, std::sync::atomic::Ordering::SeqCst);
+        self.0
+            .running
+            .store(false, std::sync::atomic::Ordering::SeqCst);
     }
 }
 
@@ -150,7 +159,9 @@ enum CmdError {
     ImportAlreadyRunning,
     #[error("background task panicked: {0}")]
     TaskPanicked(String),
-    #[error("a LumenVault library already exists at this location — open it instead of creating a new one")]
+    #[error(
+        "a LumenVault library already exists at this location — open it instead of creating a new one"
+    )]
     LibraryAlreadyExists,
     #[error("no LumenVault library was found at this location")]
     LibraryNotFound,
@@ -187,7 +198,13 @@ struct GridImageDto {
 
 impl From<GridImage> for GridImageDto {
     fn from(g: GridImage) -> Self {
-        Self { id: g.id, thumbnail_path: g.thumbnail_path, capture_date: g.capture_date, tags: g.tags, verified: g.verified }
+        Self {
+            id: g.id,
+            thumbnail_path: g.thumbnail_path,
+            capture_date: g.capture_date,
+            tags: g.tags,
+            verified: g.verified,
+        }
     }
 }
 
@@ -214,7 +231,13 @@ struct FiltersDto {
 
 impl From<FiltersDto> for ImageFilters {
     fn from(f: FiltersDto) -> Self {
-        Self { date_from: f.date_from, date_to: f.date_to, formats: f.formats, sources: f.sources, tags: f.tags }
+        Self {
+            date_from: f.date_from,
+            date_to: f.date_to,
+            formats: f.formats,
+            sources: f.sources,
+            tags: f.tags,
+        }
     }
 }
 
@@ -284,7 +307,10 @@ fn list_images(
             offset,
             limit,
         )?;
-        Ok(ListImagesResult { items: items.into_iter().map(Into::into).collect(), total })
+        Ok(ListImagesResult {
+            items: items.into_iter().map(Into::into).collect(),
+            total,
+        })
     })
 }
 
@@ -309,10 +335,14 @@ struct ImageDetailDto {
 }
 
 #[tauri::command]
-fn get_image_detail(state: tauri::State<Mutex<LibraryState>>, id: i64) -> CmdResult<ImageDetailDto> {
+fn get_image_detail(
+    state: tauri::State<Mutex<LibraryState>>,
+    id: i64,
+) -> CmdResult<ImageDetailDto> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        let d = lumenvault_catalog::get_image_detail(&conn, id)?.ok_or(CmdError::ImageNotFound(id))?;
+        let d =
+            lumenvault_catalog::get_image_detail(&conn, id)?.ok_or(CmdError::ImageNotFound(id))?;
         Ok(ImageDetailDto {
             id: d.id,
             filename: d.filename,
@@ -366,7 +396,11 @@ fn add_tag(state: tauri::State<Mutex<LibraryState>>, image_id: i64, tag: String)
 }
 
 #[tauri::command]
-fn remove_tag(state: tauri::State<Mutex<LibraryState>>, image_id: i64, tag: String) -> CmdResult<()> {
+fn remove_tag(
+    state: tauri::State<Mutex<LibraryState>>,
+    image_id: i64,
+    tag: String,
+) -> CmdResult<()> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
         lumenvault_catalog::remove_tag(&conn, image_id, &tag)?;
@@ -385,7 +419,13 @@ struct TagCountDto {
 fn list_tags(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<Vec<TagCountDto>> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        Ok(lumenvault_catalog::list_tags(&conn)?.into_iter().map(|t| TagCountDto { name: t.name, count: t.count }).collect())
+        Ok(lumenvault_catalog::list_tags(&conn)?
+            .into_iter()
+            .map(|t| TagCountDto {
+                name: t.name,
+                count: t.count,
+            })
+            .collect())
     })
 }
 
@@ -402,7 +442,10 @@ fn list_sources(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<Vec<Sourc
         let conn = app_state.conn.lock().unwrap();
         Ok(lumenvault_catalog::list_sources(&conn)?
             .into_iter()
-            .map(|s| SourceCountDto { source_root: s.source_root, count: s.count })
+            .map(|s| SourceCountDto {
+                source_root: s.source_root,
+                count: s.count,
+            })
             .collect())
     })
 }
@@ -417,7 +460,9 @@ struct ReviewQueueEntryDto {
 }
 
 #[tauri::command]
-fn list_review_queue(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<Vec<ReviewQueueEntryDto>> {
+fn list_review_queue(
+    state: tauri::State<Mutex<LibraryState>>,
+) -> CmdResult<Vec<ReviewQueueEntryDto>> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
         Ok(lumenvault_catalog::list_review_queue(&conn)?
@@ -456,7 +501,8 @@ fn resolve_review_pair(
 fn copy_file_path(state: tauri::State<Mutex<LibraryState>>, id: i64) -> CmdResult<String> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        let d = lumenvault_catalog::get_image_detail(&conn, id)?.ok_or(CmdError::ImageNotFound(id))?;
+        let d =
+            lumenvault_catalog::get_image_detail(&conn, id)?.ok_or(CmdError::ImageNotFound(id))?;
         Ok(d.stored_path)
     })
 }
@@ -492,7 +538,9 @@ struct ImportResultDto {
 /// button actually needs to handle.
 #[tauri::command]
 fn cancel_import(import_lock: tauri::State<ImportLock>) {
-    import_lock.cancel_requested.store(true, std::sync::atomic::Ordering::SeqCst);
+    import_lock
+        .cancel_requested
+        .store(true, std::sync::atomic::Ordering::SeqCst);
 }
 
 #[tauri::command]
@@ -509,7 +557,9 @@ async fn import_directory(
     // Held for this whole command, across both blocking sections below —
     // see ImportLock's doc for why a second concurrent import must be
     // impossible to *start*, not just discouraged by a disabled button.
-    let _guard = import_lock.try_acquire().ok_or(CmdError::ImportAlreadyRunning)?;
+    let _guard = import_lock
+        .try_acquire()
+        .ok_or(CmdError::ImportAlreadyRunning)?;
 
     // The folder-picker wait and the import loop below are both long,
     // fully synchronous blocking work (an indefinite wait on user input,
@@ -518,26 +568,42 @@ async fn import_directory(
     // on the async command's own worker thread, so neither one can starve
     // the pool other commands (list_images, list_review_queue, …) share.
     let dialog_app = app.clone();
-    let source_root: PathBuf = tauri::async_runtime::spawn_blocking(move || -> CmdResult<PathBuf> {
-        let (tx, rx) = std::sync::mpsc::channel();
-        file_dialog(&dialog_app).pick_folder(move |folder| {
-            let _ = tx.send(folder);
-        });
-        let folder = rx.recv().map_err(|_| CmdError::NoFolderChosen)?.ok_or(CmdError::NoFolderChosen)?;
-        folder.into_path().map_err(|_| CmdError::NoFolderChosen)
-    })
-    .await
-    .map_err(|e| CmdError::TaskPanicked(e.to_string()))??;
+    let source_root: PathBuf =
+        tauri::async_runtime::spawn_blocking(move || -> CmdResult<PathBuf> {
+            let (tx, rx) = std::sync::mpsc::channel();
+            file_dialog(&dialog_app).pick_folder(move |folder| {
+                let _ = tx.send(folder);
+            });
+            let folder = rx
+                .recv()
+                .map_err(|_| CmdError::NoFolderChosen)?
+                .ok_or(CmdError::NoFolderChosen)?;
+            folder.into_path().map_err(|_| CmdError::NoFolderChosen)
+        })
+        .await
+        .map_err(|e| CmdError::TaskPanicked(e.to_string()))??;
 
     let total = lumenvault_import::count_importable_files(&source_root)?;
-    let _ = app.emit("import-progress", ImportProgressPayload { current: 0, total, imported: 0 });
+    let _ = app.emit(
+        "import-progress",
+        ImportProgressPayload {
+            current: 0,
+            total,
+            imported: 0,
+        },
+    );
 
     let import_app = app.clone();
     tauri::async_runtime::spawn_blocking(move || {
         with_ready(&import_app.state::<Mutex<LibraryState>>(), |app_state| {
             let conn = app_state.conn.lock().unwrap();
-            let batch_id = lumenvault_import::start_or_resume_batch(&conn, app_state.library_id, &source_root)?;
-            let conversion_enabled = lumenvault_import::conversion_enabled(&conn, app_state.library_id)?;
+            let batch_id = lumenvault_import::start_or_resume_batch(
+                &conn,
+                app_state.library_id,
+                &source_root,
+            )?;
+            let conversion_enabled =
+                lumenvault_import::conversion_enabled(&conn, app_state.library_id)?;
             let ctx = lumenvault_import::ImportContext {
                 conn: &conn,
                 paths: &app_state.paths,
@@ -555,7 +621,14 @@ async fn import_directory(
                 if matches!(outcome, lumenvault_import::FileOutcome::Imported { .. }) {
                     imported += 1;
                 }
-                let _ = import_app.emit("import-progress", ImportProgressPayload { current, total, imported });
+                let _ = import_app.emit(
+                    "import-progress",
+                    ImportProgressPayload {
+                        current,
+                        total,
+                        imported,
+                    },
+                );
                 if cancel_flag.is_cancel_requested() {
                     canceled = true;
                     return false;
@@ -571,7 +644,11 @@ async fn import_directory(
 }
 
 #[tauri::command]
-async fn export_image(app: tauri::AppHandle, state: tauri::State<'_, Mutex<LibraryState>>, id: i64) -> CmdResult<String> {
+async fn export_image(
+    app: tauri::AppHandle,
+    state: tauri::State<'_, Mutex<LibraryState>>,
+    id: i64,
+) -> CmdResult<String> {
     if !matches!(&*state.lock().unwrap(), LibraryState::Ready(_)) {
         return Err(CmdError::LibraryNotConfigured);
     }
@@ -580,7 +657,10 @@ async fn export_image(app: tauri::AppHandle, state: tauri::State<'_, Mutex<Libra
     file_dialog(&app).pick_folder(move |folder| {
         let _ = tx.send(folder);
     });
-    let folder = rx.recv().map_err(|_| CmdError::NoFolderChosen)?.ok_or(CmdError::NoFolderChosen)?;
+    let folder = rx
+        .recv()
+        .map_err(|_| CmdError::NoFolderChosen)?
+        .ok_or(CmdError::NoFolderChosen)?;
     let dest_dir: PathBuf = folder.into_path().map_err(|_| CmdError::NoFolderChosen)?;
 
     with_ready(&state, |app_state| {
@@ -607,7 +687,10 @@ fn get_app_settings(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<AppSe
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
         let s = lumenvault_catalog::get_app_settings(&conn)?;
-        Ok(AppSettingsDto { hamming_threshold: s.hamming_threshold, retention_days: s.retention_days })
+        Ok(AppSettingsDto {
+            hamming_threshold: s.hamming_threshold,
+            retention_days: s.retention_days,
+        })
     })
 }
 
@@ -621,7 +704,10 @@ fn update_app_settings(
         let conn = app_state.conn.lock().unwrap();
         lumenvault_catalog::update_app_settings(
             &conn,
-            lumenvault_catalog::AppSettings { hamming_threshold, retention_days },
+            lumenvault_catalog::AppSettings {
+                hamming_threshold,
+                retention_days,
+            },
         )?;
         Ok(())
     })
@@ -639,7 +725,10 @@ struct BootstrapConfig {
 }
 
 fn bootstrap_config_path(app: &tauri::AppHandle) -> PathBuf {
-    app.path().app_config_dir().unwrap_or_else(|_| PathBuf::from(".")).join("bootstrap.json")
+    app.path()
+        .app_config_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("bootstrap.json")
 }
 
 fn read_bootstrap_config(config_path: &Path) -> Option<String> {
@@ -658,8 +747,11 @@ fn write_bootstrap_config_at(config_path: &Path, root: &Path) -> CmdResult<()> {
     if let Some(parent) = config_path.parent() {
         std::fs::create_dir_all(parent)?;
     }
-    let config = BootstrapConfig { library_path: root.to_string_lossy().into_owned() };
-    let json = serde_json::to_string_pretty(&config).map_err(|e| CmdError::Bootstrap(e.to_string()))?;
+    let config = BootstrapConfig {
+        library_path: root.to_string_lossy().into_owned(),
+    };
+    let json =
+        serde_json::to_string_pretty(&config).map_err(|e| CmdError::Bootstrap(e.to_string()))?;
     std::fs::write(config_path, json)?;
     Ok(())
 }
@@ -685,7 +777,11 @@ fn try_init_state(root: &Path) -> CmdResult<AppState> {
     // bug (see `backfill_missing_grid_thumbnails`'s doc) — a crash between
     // the images row insert and thumbnail generation used to be permanent.
     let _ = lumenvault_import::backfill_missing_grid_thumbnails(&conn, &paths);
-    Ok(AppState { conn: Mutex::new(conn), paths, library_id })
+    Ok(AppState {
+        conn: Mutex::new(conn),
+        paths,
+        library_id,
+    })
 }
 
 /// `tauri.conf.json`'s `assetProtocol.scope` is a static `$APPDATA/**`
@@ -697,7 +793,10 @@ fn try_init_state(root: &Path) -> CmdResult<AppState> {
 /// first-run branches (`create_library`/`open_existing_library`).
 fn allow_library_in_asset_scope(app: &tauri::AppHandle, root: &Path) {
     if let Err(err) = app.asset_protocol_scope().allow_directory(root, true) {
-        eprintln!("[bootstrap] could not widen asset scope to {}: {err}", root.display());
+        eprintln!(
+            "[bootstrap] could not widen asset scope to {}: {err}",
+            root.display()
+        );
     }
 }
 
@@ -709,12 +808,16 @@ fn allow_library_in_asset_scope(app: &tauri::AppHandle, root: &Path) {
 fn load_initial_library_state(app: &tauri::AppHandle) -> LibraryState {
     let config_path = bootstrap_config_path(app);
     let Some(library_path) = read_bootstrap_config(&config_path) else {
-        return LibraryState::NeedsSetup { unreachable_path: None };
+        return LibraryState::NeedsSetup {
+            unreachable_path: None,
+        };
     };
 
     let root = PathBuf::from(&library_path);
     if !root.is_dir() {
-        return LibraryState::NeedsSetup { unreachable_path: Some(library_path) };
+        return LibraryState::NeedsSetup {
+            unreachable_path: Some(library_path),
+        };
     }
 
     match try_init_state(&root) {
@@ -723,8 +826,12 @@ fn load_initial_library_state(app: &tauri::AppHandle) -> LibraryState {
             LibraryState::Ready(app_state)
         }
         Err(err) => {
-            eprintln!("[bootstrap] configured library at {library_path} could not be opened: {err}");
-            LibraryState::NeedsSetup { unreachable_path: Some(library_path) }
+            eprintln!(
+                "[bootstrap] configured library at {library_path} could not be opened: {err}"
+            );
+            LibraryState::NeedsSetup {
+                unreachable_path: Some(library_path),
+            }
         }
     }
 }
@@ -741,10 +848,14 @@ struct LibraryStatusDto {
 #[tauri::command]
 fn check_library_status(state: tauri::State<Mutex<LibraryState>>) -> LibraryStatusDto {
     match &*state.lock().unwrap() {
-        LibraryState::Ready(_) => LibraryStatusDto { ready: true, previous_path_unreachable: None },
-        LibraryState::NeedsSetup { unreachable_path } => {
-            LibraryStatusDto { ready: false, previous_path_unreachable: unreachable_path.clone() }
-        }
+        LibraryState::Ready(_) => LibraryStatusDto {
+            ready: true,
+            previous_path_unreachable: None,
+        },
+        LibraryState::NeedsSetup { unreachable_path } => LibraryStatusDto {
+            ready: false,
+            previous_path_unreachable: unreachable_path.clone(),
+        },
     }
 }
 
@@ -757,7 +868,9 @@ async fn pick_library_folder(app: tauri::AppHandle) -> CmdResult<Option<String>>
         let _ = tx.send(folder);
     });
     let folder = rx.recv().map_err(|_| CmdError::NoFolderChosen)?;
-    Ok(folder.and_then(|f| f.into_path().ok()).map(|p| p.to_string_lossy().into_owned()))
+    Ok(folder
+        .and_then(|f| f.into_path().ok())
+        .map(|p| p.to_string_lossy().into_owned()))
 }
 
 #[derive(Debug, Serialize)]
@@ -779,7 +892,10 @@ fn inspect_library_folder(path: String) -> CmdResult<InspectFolderDto> {
 fn inspect_library_folder_at(root: &Path) -> CmdResult<InspectFolderDto> {
     let existing_library = root.join("catalog.sqlite").is_file();
     let free_bytes = free_space_bytes(root)?;
-    Ok(InspectFolderDto { existing_library, free_bytes })
+    Ok(InspectFolderDto {
+        existing_library,
+        free_bytes,
+    })
 }
 
 // The workspace denies `unsafe_code` by default (`Cargo.toml`'s lint table)
@@ -844,7 +960,11 @@ fn create_library_at(root: &Path, conversion_enabled: bool) -> CmdResult<AppStat
     let library_id = lumenvault_import::create_library_row(&conn, root, conversion_enabled)?;
     let _ = lumenvault_import::sweep_expired_quarantine(&conn);
 
-    Ok(AppState { conn: Mutex::new(conn), paths, library_id })
+    Ok(AppState {
+        conn: Mutex::new(conn),
+        paths,
+        library_id,
+    })
 }
 
 /// Opens a library that already exists at `path` — the catalog there is
@@ -852,7 +972,11 @@ fn create_library_at(root: &Path, conversion_enabled: bool) -> CmdResult<AppStat
 /// fixed at creation and not re-decided here). Just points the bootstrap
 /// config at it, loads it into `AppState`, and reports ready.
 #[tauri::command]
-fn open_existing_library(app: tauri::AppHandle, state: tauri::State<Mutex<LibraryState>>, path: String) -> CmdResult<()> {
+fn open_existing_library(
+    app: tauri::AppHandle,
+    state: tauri::State<Mutex<LibraryState>>,
+    path: String,
+) -> CmdResult<()> {
     let root = PathBuf::from(&path);
     let app_state = open_existing_library_at(&root)?;
     write_bootstrap_config(&app, &root)?;
@@ -985,7 +1109,8 @@ mod tests {
     use super::*;
 
     #[test]
-    fn create_library_at_produces_a_working_catalog_and_libraries_row_with_the_right_conversion_flag() {
+    fn create_library_at_produces_a_working_catalog_and_libraries_row_with_the_right_conversion_flag()
+     {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().join("vault");
 
@@ -996,9 +1121,11 @@ mod tests {
             .conn
             .lock()
             .unwrap()
-            .query_row("SELECT conversion_enabled FROM libraries WHERE id = ?1", [app_state.library_id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT conversion_enabled FROM libraries WHERE id = ?1",
+                [app_state.library_id],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(enabled, 0);
     }
@@ -1029,9 +1156,11 @@ mod tests {
             .conn
             .lock()
             .unwrap()
-            .query_row("SELECT conversion_enabled FROM libraries WHERE id = ?1", [opened.library_id], |row| {
-                row.get(0)
-            })
+            .query_row(
+                "SELECT conversion_enabled FROM libraries WHERE id = ?1",
+                [opened.library_id],
+                |row| row.get(0),
+            )
             .unwrap();
         // conversion_enabled must still read false — opening must not have
         // re-created the row with the schema's default (on).
@@ -1099,15 +1228,30 @@ mod tests {
         let conn = app_state.conn.lock().unwrap();
 
         let before = lumenvault_catalog::get_app_settings(&conn).unwrap();
-        assert_eq!(before, lumenvault_catalog::AppSettings { hamming_threshold: 5, retention_days: 30 });
+        assert_eq!(
+            before,
+            lumenvault_catalog::AppSettings {
+                hamming_threshold: 5,
+                retention_days: 30
+            }
+        );
 
         lumenvault_catalog::update_app_settings(
             &conn,
-            lumenvault_catalog::AppSettings { hamming_threshold: 12, retention_days: 7 },
+            lumenvault_catalog::AppSettings {
+                hamming_threshold: 12,
+                retention_days: 7,
+            },
         )
         .unwrap();
         let after = lumenvault_catalog::get_app_settings(&conn).unwrap();
 
-        assert_eq!(after, lumenvault_catalog::AppSettings { hamming_threshold: 12, retention_days: 7 });
+        assert_eq!(
+            after,
+            lumenvault_catalog::AppSettings {
+                hamming_threshold: 12,
+                retention_days: 7
+            }
+        );
     }
 }

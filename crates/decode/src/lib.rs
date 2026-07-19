@@ -127,7 +127,10 @@ pub enum ProbeError {
     #[error("not a decodable image: {0}")]
     Decode(#[from] image::ImageError),
     #[error("not a decodable JPEG XL image at {path}: {source}")]
-    JxlDecode { path: std::path::PathBuf, source: Box<dyn std::error::Error + Send + Sync> },
+    JxlDecode {
+        path: std::path::PathBuf,
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
 }
 
 /// Attempts to decode `path` as one of this crate's recognized formats and
@@ -147,16 +150,28 @@ pub fn probe(path: &Path) -> Result<Probe, ProbeError> {
 
 fn probe_standard(path: &Path) -> Result<Probe, ProbeError> {
     let reader = image::ImageReader::open(path)
-        .map_err(|source| ProbeError::Io { path: path.to_path_buf(), source })?
+        .map_err(|source| ProbeError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?
         .with_guessed_format()
-        .map_err(|source| ProbeError::Io { path: path.to_path_buf(), source })?;
+        .map_err(|source| ProbeError::Io {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
     let detected = reader.format().ok_or(ProbeError::UnrecognizedFormat)?;
-    let format = StandardFormat::from_image_format(detected).ok_or(ProbeError::UnsupportedFormat(detected))?;
+    let format = StandardFormat::from_image_format(detected)
+        .ok_or(ProbeError::UnsupportedFormat(detected))?;
 
     let decoded = reader.decode()?;
 
-    Ok(Probe { format, width: decoded.width(), height: decoded.height(), image: decoded })
+    Ok(Probe {
+        format,
+        width: decoded.width(),
+        height: decoded.height(),
+        image: decoded,
+    })
 }
 
 /// Decodes a JPEG XL file via `jxl-oxide`, converting its rendered pixel
@@ -165,10 +180,17 @@ fn probe_standard(path: &Path) -> Result<Probe, ProbeError> {
 fn probe_jxl(path: &Path) -> Result<Probe, ProbeError> {
     let jxl_image = jxl_oxide::JxlImage::builder()
         .open(path)
-        .map_err(|source| ProbeError::JxlDecode { path: path.to_path_buf(), source })?;
+        .map_err(|source| ProbeError::JxlDecode {
+            path: path.to_path_buf(),
+            source,
+        })?;
 
-    let render =
-        jxl_image.render_frame(0).map_err(|source| ProbeError::JxlDecode { path: path.to_path_buf(), source })?;
+    let render = jxl_image
+        .render_frame(0)
+        .map_err(|source| ProbeError::JxlDecode {
+            path: path.to_path_buf(),
+            source,
+        })?;
     let frame = render.image_all_channels();
 
     let width = frame.width() as u32;
@@ -193,12 +215,18 @@ fn probe_jxl(path: &Path) -> Result<Probe, ProbeError> {
         }
     }
 
-    let buffer = image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| ProbeError::JxlDecode {
-        path: path.to_path_buf(),
-        source: "decoded pixel buffer did not match the reported width/height".into(),
-    })?;
+    let buffer =
+        image::RgbImage::from_raw(width, height, rgb).ok_or_else(|| ProbeError::JxlDecode {
+            path: path.to_path_buf(),
+            source: "decoded pixel buffer did not match the reported width/height".into(),
+        })?;
 
-    Ok(Probe { format: StandardFormat::Jxl, width, height, image: image::DynamicImage::ImageRgb8(buffer) })
+    Ok(Probe {
+        format: StandardFormat::Jxl,
+        width,
+        height,
+        image: image::DynamicImage::ImageRgb8(buffer),
+    })
 }
 
 /// Grid/preview thumbnail generation, per workplan/SPEC.md §9.
@@ -243,24 +271,42 @@ pub fn write_jpeg_thumbnail(
 /// full-size at all. The caller (`get_full_preview`) re-encodes on every
 /// full-size view instead — a fresh decode+encode per view, but zero
 /// persistent disk cost for photos nobody opens.
-pub fn encode_jpeg_bytes(image: &image::DynamicImage, quality: u8) -> Result<Vec<u8>, ThumbnailError> {
+pub fn encode_jpeg_bytes(
+    image: &image::DynamicImage,
+    quality: u8,
+) -> Result<Vec<u8>, ThumbnailError> {
     let mut bytes = Vec::new();
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(&mut bytes, quality);
-    encoder.encode_image(image).map_err(|source| ThumbnailError::EncodeBytes { source })?;
+    encoder
+        .encode_image(image)
+        .map_err(|source| ThumbnailError::EncodeBytes { source })?;
     Ok(bytes)
 }
 
-fn encode_jpeg(image: &image::DynamicImage, dest: &Path, quality: u8) -> Result<(), ThumbnailError> {
+fn encode_jpeg(
+    image: &image::DynamicImage,
+    dest: &Path,
+    quality: u8,
+) -> Result<(), ThumbnailError> {
     if let Some(parent) = dest.parent() {
-        std::fs::create_dir_all(parent).map_err(|source| ThumbnailError::Io { path: dest.to_path_buf(), source })?;
+        std::fs::create_dir_all(parent).map_err(|source| ThumbnailError::Io {
+            path: dest.to_path_buf(),
+            source,
+        })?;
     }
     let mut encoder = image::codecs::jpeg::JpegEncoder::new_with_quality(
-        std::fs::File::create(dest).map_err(|source| ThumbnailError::Io { path: dest.to_path_buf(), source })?,
+        std::fs::File::create(dest).map_err(|source| ThumbnailError::Io {
+            path: dest.to_path_buf(),
+            source,
+        })?,
         quality,
     );
     encoder
         .encode_image(image)
-        .map_err(|source| ThumbnailError::Encode { path: dest.to_path_buf(), source })?;
+        .map_err(|source| ThumbnailError::Encode {
+            path: dest.to_path_buf(),
+            source,
+        })?;
     Ok(())
 }
 
@@ -290,14 +336,18 @@ pub enum ThumbnailError {
 /// exhaustive (real RAW support per §5 would use `rawler`'s own format
 /// detection); this is a short, easy-to-extend list covering the common
 /// camera vendors, sufficient for RAW+JPEG pairing (§3 step 2).
-const RAW_EXTENSIONS: &[&str] =
-    &["cr2", "cr3", "nef", "arw", "dng", "rw2", "raf", "orf", "pef", "srw"];
+const RAW_EXTENSIONS: &[&str] = &[
+    "cr2", "cr3", "nef", "arw", "dng", "rw2", "raf", "orf", "pef", "srw",
+];
 
 /// Returns the lowercase extension of `path` if it's one of
 /// [`RAW_EXTENSIONS`], without attempting to decode any pixel data.
 pub fn raw_extension(path: &Path) -> Option<&'static str> {
     let ext = path.extension()?.to_str()?.to_ascii_lowercase();
-    RAW_EXTENSIONS.iter().find(|&&candidate| candidate == ext).copied()
+    RAW_EXTENSIONS
+        .iter()
+        .find(|&&candidate| candidate == ext)
+        .copied()
 }
 
 /// Whether `format` (an `images.original_format` value, already lowercase)
@@ -379,7 +429,10 @@ mod tests {
     fn common_raw_extensions_are_recognized_case_insensitively() {
         for ext in ["cr2", "CR3", "nef", "Arw", "dng", "rw2", "raf", "orf"] {
             let path = std::path::Path::new("photo").with_extension(ext);
-            assert!(super::raw_extension(&path).is_some(), "expected {ext} to be recognized as RAW");
+            assert!(
+                super::raw_extension(&path).is_some(),
+                "expected {ext} to be recognized as RAW"
+            );
         }
     }
 
@@ -387,7 +440,11 @@ mod tests {
     fn standard_format_extensions_are_not_recognized_as_raw() {
         for ext in ["jpg", "png", "webp", "txt"] {
             let path = std::path::Path::new("photo").with_extension(ext);
-            assert_eq!(super::raw_extension(&path), None, "{ext} must not be recognized as RAW");
+            assert_eq!(
+                super::raw_extension(&path),
+                None,
+                "{ext} must not be recognized as RAW"
+            );
         }
     }
 
@@ -403,7 +460,11 @@ mod tests {
         assert!(thumb_path.exists());
         let decoded = image::open(&thumb_path).unwrap();
         assert!(decoded.width() <= 256 && decoded.height() <= 256);
-        assert_eq!(decoded.width() * 400, decoded.height() * 800, "aspect ratio must be preserved");
+        assert_eq!(
+            decoded.width() * 400,
+            decoded.height() * 800,
+            "aspect ratio must be preserved"
+        );
     }
 
     #[test]
@@ -414,8 +475,13 @@ mod tests {
 
         let bytes = super::encode_jpeg_bytes(&probe.image, 92).unwrap();
 
-        let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
-        assert_eq!(decoded.width(), 800, "must not be downsized — this is a format workaround, not a thumbnail");
+        let decoded =
+            image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
+        assert_eq!(
+            decoded.width(),
+            800,
+            "must not be downsized — this is a format workaround, not a thumbnail"
+        );
         assert_eq!(decoded.height(), 400);
     }
 
@@ -448,7 +514,9 @@ mod tests {
             .build()
             .unwrap();
         let frame = jpegxl_rs::encode::EncoderFrame::new(&pixels).num_channels(4);
-        let encoded = encoder.encode_frame::<u8, u8>(&frame, width, height).unwrap();
+        let encoded = encoder
+            .encode_frame::<u8, u8>(&frame, width, height)
+            .unwrap();
         std::fs::write(&path, &encoded.data).unwrap();
         path
     }
@@ -479,6 +547,9 @@ mod tests {
 
         let top_left = rgb.get_pixel(0, 0);
         let bottom_right = rgb.get_pixel(15, 15);
-        assert_ne!(top_left, bottom_right, "a real gradient decode must vary across the image");
+        assert_ne!(
+            top_left, bottom_right,
+            "a real gradient decode must vary across the image"
+        );
     }
 }

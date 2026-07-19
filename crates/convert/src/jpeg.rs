@@ -38,7 +38,10 @@ pub fn convert(source_bytes: &[u8]) -> Result<ConversionOutcome, ConvertError> {
         return Ok(Err(SkipReason::ReconstructionMismatch));
     }
 
-    Ok(Ok(Converted { bytes: encoded.data, stored_format: "jxl" }))
+    Ok(Ok(Converted {
+        bytes: encoded.data,
+        stored_format: "jxl",
+    }))
 }
 
 #[cfg(test)]
@@ -55,7 +58,11 @@ mod tests {
         let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
             ImageBuffer::from_fn(64, 48, |x, y| Rgb([(x % 256) as u8, (y % 256) as u8, 128]));
         let mut buf = Vec::new();
-        img.write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg).unwrap();
+        img.write_to(
+            &mut std::io::Cursor::new(&mut buf),
+            image::ImageFormat::Jpeg,
+        )
+        .unwrap();
         buf
     }
 
@@ -77,12 +84,18 @@ mod tests {
         let Data::Jpeg(reconstructed) = data else {
             panic!("expected JPEG reconstruction data to be present");
         };
-        assert_eq!(reconstructed, source, "reconstructed bytes must be byte-identical to the source JPEG");
+        assert_eq!(
+            reconstructed, source,
+            "reconstructed bytes must be byte-identical to the source JPEG"
+        );
     }
 
     #[test]
     fn converting_garbage_bytes_is_a_hard_stop_not_a_degrade() {
         let outcome = convert(b"not a jpeg at all").unwrap();
-        assert!(outcome.is_err(), "non-JPEG input must never report a successful conversion");
+        assert!(
+            outcome.is_err(),
+            "non-JPEG input must never report a successful conversion"
+        );
     }
 }

@@ -12,15 +12,19 @@ use std::fs;
 use std::path::Path;
 
 use image::{ImageBuffer, Rgb};
-use lumenvault_import::{ImportContext, LibraryPaths, ensure_library, import_file, rebuild_from_store, start_or_resume_batch};
+use lumenvault_import::{
+    ImportContext, LibraryPaths, ensure_library, import_file, rebuild_from_store,
+    start_or_resume_batch,
+};
 use rusqlite::Connection;
 
 /// A real baseline JPEG — Milestone 2's conversion path (JPEG -> JPEG XL,
 /// jbrd lossless transcode) applies to this.
 fn write_jpeg(dir: &Path, name: &str) -> std::path::PathBuf {
     let path = dir.join(name);
-    let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
-        ImageBuffer::from_fn(32, 24, |x, y| Rgb([(x * 7) as u8, (y * 5) as u8, ((x + y) * 3) as u8]));
+    let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(32, 24, |x, y| {
+        Rgb([(x * 7) as u8, (y * 5) as u8, ((x + y) * 3) as u8])
+    });
     img.save(&path).unwrap();
     path
 }
@@ -40,7 +44,11 @@ fn write_webp(dir: &Path, name: &str) -> std::path::PathBuf {
 /// width/height/perceptual_hash NULL without erroring.
 fn write_raw(dir: &Path, name: &str) -> std::path::PathBuf {
     let path = dir.join(name);
-    fs::write(&path, b"not real RAW sensor data, just bytes for extension-only recognition").unwrap();
+    fs::write(
+        &path,
+        b"not real RAW sensor data, just bytes for extension-only recognition",
+    )
+    .unwrap();
     path
 }
 
@@ -56,7 +64,13 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
 
     let library_id = ensure_library(&conn, library_dir.path()).unwrap();
     let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
-    let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+    let ctx = ImportContext {
+        conn: &conn,
+        paths: &paths,
+        library_id,
+        batch_id,
+        conversion_enabled: true,
+    };
 
     let jpeg_path = write_jpeg(source_dir.path(), "converted.jpg");
     let webp_path = write_webp(source_dir.path(), "unconverted.webp");
@@ -97,8 +111,14 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
     let jpeg_sidecar = lumenvault_xmp::sync_sidecar(&conn, jpeg_id).unwrap();
     let webp_sidecar = lumenvault_xmp::sync_sidecar(&conn, webp_id).unwrap();
 
-    assert!(jpeg_sidecar.exists(), "JXL image's sidecar must exist on disk");
-    assert!(webp_sidecar.exists(), "WebP image's sidecar must exist on disk");
+    assert!(
+        jpeg_sidecar.exists(),
+        "JXL image's sidecar must exist on disk"
+    );
+    assert!(
+        webp_sidecar.exists(),
+        "WebP image's sidecar must exist on disk"
+    );
     assert_eq!(
         lumenvault_xmp::read_sidecar(&jpeg_sidecar).unwrap(),
         vec!["sunset".to_string(), "vacation".to_string()]
@@ -112,7 +132,11 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
     lumenvault_catalog::remove_tag(&conn, webp_id, "drop-me").unwrap();
     lumenvault_xmp::sync_sidecar(&conn, webp_id).unwrap();
     let webp_tags_after_removal = lumenvault_xmp::read_sidecar(&webp_sidecar).unwrap();
-    assert_eq!(webp_tags_after_removal, vec!["keep".to_string()], "sidecar must reflect the tag removal on disk");
+    assert_eq!(
+        webp_tags_after_removal,
+        vec!["keep".to_string()],
+        "sidecar must reflect the tag removal on disk"
+    );
 
     // Snapshot pre-delete truth to compare rebuild's recovered state against.
     let (jpeg_original_hash, jpeg_stored_hash, jpeg_perceptual_hash, jpeg_stored_path): (Vec<u8>, Vec<u8>, i64, String) = conn
@@ -123,14 +147,28 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
         )
         .unwrap();
     let (raw_original_hash, raw_stored_path): (Vec<u8>, String) = conn
-        .query_row("SELECT original_hash, stored_path FROM images WHERE id = ?1", [raw_id], |row| {
-            Ok((row.get(0)?, row.get(1)?))
+        .query_row(
+            "SELECT original_hash, stored_path FROM images WHERE id = ?1",
+            [raw_id],
+            |row| Ok((row.get(0)?, row.get(1)?)),
+        )
+        .unwrap();
+    let webp_stored_path: String = conn
+        .query_row(
+            "SELECT stored_path FROM images WHERE id = ?1",
+            [webp_id],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let raw_width: Option<i64> = conn
+        .query_row("SELECT width FROM images WHERE id = ?1", [raw_id], |row| {
+            row.get(0)
         })
         .unwrap();
-    let webp_stored_path: String =
-        conn.query_row("SELECT stored_path FROM images WHERE id = ?1", [webp_id], |row| row.get(0)).unwrap();
-    let raw_width: Option<i64> = conn.query_row("SELECT width FROM images WHERE id = ?1", [raw_id], |row| row.get(0)).unwrap();
-    assert!(raw_width.is_none(), "sanity check: RAW must have no width at original import time");
+    assert!(
+        raw_width.is_none(),
+        "sanity check: RAW must have no width at original import time"
+    );
 
     drop(conn);
 
@@ -146,10 +184,20 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
 
     let report = rebuild_from_store(&fresh_conn, &paths).unwrap();
 
-    assert_eq!(report.images_recovered, 3, "all three blobs (jxl, webp, raw) must be recovered: {report:?}");
-    assert!(report.skipped.is_empty(), "no blob should be unrecoverable in this fixture set: {:?}", report.skipped);
+    assert_eq!(
+        report.images_recovered, 3,
+        "all three blobs (jxl, webp, raw) must be recovered: {report:?}"
+    );
+    assert!(
+        report.skipped.is_empty(),
+        "no blob should be unrecoverable in this fixture set: {:?}",
+        report.skipped
+    );
     // 2 tags survived on the JPEG/JXL image, 1 on the WebP image after the removal.
-    assert_eq!(report.tags_recovered, 3, "expected 2 + 1 tags recovered across both tagged images");
+    assert_eq!(
+        report.tags_recovered, 3,
+        "expected 2 + 1 tags recovered across both tagged images"
+    );
 
     // ── Assertions: every blob got an images row back ─────────────────────
     let recovered_jpeg: (Vec<u8>, Vec<u8>, Option<i64>) = fresh_conn
@@ -159,8 +207,14 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
             |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
         )
         .unwrap();
-    assert_eq!(recovered_jpeg.0, jpeg_original_hash, "original_hash must be recovered from the blob path, unchanged");
-    assert_eq!(recovered_jpeg.1, jpeg_stored_hash, "stored_hash must be re-derived from the actual on-disk bytes");
+    assert_eq!(
+        recovered_jpeg.0, jpeg_original_hash,
+        "original_hash must be recovered from the blob path, unchanged"
+    );
+    assert_eq!(
+        recovered_jpeg.1, jpeg_stored_hash,
+        "stored_hash must be re-derived from the actual on-disk bytes"
+    );
     assert_eq!(
         recovered_jpeg.2,
         Some(jpeg_perceptual_hash),
@@ -175,18 +229,46 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
         )
         .unwrap();
     assert_eq!(recovered_raw.0, raw_original_hash);
-    assert_eq!(recovered_raw.1, None, "RAW file must have NULL width after rebuild, same as at import");
-    assert_eq!(recovered_raw.2, None, "RAW file must have NULL height after rebuild, same as at import");
-    assert_eq!(recovered_raw.3, None, "RAW file must have NULL perceptual_hash after rebuild, same as at import");
+    assert_eq!(
+        recovered_raw.1, None,
+        "RAW file must have NULL width after rebuild, same as at import"
+    );
+    assert_eq!(
+        recovered_raw.2, None,
+        "RAW file must have NULL height after rebuild, same as at import"
+    );
+    assert_eq!(
+        recovered_raw.3, None,
+        "RAW file must have NULL perceptual_hash after rebuild, same as at import"
+    );
 
     // ── Tags recovered from sidecars match what was set (removal included) ──
-    let recovered_webp_id: i64 =
-        fresh_conn.query_row("SELECT id FROM images WHERE stored_path = ?1", [&webp_stored_path], |row| row.get(0)).unwrap();
-    let recovered_webp_tags = lumenvault_catalog::tags_for_image(&fresh_conn, recovered_webp_id).unwrap();
-    assert_eq!(recovered_webp_tags, vec!["keep".to_string()], "removed tag must genuinely be gone after rebuild");
+    let recovered_webp_id: i64 = fresh_conn
+        .query_row(
+            "SELECT id FROM images WHERE stored_path = ?1",
+            [&webp_stored_path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let recovered_webp_tags =
+        lumenvault_catalog::tags_for_image(&fresh_conn, recovered_webp_id).unwrap();
+    assert_eq!(
+        recovered_webp_tags,
+        vec!["keep".to_string()],
+        "removed tag must genuinely be gone after rebuild"
+    );
 
-    let recovered_jpeg_id: i64 =
-        fresh_conn.query_row("SELECT id FROM images WHERE stored_path = ?1", [&jpeg_stored_path], |row| row.get(0)).unwrap();
-    let recovered_jpeg_tags = lumenvault_catalog::tags_for_image(&fresh_conn, recovered_jpeg_id).unwrap();
-    assert_eq!(recovered_jpeg_tags, vec!["sunset".to_string(), "vacation".to_string()]);
+    let recovered_jpeg_id: i64 = fresh_conn
+        .query_row(
+            "SELECT id FROM images WHERE stored_path = ?1",
+            [&jpeg_stored_path],
+            |row| row.get(0),
+        )
+        .unwrap();
+    let recovered_jpeg_tags =
+        lumenvault_catalog::tags_for_image(&fresh_conn, recovered_jpeg_id).unwrap();
+    assert_eq!(
+        recovered_jpeg_tags,
+        vec!["sunset".to_string(), "vacation".to_string()]
+    );
 }

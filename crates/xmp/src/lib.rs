@@ -55,7 +55,11 @@ pub fn write_sidecar(path: &Path, tags: &[String]) -> Result<(), XmpError> {
     let mut buf = Vec::new();
     let mut writer = Writer::new_with_indent(Cursor::new(&mut buf), b' ', 2);
 
-    writer.write_event(Event::Decl(quick_xml::events::BytesDecl::new("1.0", Some("UTF-8"), None)))?;
+    writer.write_event(Event::Decl(quick_xml::events::BytesDecl::new(
+        "1.0",
+        Some("UTF-8"),
+        None,
+    )))?;
 
     let mut xmpmeta = BytesStart::new("x:xmpmeta");
     xmpmeta.push_attribute(("xmlns:x", "adobe:ns:meta/"));
@@ -159,16 +163,17 @@ pub fn read_sidecar(path: &Path) -> Result<Vec<String>, XmpError> {
 /// is expected to emit.
 fn resolve_general_ref(name: &str) -> Result<String, XmpError> {
     if let Some(hex) = name.strip_prefix("#x").or_else(|| name.strip_prefix("#X")) {
-        let code = u32::from_str_radix(hex, 16)
-            .map_err(|_| XmpError::Malformed(format!("invalid hex character reference &#x{hex};")))?;
+        let code = u32::from_str_radix(hex, 16).map_err(|_| {
+            XmpError::Malformed(format!("invalid hex character reference &#x{hex};"))
+        })?;
         return char::from_u32(code)
             .map(String::from)
             .ok_or_else(|| XmpError::Malformed(format!("invalid Unicode code point &#x{hex};")));
     }
     if let Some(dec) = name.strip_prefix('#') {
-        let code = dec
-            .parse::<u32>()
-            .map_err(|_| XmpError::Malformed(format!("invalid decimal character reference &#{dec};")))?;
+        let code = dec.parse::<u32>().map_err(|_| {
+            XmpError::Malformed(format!("invalid decimal character reference &#{dec};"))
+        })?;
         return char::from_u32(code)
             .map(String::from)
             .ok_or_else(|| XmpError::Malformed(format!("invalid Unicode code point &#{dec};")));
@@ -204,7 +209,11 @@ fn sidecar_path_for(stored_path: &Path) -> PathBuf {
 /// `add_tag`/`remove_tag`.
 pub fn sync_sidecar(conn: &Connection, image_id: i64) -> Result<PathBuf, XmpError> {
     let stored_path: Option<String> = conn
-        .query_row("SELECT stored_path FROM images WHERE id = ?1", [image_id], |row| row.get(0))
+        .query_row(
+            "SELECT stored_path FROM images WHERE id = ?1",
+            [image_id],
+            |row| row.get(0),
+        )
         .optional()?;
     let stored_path = stored_path.ok_or(XmpError::NoStoredPath(image_id))?;
     let sidecar_path = sidecar_path_for(Path::new(&stored_path));
@@ -230,7 +239,11 @@ mod tests {
     fn writing_and_reading_back_a_tag_list_round_trips() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("photo.xmp");
-        let tags = vec!["sunset".to_string(), "beach".to_string(), "vacation".to_string()];
+        let tags = vec![
+            "sunset".to_string(),
+            "beach".to_string(),
+            "vacation".to_string(),
+        ];
 
         write_sidecar(&path, &tags).unwrap();
         let read_back = read_sidecar(&path).unwrap();
@@ -255,7 +268,11 @@ mod tests {
         // `<`, `>` in a tag name must survive a full write -> read cycle.
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("photo.xmp");
-        let tags = vec!["R&D".to_string(), "<classified>".to_string(), "a > b".to_string()];
+        let tags = vec![
+            "R&D".to_string(),
+            "<classified>".to_string(),
+            "a > b".to_string(),
+        ];
 
         write_sidecar(&path, &tags).unwrap();
         let read_back = read_sidecar(&path).unwrap();
@@ -293,7 +310,11 @@ mod tests {
         lumenvault_catalog::migrate(&mut conn).unwrap();
         fs::write(blob_path, b"fake blob bytes").unwrap();
 
-        conn.execute("INSERT INTO libraries (name, root_path) VALUES ('lib', 'A:/lib')", []).unwrap();
+        conn.execute(
+            "INSERT INTO libraries (name, root_path) VALUES ('lib', 'A:/lib')",
+            [],
+        )
+        .unwrap();
         let library_id = conn.last_insert_rowid();
         conn.execute(
             "INSERT INTO images (
@@ -320,7 +341,10 @@ mod tests {
 
         assert_eq!(sidecar_path, blob_path.with_extension("xmp"));
         assert!(sidecar_path.exists());
-        assert_eq!(read_sidecar(&sidecar_path).unwrap(), vec!["beach".to_string(), "sunset".to_string()]);
+        assert_eq!(
+            read_sidecar(&sidecar_path).unwrap(),
+            vec!["beach".to_string(), "sunset".to_string()]
+        );
 
         let (db_sidecar_path, synced_at): (String, Option<String>) = conn
             .query_row(
@@ -342,11 +366,17 @@ mod tests {
         lumenvault_catalog::add_tag(&conn, image_id, "keep").unwrap();
         lumenvault_catalog::add_tag(&conn, image_id, "drop").unwrap();
         let sidecar_path = sync_sidecar(&conn, image_id).unwrap();
-        assert_eq!(read_sidecar(&sidecar_path).unwrap(), vec!["drop".to_string(), "keep".to_string()]);
+        assert_eq!(
+            read_sidecar(&sidecar_path).unwrap(),
+            vec!["drop".to_string(), "keep".to_string()]
+        );
 
         lumenvault_catalog::remove_tag(&conn, image_id, "drop").unwrap();
         sync_sidecar(&conn, image_id).unwrap();
 
-        assert_eq!(read_sidecar(&sidecar_path).unwrap(), vec!["keep".to_string()]);
+        assert_eq!(
+            read_sidecar(&sidecar_path).unwrap(),
+            vec!["keep".to_string()]
+        );
     }
 }

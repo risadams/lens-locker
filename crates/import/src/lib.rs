@@ -59,11 +59,17 @@ impl LibraryPaths {
     }
 
     fn blob_path(&self, hash_hex: &str, ext: &str) -> PathBuf {
-        self.root.join("blobs").join(&hash_hex[0..2]).join(format!("{hash_hex}.{ext}"))
+        self.root
+            .join("blobs")
+            .join(&hash_hex[0..2])
+            .join(format!("{hash_hex}.{ext}"))
     }
 
     fn quarantine_path(&self, journal_id: i64, filename: &std::ffi::OsStr) -> PathBuf {
-        self.root.join("quarantine").join(journal_id.to_string()).join(filename)
+        self.root
+            .join("quarantine")
+            .join(journal_id.to_string())
+            .join(filename)
     }
 
     /// Where a merge-discarded image's *stored blob* (not an import
@@ -71,7 +77,10 @@ impl LibraryPaths {
     /// case (workplan/SPEC.md §3/§6/§10), keyed by the loser's image id
     /// rather than a journal id since a merge isn't a journal-tracked event.
     fn merge_quarantine_path(&self, image_id: i64, filename: &std::ffi::OsStr) -> PathBuf {
-        self.root.join("quarantine").join(format!("merge-{image_id}")).join(filename)
+        self.root
+            .join("quarantine")
+            .join(format!("merge-{image_id}"))
+            .join(filename)
     }
 
     /// Where a generated grid thumbnail lives — under the library root
@@ -79,7 +88,10 @@ impl LibraryPaths {
     /// like the blob store, so re-generating a thumbnail always lands at the
     /// same path.
     fn thumbnail_path(&self, hash_hex: &str) -> PathBuf {
-        self.root.join("thumbnails").join(&hash_hex[0..2]).join(format!("{hash_hex}.jpg"))
+        self.root
+            .join("thumbnails")
+            .join(&hash_hex[0..2])
+            .join(format!("{hash_hex}.jpg"))
     }
 }
 
@@ -95,7 +107,10 @@ pub enum ImportError {
     )]
     BlobIntegrity { path: PathBuf },
     #[error("walking {root}: {source}")]
-    Walk { root: PathBuf, source: walkdir::Error },
+    Walk {
+        root: PathBuf,
+        source: walkdir::Error,
+    },
     #[error(transparent)]
     Xmp(#[from] lumenvault_xmp::XmpError),
     #[error(transparent)]
@@ -143,7 +158,11 @@ pub fn ensure_library(conn: &Connection, root_path: &Path) -> rusqlite::Result<i
     let root = root_path.to_string_lossy();
 
     if let Some(id) = conn
-        .query_row("SELECT id FROM libraries WHERE root_path = ?1", [root.as_ref()], |row| row.get(0))
+        .query_row(
+            "SELECT id FROM libraries WHERE root_path = ?1",
+            [root.as_ref()],
+            |row| row.get(0),
+        )
         .optional()?
     {
         return Ok(id);
@@ -151,7 +170,13 @@ pub fn ensure_library(conn: &Connection, root_path: &Path) -> rusqlite::Result<i
 
     conn.execute(
         "INSERT INTO libraries (name, root_path) VALUES (?1, ?2)",
-        params![root_path.file_name().map(|n| n.to_string_lossy()).unwrap_or(root.clone()), root.as_ref()],
+        params![
+            root_path
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or(root.clone()),
+            root.as_ref()
+        ],
     )?;
     Ok(conn.last_insert_rowid())
 }
@@ -164,12 +189,19 @@ pub fn ensure_library(conn: &Connection, root_path: &Path) -> rusqlite::Result<i
 /// setup (Milestone 5.5), where the caller has already confirmed (by
 /// checking for an existing `catalog.sqlite`) that no library exists at
 /// this path yet.
-pub fn create_library_row(conn: &Connection, root_path: &Path, conversion_enabled: bool) -> rusqlite::Result<i64> {
+pub fn create_library_row(
+    conn: &Connection,
+    root_path: &Path,
+    conversion_enabled: bool,
+) -> rusqlite::Result<i64> {
     let root = root_path.to_string_lossy();
     conn.execute(
         "INSERT INTO libraries (name, root_path, conversion_enabled) VALUES (?1, ?2, ?3)",
         params![
-            root_path.file_name().map(|n| n.to_string_lossy()).unwrap_or(root.clone()),
+            root_path
+                .file_name()
+                .map(|n| n.to_string_lossy())
+                .unwrap_or(root.clone()),
             root.as_ref(),
             conversion_enabled as i64,
         ],
@@ -181,8 +213,11 @@ pub fn create_library_row(conn: &Connection, root_path: &Path, conversion_enable
 /// granularity: per-library, fixed at library creation" setting from
 /// workplan/SPEC.md §4.
 pub fn conversion_enabled(conn: &Connection, library_id: i64) -> rusqlite::Result<bool> {
-    let enabled: i64 =
-        conn.query_row("SELECT conversion_enabled FROM libraries WHERE id = ?1", [library_id], |row| row.get(0))?;
+    let enabled: i64 = conn.query_row(
+        "SELECT conversion_enabled FROM libraries WHERE id = ?1",
+        [library_id],
+        |row| row.get(0),
+    )?;
     Ok(enabled != 0)
 }
 
@@ -265,8 +300,11 @@ pub fn sweep_expired_quarantine(conn: &Connection) -> Result<usize, ImportError>
 /// just reclaims whatever the old design left behind. Best-effort: a file
 /// that's already gone is fine, not an error.
 pub fn sweep_stale_previews(conn: &Connection) -> Result<usize, ImportError> {
-    let mut stmt = conn.prepare("SELECT id, path FROM thumbnails WHERE variant = 'preview_full'")?;
-    let rows: Vec<(i64, String)> = stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?.collect::<Result<_, _>>()?;
+    let mut stmt =
+        conn.prepare("SELECT id, path FROM thumbnails WHERE variant = 'preview_full'")?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<Result<_, _>>()?;
     drop(stmt);
 
     let mut swept = 0;
@@ -294,14 +332,18 @@ pub fn sweep_stale_previews(conn: &Connection) -> Result<usize, ImportError> {
 /// import is destructive move-in. This sweep is the repair path for that
 /// case. Best-effort per image: an undecodable blob (RAW, or genuinely
 /// missing/corrupt) is skipped, not fatal to the sweep.
-pub fn backfill_missing_grid_thumbnails(conn: &Connection, paths: &LibraryPaths) -> Result<usize, ImportError> {
+pub fn backfill_missing_grid_thumbnails(
+    conn: &Connection,
+    paths: &LibraryPaths,
+) -> Result<usize, ImportError> {
     let mut stmt = conn.prepare(
         "SELECT im.id, im.original_hash, im.stored_path FROM images im
          LEFT JOIN thumbnails th ON th.image_id = im.id AND th.variant = 'grid256'
          WHERE th.id IS NULL AND im.status = 'active'",
     )?;
-    let candidates: Vec<(i64, Vec<u8>, String)> =
-        stmt.query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?.collect::<Result<_, _>>()?;
+    let candidates: Vec<(i64, Vec<u8>, String)> = stmt
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<Result<_, _>>()?;
     drop(stmt);
 
     let mut backfilled = 0;
@@ -312,7 +354,13 @@ pub fn backfill_missing_grid_thumbnails(conn: &Connection, paths: &LibraryPaths)
         let hash_hex: String = original_hash.iter().map(|b| format!("{b:02x}")).collect();
         let thumb_path = paths.thumbnail_path(&hash_hex);
         lumenvault_decode::write_jpeg_thumbnail(&probe.image, &thumb_path, 256)?;
-        lumenvault_catalog::record_thumbnail(conn, image_id, "grid256", "jpeg", &thumb_path.to_string_lossy())?;
+        lumenvault_catalog::record_thumbnail(
+            conn,
+            image_id,
+            "grid256",
+            "jpeg",
+            &thumb_path.to_string_lossy(),
+        )?;
         backfilled += 1;
     }
     Ok(backfilled)
@@ -324,13 +372,22 @@ pub fn backfill_missing_grid_thumbnails(conn: &Connection, paths: &LibraryPaths)
 /// fresh on every call (JIT) rather than cached to disk. `Ok(None)` if the
 /// blob can't be decoded (a RAW file, or a genuinely missing/corrupt one) —
 /// the frontend falls back to the grid thumbnail in that case.
-pub fn render_full_preview_bytes(conn: &Connection, image_id: i64) -> Result<Option<Vec<u8>>, ImportError> {
-    let stored_path: String =
-        conn.query_row("SELECT stored_path FROM images WHERE id = ?1", [image_id], |row| row.get(0))?;
+pub fn render_full_preview_bytes(
+    conn: &Connection,
+    image_id: i64,
+) -> Result<Option<Vec<u8>>, ImportError> {
+    let stored_path: String = conn.query_row(
+        "SELECT stored_path FROM images WHERE id = ?1",
+        [image_id],
+        |row| row.get(0),
+    )?;
     let Ok(probe) = lumenvault_decode::probe(Path::new(&stored_path)) else {
         return Ok(None);
     };
-    Ok(Some(lumenvault_decode::encode_jpeg_bytes(&probe.image, 92)?))
+    Ok(Some(lumenvault_decode::encode_jpeg_bytes(
+        &probe.image,
+        92,
+    )?))
 }
 
 /// Counts regular files under `source_root` — a plain filesystem walk, no
@@ -341,7 +398,10 @@ pub fn render_full_preview_bytes(conn: &Connection, image_id: i64) -> Result<Opt
 pub fn count_importable_files(source_root: &Path) -> Result<usize, ImportError> {
     let mut count = 0;
     for entry in walkdir::WalkDir::new(source_root) {
-        let entry = entry.map_err(|source| ImportError::Walk { root: source_root.to_path_buf(), source })?;
+        let entry = entry.map_err(|source| ImportError::Walk {
+            root: source_root.to_path_buf(),
+            source,
+        })?;
         if entry.file_type().is_file() {
             count += 1;
         }
@@ -366,7 +426,10 @@ pub fn import_directory(
     mut on_outcome: impl FnMut(&Path, &FileOutcome) -> bool,
 ) -> Result<(), ImportError> {
     for entry in walkdir::WalkDir::new(source_root) {
-        let entry = entry.map_err(|source| ImportError::Walk { root: source_root.to_path_buf(), source })?;
+        let entry = entry.map_err(|source| ImportError::Walk {
+            root: source_root.to_path_buf(),
+            source,
+        })?;
         if entry.file_type().is_file() {
             let outcome = import_file(ctx, entry.path())?;
             if !on_outcome(entry.path(), &outcome) {
@@ -382,7 +445,13 @@ pub fn import_directory(
 /// every side effect below is idempotent, so re-running this on a file left
 /// mid-pipeline by a killed process is always safe.
 pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcome, ImportError> {
-    let ImportContext { conn, paths, library_id, batch_id, conversion_enabled } = *ctx;
+    let ImportContext {
+        conn,
+        paths,
+        library_id,
+        batch_id,
+        conversion_enabled,
+    } = *ctx;
     let source_str = source_path.to_string_lossy();
 
     // Resume check: if a prior run already finished this file, don't redo it.
@@ -396,7 +465,9 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
 
     let journal_id = match &existing_journal {
         Some((_, step, image_id)) if step == "done" => {
-            return Ok(FileOutcome::AlreadyDone { image_id: *image_id });
+            return Ok(FileOutcome::AlreadyDone {
+                image_id: *image_id,
+            });
         }
         Some((_, step, _)) if step == "failed" => {
             return Ok(FileOutcome::Failed);
@@ -437,16 +508,27 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
             (classified, Some(probe.image))
         }
         Err(e) => match lumenvault_decode::raw_extension(source_path) {
-            Some(raw_format) => {
-                (Classified { format: raw_format, width: None, height: None, perceptual_hash: None }, None)
-            }
+            Some(raw_format) => (
+                Classified {
+                    format: raw_format,
+                    width: None,
+                    height: None,
+                    perceptual_hash: None,
+                },
+                None,
+            ),
             None => {
                 set_journal_step(conn, journal_id, "failed", Some(&e.to_string()))?;
                 return Ok(FileOutcome::Failed);
             }
         },
     };
-    let Classified { format, width, height, perceptual_hash } = classified;
+    let Classified {
+        format,
+        width,
+        height,
+        perceptual_hash,
+    } = classified;
 
     // Step: exact-hash dedupe check (§6's auto-collapse falls out of this
     // content-addressed UNIQUE constraint on images.original_hash).
@@ -550,19 +632,32 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
     // genuine content-duplicate import.
     if let Some(image) = &decoded_image {
         let has_grid_thumbnail: bool = conn
-            .query_row("SELECT 1 FROM thumbnails WHERE image_id = ?1 AND variant = 'grid256'", [image_id], |_| Ok(()))
+            .query_row(
+                "SELECT 1 FROM thumbnails WHERE image_id = ?1 AND variant = 'grid256'",
+                [image_id],
+                |_| Ok(()),
+            )
             .optional()?
             .is_some();
         if !has_grid_thumbnail {
             let thumb_path = paths.thumbnail_path(&original_hash_hex);
             lumenvault_decode::write_jpeg_thumbnail(image, &thumb_path, 256)?;
-            lumenvault_catalog::record_thumbnail(conn, image_id, "grid256", "jpeg", &thumb_path.to_string_lossy())?;
+            lumenvault_catalog::record_thumbnail(
+                conn,
+                image_id,
+                "grid256",
+                "jpeg",
+                &thumb_path.to_string_lossy(),
+            )?;
         }
     }
 
     // Record which image this journal entry resolved to, so a resumed run
     // reading a 'done' row back (see the resume check above) can report it.
-    conn.execute("UPDATE import_journal SET image_id = ?1 WHERE id = ?2", params![image_id, journal_id])?;
+    conn.execute(
+        "UPDATE import_journal SET image_id = ?1 WHERE id = ?2",
+        params![image_id, journal_id],
+    )?;
 
     // image_sources row: idempotent, guards against a duplicate on resume.
     let source_row_exists: bool = conn
@@ -580,7 +675,10 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
             params![
                 image_id,
                 batch_id,
-                source_path.file_name().map(|n| n.to_string_lossy()).unwrap_or_default(),
+                source_path
+                    .file_name()
+                    .map(|n| n.to_string_lossy())
+                    .unwrap_or_default(),
                 source_str.as_ref(),
             ],
         )?;
@@ -676,7 +774,11 @@ pub fn resolve_review_pair(
             } else if keeper_id == image_b {
                 image_a
             } else {
-                return Err(ImportError::InvalidKeeper { keeper: keeper_id, a: image_a, b: image_b });
+                return Err(ImportError::InvalidKeeper {
+                    keeper: keeper_id,
+                    a: image_a,
+                    b: image_b,
+                });
             };
 
             // Tags union onto the keeper (§6).
@@ -748,7 +850,11 @@ pub fn resolve_review_pair(
 /// Copies `image_id`'s stored file plus its `.xmp` sidecar (if one exists)
 /// to `dest_dir`, keeping the currently-stored format verbatim — no format
 /// round-trip, per §7's amendment. Returns the destination file path.
-pub fn export_image(conn: &Connection, image_id: i64, dest_dir: &Path) -> Result<PathBuf, ImportError> {
+pub fn export_image(
+    conn: &Connection,
+    image_id: i64,
+    dest_dir: &Path,
+) -> Result<PathBuf, ImportError> {
     let (stored_path, sidecar_path): (String, Option<String>) = conn.query_row(
         "SELECT stored_path, sidecar_path FROM images WHERE id = ?1",
         [image_id],
@@ -757,10 +863,12 @@ pub fn export_image(conn: &Connection, image_id: i64, dest_dir: &Path) -> Result
     let stored_path = Path::new(&stored_path);
 
     fs::create_dir_all(dest_dir)?;
-    let filename = stored_path.file_name().ok_or_else(|| ImportError::Io(std::io::Error::new(
-        std::io::ErrorKind::InvalidInput,
-        format!("stored path has no filename: {}", stored_path.display()),
-    )))?;
+    let filename = stored_path.file_name().ok_or_else(|| {
+        ImportError::Io(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!("stored path has no filename: {}", stored_path.display()),
+        ))
+    })?;
     let dest_file = dest_dir.join(filename);
     fs::copy(stored_path, &dest_file)?;
 
@@ -812,7 +920,9 @@ fn pair_raw_and_jpeg(
          WHERE s.import_batch_id = ?1 AND im.id != ?2",
     )?;
     let candidates: Vec<(i64, String, String)> = stmt
-        .query_map(params![batch_id, image_id], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .query_map(params![batch_id, image_id], |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
         .collect::<Result<_, _>>()?;
     drop(stmt);
 
@@ -827,7 +937,9 @@ fn pair_raw_and_jpeg(
         } else {
             continue;
         };
-        let Some((raw_image_id, jpeg_image_id)) = pair else { continue };
+        let Some((raw_image_id, jpeg_image_id)) = pair else {
+            continue;
+        };
 
         let already_paired: bool = conn
             .query_row(
@@ -850,7 +962,9 @@ fn pair_raw_and_jpeg(
 /// A path's filename stem (extension stripped), lowercased for
 /// case-insensitive comparison — `IMG_0001.CR2` must match `img_0001.jpg`.
 fn filename_stem_lower(path: &Path) -> String {
-    path.file_stem().map(|s| s.to_string_lossy().to_lowercase()).unwrap_or_default()
+    path.file_stem()
+        .map(|s| s.to_string_lossy().to_lowercase())
+        .unwrap_or_default()
 }
 
 /// §3 step 3 + §6: compares this newly-hashed image against every other
@@ -873,15 +987,20 @@ fn record_near_duplicates(
     image_id: i64,
     perceptual_hash: i64,
 ) -> rusqlite::Result<()> {
-    let threshold: i64 =
-        conn.query_row("SELECT hamming_threshold FROM app_settings WHERE id = 1", [], |row| row.get(0))?;
+    let threshold: i64 = conn.query_row(
+        "SELECT hamming_threshold FROM app_settings WHERE id = 1",
+        [],
+        |row| row.get(0),
+    )?;
 
     let mut stmt = conn.prepare(
         "SELECT id, perceptual_hash FROM images
          WHERE library_id = ?1 AND id != ?2 AND status = 'active' AND perceptual_hash IS NOT NULL",
     )?;
     let candidates: Vec<(i64, i64)> = stmt
-        .query_map(params![library_id, image_id], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .query_map(params![library_id, image_id], |row| {
+            Ok((row.get(0)?, row.get(1)?))
+        })?
         .collect::<Result<_, _>>()?;
     drop(stmt);
 
@@ -989,23 +1108,35 @@ fn resolve_conversion(
     source_path: &Path,
 ) -> Result<ConversionResult, ImportError> {
     let Some(convertible) = convertible_format(format) else {
-        return Ok(ConversionResult { bytes: None, stored_format: format, conversion_status: "not_applicable" });
+        return Ok(ConversionResult {
+            bytes: None,
+            stored_format: format,
+            conversion_status: "not_applicable",
+        });
     };
     if !conversion_enabled {
-        return Ok(ConversionResult { bytes: None, stored_format: format, conversion_status: "not_attempted" });
+        return Ok(ConversionResult {
+            bytes: None,
+            stored_format: format,
+            conversion_status: "not_attempted",
+        });
     }
 
     let source_bytes = fs::read(source_path)?;
-    Ok(match lumenvault_convert::convert(convertible, &source_bytes) {
-        Ok(Ok(converted)) => ConversionResult {
-            bytes: Some(converted.bytes),
-            stored_format: converted.stored_format,
-            conversion_status: "converted",
+    Ok(
+        match lumenvault_convert::convert(convertible, &source_bytes) {
+            Ok(Ok(converted)) => ConversionResult {
+                bytes: Some(converted.bytes),
+                stored_format: converted.stored_format,
+                conversion_status: "converted",
+            },
+            Ok(Err(_)) | Err(_) => ConversionResult {
+                bytes: None,
+                stored_format: format,
+                conversion_status: "failed_kept_original",
+            },
         },
-        Ok(Err(_)) | Err(_) => {
-            ConversionResult { bytes: None, stored_format: format, conversion_status: "failed_kept_original" }
-        }
-    })
+    )
 }
 
 /// Quarantines the original: same-volume rename where possible, falling
@@ -1055,7 +1186,9 @@ fn quarantine_original(
             let source_hash = lumenvault_hash::hash_file(source_path)?;
             let copy_hash = lumenvault_hash::hash_file(&quarantine_path)?;
             if source_hash != copy_hash {
-                return Err(ImportError::BlobIntegrity { path: quarantine_path });
+                return Err(ImportError::BlobIntegrity {
+                    path: quarantine_path,
+                });
             }
             fs::remove_file(source_path)?;
         }
@@ -1176,7 +1309,13 @@ mod tests {
         let a = write_png(source_dir.path(), "a.png", 42);
         let b = write_png(source_dir.path(), "b.png", 42);
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
         let outcome_a = import_file(&ctx, &a).unwrap();
         let outcome_b = import_file(&ctx, &b).unwrap();
 
@@ -1186,15 +1325,26 @@ mod tests {
         let FileOutcome::Collapsed { image_id: id_b } = outcome_b else {
             panic!("expected the second (identical) import to collapse, got {outcome_b:?}");
         };
-        assert_eq!(id_a, id_b, "duplicate content must resolve to the same images row");
+        assert_eq!(
+            id_a, id_b,
+            "duplicate content must resolve to the same images row"
+        );
 
-        let image_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM images", [], |row| row.get(0)).unwrap();
-        assert_eq!(image_count, 1, "exactly one images row for two identical files");
+        let image_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM images", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            image_count, 1,
+            "exactly one images row for two identical files"
+        );
 
-        let source_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM image_sources", [], |row| row.get(0)).unwrap();
-        assert_eq!(source_count, 2, "each import event still gets its own image_sources row");
+        let source_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM image_sources", [], |row| row.get(0))
+            .unwrap();
+        assert_eq!(
+            source_count, 2,
+            "each import event still gets its own image_sources row"
+        );
 
         // Both originals were quarantined (moved out of the source dir).
         assert!(!a.exists());
@@ -1214,14 +1364,24 @@ mod tests {
         let bogus = source_dir.path().join("not-an-image.txt");
         fs::write(&bogus, b"nope").unwrap();
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
         let outcome = import_file(&ctx, &bogus).unwrap();
 
         assert_eq!(outcome, FileOutcome::Failed);
-        assert!(bogus.exists(), "an undecodable file must never be moved/quarantined");
+        assert!(
+            bogus.exists(),
+            "an undecodable file must never be moved/quarantined"
+        );
 
-        let image_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM images", [], |row| row.get(0)).unwrap();
+        let image_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM images", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(image_count, 0);
     }
 
@@ -1236,17 +1396,31 @@ mod tests {
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
         let path = write_png(source_dir.path(), "once.png", 7);
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
         let first = import_file(&ctx, &path).unwrap();
         // Second call simulates a resumed run re-scanning the same source
         // file after the batch was already fully processed for it.
         let second = import_file(&ctx, &path).unwrap();
 
-        let FileOutcome::Imported { image_id } = first else { panic!("expected Imported, got {first:?}") };
-        assert_eq!(second, FileOutcome::AlreadyDone { image_id: Some(image_id) });
+        let FileOutcome::Imported { image_id } = first else {
+            panic!("expected Imported, got {first:?}")
+        };
+        assert_eq!(
+            second,
+            FileOutcome::AlreadyDone {
+                image_id: Some(image_id)
+            }
+        );
 
-        let image_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM images", [], |row| row.get(0)).unwrap();
+        let image_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM images", [], |row| row.get(0))
+            .unwrap();
         assert_eq!(image_count, 1, "resuming must never create a duplicate row");
     }
 
@@ -1273,20 +1447,34 @@ mod tests {
         )
         .unwrap();
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
         let outcome = import_file(&ctx, &path).unwrap();
 
         assert!(matches!(outcome, FileOutcome::Imported { .. }));
-        assert!(!path.exists(), "resumed run must still finish quarantining the original");
+        assert!(
+            !path.exists(),
+            "resumed run must still finish quarantining the original"
+        );
 
         let step: String = conn
-            .query_row("SELECT step FROM import_journal WHERE batch_id = ?1", [batch_id], |row| row.get(0))
+            .query_row(
+                "SELECT step FROM import_journal WHERE batch_id = ?1",
+                [batch_id],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(step, "done");
     }
 
     #[test]
-    fn resuming_after_a_crash_between_the_row_insert_and_thumbnail_generation_still_gets_a_thumbnail() {
+    fn resuming_after_a_crash_between_the_row_insert_and_thumbnail_generation_still_gets_a_thumbnail()
+     {
         // Simulates a crash that got as far as inserting the `images` row
         // but never reached thumbnail generation — a real observed failure
         // mode (an OS "Application Hang" force-close mid-import). Resuming
@@ -1313,7 +1501,13 @@ mod tests {
         .unwrap();
         let image_id = conn.last_insert_rowid();
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
         let outcome = import_file(&ctx, &path).unwrap();
 
         assert!(matches!(outcome, FileOutcome::Collapsed { image_id: id } if id == image_id));
@@ -1325,7 +1519,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert_eq!(thumb_count, 1, "the missing thumbnail must be backfilled even though this resolved as a duplicate");
+        assert_eq!(
+            thumb_count, 1,
+            "the missing thumbnail must be backfilled even though this resolved as a duplicate"
+        );
     }
 
     #[test]
@@ -1374,13 +1571,25 @@ mod tests {
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
         let path = write_png(source_dir.path(), "photo.png", 5);
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
         let outcome = import_file(&ctx, &path).unwrap();
-        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+        let FileOutcome::Imported { image_id } = outcome else {
+            panic!("expected Imported, got {outcome:?}")
+        };
 
         // Hand-roll the broken state: the thumbnail this import legitimately
         // created is deleted, simulating a vault from before the fix.
-        conn.execute("DELETE FROM thumbnails WHERE image_id = ?1 AND variant = 'grid256'", [image_id]).unwrap();
+        conn.execute(
+            "DELETE FROM thumbnails WHERE image_id = ?1 AND variant = 'grid256'",
+            [image_id],
+        )
+        .unwrap();
 
         let backfilled = backfill_missing_grid_thumbnails(&conn, &paths).unwrap();
 
@@ -1392,7 +1601,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(std::path::Path::new(&thumb_path).exists(), "the backfilled thumbnail file must actually exist");
+        assert!(
+            std::path::Path::new(&thumb_path).exists(),
+            "the backfilled thumbnail file must actually exist"
+        );
     }
 
     #[test]
@@ -1421,7 +1633,13 @@ mod tests {
 
         let library_id = ensure_library(&conn, library_dir.path()).unwrap();
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
 
         let mut seen = 0;
         import_directory(&ctx, source_dir.path(), |_, _| {
@@ -1430,7 +1648,10 @@ mod tests {
         })
         .unwrap();
 
-        assert_eq!(seen, 2, "must stop the walk as soon as on_outcome returns false");
+        assert_eq!(
+            seen, 2,
+            "must stop the walk as soon as on_outcome returns false"
+        );
     }
 
     #[test]
@@ -1453,7 +1674,13 @@ mod tests {
 
         let library_id = ensure_library(&conn, library_dir.path()).unwrap();
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
 
         let mut seen = 0;
         import_directory(&ctx, source_dir.path(), |_, _| {
@@ -1469,10 +1696,18 @@ mod tests {
             true
         })
         .unwrap();
-        assert_eq!(resumed_seen, 1, "only the one file not yet moved out of source_dir remains to be walked");
+        assert_eq!(
+            resumed_seen, 1,
+            "only the one file not yet moved out of source_dir remains to be walked"
+        );
 
-        let imported_count: i64 = conn.query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0)).unwrap();
-        assert_eq!(imported_count, 3, "all three files must have ended up imported across both runs");
+        let imported_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            imported_count, 3,
+            "all three files must have ended up imported across both runs"
+        );
     }
 
     #[test]
@@ -1490,10 +1725,18 @@ mod tests {
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
         let path = write_jpeg(source_dir.path(), "photo.jpg", 11);
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
         let outcome = import_file(&ctx, &path).unwrap();
 
-        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+        let FileOutcome::Imported { image_id } = outcome else {
+            panic!("expected Imported, got {outcome:?}")
+        };
         let (original_format, stored_format, conversion_status, stored_path): (String, String, String, String) = conn
             .query_row(
                 "SELECT original_format, stored_format, conversion_status, stored_path FROM images WHERE id = ?1",
@@ -1505,7 +1748,10 @@ mod tests {
         assert_eq!(original_format, "jpeg");
         assert_eq!(stored_format, "jxl");
         assert_eq!(conversion_status, "converted");
-        assert!(stored_path.ends_with(".jxl"), "blob path should carry the converted extension: {stored_path}");
+        assert!(
+            stored_path.ends_with(".jxl"),
+            "blob path should carry the converted extension: {stored_path}"
+        );
         assert!(std::path::Path::new(&stored_path).exists());
     }
 
@@ -1518,16 +1764,28 @@ mod tests {
         let paths = LibraryPaths::new(library_dir.path());
 
         let library_id = ensure_library(&conn, library_dir.path()).unwrap();
-        conn.execute("UPDATE libraries SET conversion_enabled = 0 WHERE id = ?1", [library_id]).unwrap();
+        conn.execute(
+            "UPDATE libraries SET conversion_enabled = 0 WHERE id = ?1",
+            [library_id],
+        )
+        .unwrap();
         assert!(!conversion_enabled(&conn, library_id).unwrap());
 
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
         let path = write_jpeg(source_dir.path(), "photo.jpg", 22);
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: false };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: false,
+        };
         let outcome = import_file(&ctx, &path).unwrap();
 
-        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+        let FileOutcome::Imported { image_id } = outcome else {
+            panic!("expected Imported, got {outcome:?}")
+        };
         let (stored_format, conversion_status): (String, String) = conn
             .query_row(
                 "SELECT stored_format, conversion_status FROM images WHERE id = ?1",
@@ -1536,7 +1794,10 @@ mod tests {
             )
             .unwrap();
 
-        assert_eq!(stored_format, "jpeg", "conversion disabled must leave the original format in place");
+        assert_eq!(
+            stored_format, "jpeg",
+            "conversion disabled must leave the original format in place"
+        );
         assert_eq!(conversion_status, "not_attempted");
     }
 
@@ -1553,15 +1814,29 @@ mod tests {
         let library_id = ensure_library(&conn, library_dir.path()).unwrap();
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
         let path = source_dir.path().join("photo.webp");
-        let img: ImageBuffer<Rgb<u8>, Vec<u8>> = ImageBuffer::from_fn(8, 8, |x, y| Rgb([(x * y) as u8, 1, 2]));
+        let img: ImageBuffer<Rgb<u8>, Vec<u8>> =
+            ImageBuffer::from_fn(8, 8, |x, y| Rgb([(x * y) as u8, 1, 2]));
         img.save(&path).unwrap();
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
         let outcome = import_file(&ctx, &path).unwrap();
 
-        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
-        let conversion_status: String =
-            conn.query_row("SELECT conversion_status FROM images WHERE id = ?1", [image_id], |row| row.get(0)).unwrap();
+        let FileOutcome::Imported { image_id } = outcome else {
+            panic!("expected Imported, got {outcome:?}")
+        };
+        let conversion_status: String = conn
+            .query_row(
+                "SELECT conversion_status FROM images WHERE id = ?1",
+                [image_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(conversion_status, "not_applicable");
     }
 
@@ -1578,9 +1853,17 @@ mod tests {
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
         let path = write_png(source_dir.path(), "photo.png", 5);
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
         let outcome = import_file(&ctx, &path).unwrap();
-        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+        let FileOutcome::Imported { image_id } = outcome else {
+            panic!("expected Imported, got {outcome:?}")
+        };
 
         let thumb_path: String = conn
             .query_row(
@@ -1589,7 +1872,10 @@ mod tests {
                 |row| row.get(0),
             )
             .unwrap();
-        assert!(std::path::Path::new(&thumb_path).exists(), "thumbnail file must actually exist on disk");
+        assert!(
+            std::path::Path::new(&thumb_path).exists(),
+            "thumbnail file must actually exist on disk"
+        );
         // A real, decodable JPEG — not just a placeholder file.
         let decoded = image::open(&thumb_path).unwrap();
         assert!(decoded.width() > 0 && decoded.height() > 0);
@@ -1610,9 +1896,17 @@ mod tests {
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
         let path = write_png(source_dir.path(), "photo.png", 5);
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
         let outcome = import_file(&ctx, &path).unwrap();
-        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+        let FileOutcome::Imported { image_id } = outcome else {
+            panic!("expected Imported, got {outcome:?}")
+        };
 
         let preview_count: i64 = conn
             .query_row(
@@ -1635,18 +1929,33 @@ mod tests {
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
         let path = write_png(source_dir.path(), "photo.png", 5);
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
         let outcome = import_file(&ctx, &path).unwrap();
-        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+        let FileOutcome::Imported { image_id } = outcome else {
+            panic!("expected Imported, got {outcome:?}")
+        };
 
-        let bytes = render_full_preview_bytes(&conn, image_id).unwrap().expect("must decode a standard image");
-        let decoded = image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
+        let bytes = render_full_preview_bytes(&conn, image_id)
+            .unwrap()
+            .expect("must decode a standard image");
+        let decoded =
+            image::load_from_memory_with_format(&bytes, image::ImageFormat::Jpeg).unwrap();
         assert!(decoded.width() > 0 && decoded.height() > 0);
 
         // Nothing gets written to disk or recorded in the catalog — purely
         // an in-memory render.
         let preview_count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM thumbnails WHERE variant = 'preview_full'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM thumbnails WHERE variant = 'preview_full'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(preview_count, 0);
     }
@@ -1660,23 +1969,45 @@ mod tests {
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
         let path = write_png(source_dir.path(), "photo.png", 5);
         let paths = LibraryPaths::new(library_dir.path());
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
         let outcome = import_file(&ctx, &path).unwrap();
-        let FileOutcome::Imported { image_id } = outcome else { panic!("expected Imported, got {outcome:?}") };
+        let FileOutcome::Imported { image_id } = outcome else {
+            panic!("expected Imported, got {outcome:?}")
+        };
 
         // Hand-roll a leftover preview_full row/file, simulating an older
         // vault created before this design change.
         let stale_path = library_dir.path().join("previews").join("stale.jpg");
         fs::create_dir_all(stale_path.parent().unwrap()).unwrap();
         fs::write(&stale_path, b"fake jpeg bytes").unwrap();
-        lumenvault_catalog::record_thumbnail(&conn, image_id, "preview_full", "jpeg", &stale_path.to_string_lossy()).unwrap();
+        lumenvault_catalog::record_thumbnail(
+            &conn,
+            image_id,
+            "preview_full",
+            "jpeg",
+            &stale_path.to_string_lossy(),
+        )
+        .unwrap();
 
         let swept = sweep_stale_previews(&conn).unwrap();
 
         assert_eq!(swept, 1);
-        assert!(!stale_path.exists(), "the stale preview file must actually be deleted");
+        assert!(
+            !stale_path.exists(),
+            "the stale preview file must actually be deleted"
+        );
         let remaining: i64 = conn
-            .query_row("SELECT COUNT(*) FROM thumbnails WHERE variant = 'preview_full'", [], |row| row.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM thumbnails WHERE variant = 'preview_full'",
+                [],
+                |row| row.get(0),
+            )
             .unwrap();
         assert_eq!(remaining, 0);
 
@@ -1696,7 +2027,10 @@ mod tests {
     /// color space differs) — enough to avoid exact-hash collapse while
     /// still landing well within the default 5-bit Hamming threshold, so a
     /// real `dedupe_review_queue` row exists to resolve.
-    fn library_with_two_review_candidates(conn: &Connection, library_dir: &std::path::Path) -> (i64, LibraryPaths, i64, i64, i64) {
+    fn library_with_two_review_candidates(
+        conn: &Connection,
+        library_dir: &std::path::Path,
+    ) -> (i64, LibraryPaths, i64, i64, i64) {
         let paths = LibraryPaths::new(library_dir);
         let source_dir = tempfile::tempdir().unwrap();
         let library_id = ensure_library(conn, library_dir).unwrap();
@@ -1704,8 +2038,15 @@ mod tests {
         let path_a = write_png(source_dir.path(), "a.png", 1);
         let path_b = write_png(source_dir.path(), "b.png", 2);
 
-        let ctx = ImportContext { conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
-        let FileOutcome::Imported { image_id: image_a } = import_file(&ctx, &path_a).unwrap() else {
+        let ctx = ImportContext {
+            conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
+        let FileOutcome::Imported { image_id: image_a } = import_file(&ctx, &path_a).unwrap()
+        else {
             panic!("expected a fresh import for a.png")
         };
         let outcome_b = import_file(&ctx, &path_b).unwrap();
@@ -1730,16 +2071,31 @@ mod tests {
     fn merging_a_review_pair_unions_tags_quarantines_the_loser_and_marks_state() {
         let conn = test_conn();
         let library_dir = tempfile::tempdir().unwrap();
-        let (_library_id, paths, image_a, image_b, queue_id) = library_with_two_review_candidates(&conn, library_dir.path());
+        let (_library_id, paths, image_a, image_b, queue_id) =
+            library_with_two_review_candidates(&conn, library_dir.path());
 
         lumenvault_catalog::add_tag(&conn, image_a, "keeper-tag").unwrap();
         lumenvault_catalog::add_tag(&conn, image_b, "loser-tag").unwrap();
 
-        let loser_stored_path: String =
-            conn.query_row("SELECT stored_path FROM images WHERE id = ?1", [image_b], |row| row.get(0)).unwrap();
-        assert!(std::path::Path::new(&loser_stored_path).exists(), "precondition: loser blob exists before merge");
+        let loser_stored_path: String = conn
+            .query_row(
+                "SELECT stored_path FROM images WHERE id = ?1",
+                [image_b],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert!(
+            std::path::Path::new(&loser_stored_path).exists(),
+            "precondition: loser blob exists before merge"
+        );
 
-        resolve_review_pair(&conn, &paths, queue_id, ReviewAction::Merge { keeper_id: image_a }).unwrap();
+        resolve_review_pair(
+            &conn,
+            &paths,
+            queue_id,
+            ReviewAction::Merge { keeper_id: image_a },
+        )
+        .unwrap();
 
         // Tags unioned onto the keeper.
         let keeper_tags = lumenvault_catalog::tags_for_image(&conn, image_a).unwrap();
@@ -1748,13 +2104,20 @@ mod tests {
 
         // Loser marked merged.
         let (status, merged_into): (String, Option<i64>) = conn
-            .query_row("SELECT status, merged_into_id FROM images WHERE id = ?1", [image_b], |row| Ok((row.get(0)?, row.get(1)?)))
+            .query_row(
+                "SELECT status, merged_into_id FROM images WHERE id = ?1",
+                [image_b],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
             .unwrap();
         assert_eq!(status, "merged");
         assert_eq!(merged_into, Some(image_a));
 
         // Loser's blob quarantined (moved, not deleted), quarantine_type = merge_discard.
-        assert!(!std::path::Path::new(&loser_stored_path).exists(), "loser blob must be moved out of the store");
+        assert!(
+            !std::path::Path::new(&loser_stored_path).exists(),
+            "loser blob must be moved out of the store"
+        );
         let (quarantine_type, quarantined_path): (String, String) = conn
             .query_row(
                 "SELECT quarantine_type, quarantined_path FROM quarantine WHERE related_image_id = ?1 AND quarantine_type = 'merge_discard'",
@@ -1763,11 +2126,19 @@ mod tests {
             )
             .unwrap();
         assert_eq!(quarantine_type, "merge_discard");
-        assert!(std::path::Path::new(&quarantined_path).exists(), "the quarantined copy must actually exist");
+        assert!(
+            std::path::Path::new(&quarantined_path).exists(),
+            "the quarantined copy must actually exist"
+        );
 
         // Queue row resolved.
-        let queue_status: String =
-            conn.query_row("SELECT status FROM dedupe_review_queue WHERE id = ?1", [queue_id], |row| row.get(0)).unwrap();
+        let queue_status: String = conn
+            .query_row(
+                "SELECT status FROM dedupe_review_queue WHERE id = ?1",
+                [queue_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(queue_status, "merged");
     }
 
@@ -1775,28 +2146,59 @@ mod tests {
     fn dismissing_a_review_pair_only_changes_the_queue_row() {
         let conn = test_conn();
         let library_dir = tempfile::tempdir().unwrap();
-        let (_library_id, paths, image_a, image_b, queue_id) = library_with_two_review_candidates(&conn, library_dir.path());
+        let (_library_id, paths, image_a, image_b, queue_id) =
+            library_with_two_review_candidates(&conn, library_dir.path());
 
         let (status_a_before, status_b_before): (String, String) = (
-            conn.query_row("SELECT status FROM images WHERE id = ?1", [image_a], |row| row.get(0)).unwrap(),
-            conn.query_row("SELECT status FROM images WHERE id = ?1", [image_b], |row| row.get(0)).unwrap(),
+            conn.query_row(
+                "SELECT status FROM images WHERE id = ?1",
+                [image_a],
+                |row| row.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT status FROM images WHERE id = ?1",
+                [image_b],
+                |row| row.get(0),
+            )
+            .unwrap(),
         );
 
         resolve_review_pair(&conn, &paths, queue_id, ReviewAction::Dismiss).unwrap();
 
-        let queue_status: String =
-            conn.query_row("SELECT status FROM dedupe_review_queue WHERE id = ?1", [queue_id], |row| row.get(0)).unwrap();
+        let queue_status: String = conn
+            .query_row(
+                "SELECT status FROM dedupe_review_queue WHERE id = ?1",
+                [queue_id],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(queue_status, "dismissed");
 
         let (status_a_after, status_b_after): (String, String) = (
-            conn.query_row("SELECT status FROM images WHERE id = ?1", [image_a], |row| row.get(0)).unwrap(),
-            conn.query_row("SELECT status FROM images WHERE id = ?1", [image_b], |row| row.get(0)).unwrap(),
+            conn.query_row(
+                "SELECT status FROM images WHERE id = ?1",
+                [image_a],
+                |row| row.get(0),
+            )
+            .unwrap(),
+            conn.query_row(
+                "SELECT status FROM images WHERE id = ?1",
+                [image_b],
+                |row| row.get(0),
+            )
+            .unwrap(),
         );
         assert_eq!(status_a_before, status_a_after);
         assert_eq!(status_b_before, status_b_after);
 
-        let quarantine_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM quarantine WHERE quarantine_type = 'merge_discard'", [], |row| row.get(0)).unwrap();
+        let quarantine_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM quarantine WHERE quarantine_type = 'merge_discard'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(quarantine_count, 0);
     }
 
@@ -1804,14 +2206,32 @@ mod tests {
     fn resolving_an_already_resolved_entry_twice_is_a_safe_no_op() {
         let conn = test_conn();
         let library_dir = tempfile::tempdir().unwrap();
-        let (_library_id, paths, image_a, _image_b, queue_id) = library_with_two_review_candidates(&conn, library_dir.path());
+        let (_library_id, paths, image_a, _image_b, queue_id) =
+            library_with_two_review_candidates(&conn, library_dir.path());
 
-        resolve_review_pair(&conn, &paths, queue_id, ReviewAction::Merge { keeper_id: image_a }).unwrap();
+        resolve_review_pair(
+            &conn,
+            &paths,
+            queue_id,
+            ReviewAction::Merge { keeper_id: image_a },
+        )
+        .unwrap();
         // Second call must not error or double-quarantine.
-        resolve_review_pair(&conn, &paths, queue_id, ReviewAction::Merge { keeper_id: image_a }).unwrap();
+        resolve_review_pair(
+            &conn,
+            &paths,
+            queue_id,
+            ReviewAction::Merge { keeper_id: image_a },
+        )
+        .unwrap();
 
-        let quarantine_count: i64 =
-            conn.query_row("SELECT COUNT(*) FROM quarantine WHERE quarantine_type = 'merge_discard'", [], |row| row.get(0)).unwrap();
+        let quarantine_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM quarantine WHERE quarantine_type = 'merge_discard'",
+                [],
+                |row| row.get(0),
+            )
+            .unwrap();
         assert_eq!(quarantine_count, 1);
     }
 
@@ -1827,8 +2247,16 @@ mod tests {
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
         let path = write_png(source_dir.path(), "photo.png", 9);
 
-        let ctx = ImportContext { conn: &conn, paths: &paths, library_id, batch_id, conversion_enabled: true };
-        let FileOutcome::Imported { image_id } = import_file(&ctx, &path).unwrap() else { panic!("expected Imported") };
+        let ctx = ImportContext {
+            conn: &conn,
+            paths: &paths,
+            library_id,
+            batch_id,
+            conversion_enabled: true,
+        };
+        let FileOutcome::Imported { image_id } = import_file(&ctx, &path).unwrap() else {
+            panic!("expected Imported")
+        };
 
         lumenvault_catalog::add_tag(&conn, image_id, "vacation").unwrap();
         lumenvault_xmp::sync_sidecar(&conn, image_id).unwrap();
@@ -1837,12 +2265,23 @@ mod tests {
 
         assert!(dest.exists(), "the exported image file must actually exist");
         let dest_ext = dest.extension().unwrap().to_string_lossy().to_string();
-        let stored_format: String =
-            conn.query_row("SELECT stored_format FROM images WHERE id = ?1", [image_id], |row| row.get(0)).unwrap();
-        assert_eq!(dest_ext, stored_format, "export must keep the currently-stored format, no un-conversion");
+        let stored_format: String = conn
+            .query_row(
+                "SELECT stored_format FROM images WHERE id = ?1",
+                [image_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            dest_ext, stored_format,
+            "export must keep the currently-stored format, no un-conversion"
+        );
 
         let exported_sidecar = dest.with_extension("xmp");
-        assert!(exported_sidecar.exists(), "the sidecar must be exported alongside the image");
+        assert!(
+            exported_sidecar.exists(),
+            "the sidecar must be exported alongside the image"
+        );
         let sidecar_tags = lumenvault_xmp::read_sidecar(&exported_sidecar).unwrap();
         assert_eq!(sidecar_tags, vec!["vacation".to_string()]);
     }

@@ -45,7 +45,10 @@ fn run(source_dir: PathBuf, library_root: PathBuf) -> Result<(), Box<dyn std::er
 
     let purged = sweep_expired_quarantine(&conn)?;
     if purged > 0 {
-        println!("retention sweep: purged {purged} expired quarantine entr{}", if purged == 1 { "y" } else { "ies" });
+        println!(
+            "retention sweep: purged {purged} expired quarantine entr{}",
+            if purged == 1 { "y" } else { "ies" }
+        );
     }
 
     let library_id = ensure_library(&conn, &library_root)?;
@@ -71,7 +74,10 @@ fn run(source_dir: PathBuf, library_root: PathBuf) -> Result<(), Box<dyn std::er
             }
             FileOutcome::Collapsed { image_id } => {
                 collapsed += 1;
-                println!("collapsed (duplicate): {} (image_id={image_id})", path.display());
+                println!(
+                    "collapsed (duplicate): {} (image_id={image_id})",
+                    path.display()
+                );
             }
             FileOutcome::Failed => {
                 failed += 1;
@@ -79,7 +85,10 @@ fn run(source_dir: PathBuf, library_root: PathBuf) -> Result<(), Box<dyn std::er
             }
             FileOutcome::AlreadyDone { image_id } => {
                 already_done += 1;
-                println!("already done (resumed): {} (image_id={image_id:?})", path.display());
+                println!(
+                    "already done (resumed): {} (image_id={image_id:?})",
+                    path.display()
+                );
             }
         }
         let _ = std::io::stdout().flush();
