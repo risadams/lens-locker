@@ -473,7 +473,7 @@ function renderDrawerTags(detail) {
   el.innerHTML = detail.tags.map(t => {
     const unreviewed = t.source === 'auto' && t.reviewState === 'unreviewed';
     const confirmBtn = unreviewed ? `<button data-confirm="${escapeHtml(t.name)}" title="Confirm">✓</button>` : '';
-    return `<span class="tag-chip${unreviewed ? ' tag-chip-unreviewed' : ''}">${escapeHtml(t.name)}${confirmBtn}<button data-tag="${escapeHtml(t.name)}" data-auto="${t.source === 'auto'}">×</button></span>`;
+    return `<span class="tag-chip${unreviewed ? ' tag-chip-unreviewed' : ''}">${escapeHtml(t.name)}${confirmBtn}<button data-tag="${escapeHtml(t.name)}">×</button></span>`;
   }).join('')
     + `<button class="tag-add" id="tagAddBtn">+ Add tag</button>`;
 
@@ -482,14 +482,21 @@ function renderDrawerTags(detail) {
     await invoke('confirm_auto_tag', { imageId: detail.id, tag: btn.dataset.confirm });
     const t = detail.tags.find(t => t.name === btn.dataset.confirm);
     if (t) t.reviewState = 'confirmed';
+    // No invalidateItemTags/renderTagPop here, unlike the add/reject
+    // handlers below: confirming changes neither a tag's name nor which
+    // images carry it, so the grid cache and tag-filter popover counts
+    // have nothing to invalidate.
     renderDrawerTags(detail);
   }));
   el.querySelectorAll('button[data-tag]').forEach(btn => btn.addEventListener('click', async (e) => {
     e.stopPropagation();
     // Rejecting an auto-tag persists the rejection (won't be silently
     // re-suggested on a later re-score); removing a manual tag has no
-    // such memory to keep (ML-SPEC.md §5).
-    const command = btn.dataset.auto === 'true' ? 'reject_auto_tag' : 'remove_tag';
+    // such memory to keep (ML-SPEC.md §5). Looked up from detail.tags
+    // (like the confirm handler above) rather than a parallel data-auto
+    // attribute — one source of truth for each tag's provenance.
+    const isAuto = detail.tags.find(t => t.name === btn.dataset.tag)?.source === 'auto';
+    const command = isAuto ? 'reject_auto_tag' : 'remove_tag';
     await invoke(command, { imageId: detail.id, tag: btn.dataset.tag });
     detail.tags = detail.tags.filter(t => t.name !== btn.dataset.tag);
     renderDrawerTags(detail);

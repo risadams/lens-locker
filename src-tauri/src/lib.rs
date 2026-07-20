@@ -352,6 +352,16 @@ struct ImageDetailDto {
     first_imported_at: String,
 }
 
+/// ML-SPEC.md §4's display floor: a manual tag is always visible; an
+/// auto-tag is visible "by default" only once its confidence clears
+/// `display_threshold` (a *higher* bar than the storage floor it already
+/// cleared just to have a row at all — `AppSettings::tag_storage_threshold`
+/// vs `tag_display_threshold`). Factored out of [`get_image_detail`] so
+/// it's unit-testable without needing a real `tauri::State`.
+fn tag_is_visible_by_default(tag: &lenslocker_catalog::TagWithProvenance, display_threshold: f64) -> bool {
+    tag.source != "auto" || tag.confidence.unwrap_or(0.0) >= display_threshold
+}
+
 #[tauri::command]
 fn get_image_detail(
     state: tauri::State<Mutex<LibraryState>>,
@@ -361,6 +371,16 @@ fn get_image_detail(
         let conn = app_state.conn.lock().unwrap();
         let d =
             lenslocker_catalog::get_image_detail(&conn, id)?.ok_or(CmdError::ImageNotFound(id))?;
+        // ML-SPEC.md §4's display floor: an auto-tag that cleared the
+        // (lower) storage floor still gets a real image_tags row — so
+        // confirming it later never needs a re-score — but only surfaces
+        // as a visible chip "by default" once it also clears the higher
+        // display floor. Manual tags have no confidence and are always
+        // shown; filtered here (not in get_image_detail itself) since
+        // this is a display rule, not something the catalog layer should
+        // decide — get_image_detail keeps returning everything.
+        let display_threshold = lenslocker_catalog::get_app_settings(&conn)?.tag_display_threshold;
+        let visible_tags = d.tags.into_iter().filter(|t| tag_is_visible_by_default(t, display_threshold)).map(TagDto::from).collect();
         Ok(ImageDetailDto {
             id: d.id,
             filename: d.filename,
@@ -375,7 +395,7 @@ fn get_image_detail(
             original_hash_hex: d.original_hash_hex,
             file_size_bytes: d.file_size_bytes,
             stored_path: d.stored_path,
-            tags: d.tags.into_iter().map(TagDto::from).collect(),
+            tags: visible_tags,
             first_imported_at: d.first_imported_at,
         })
     })
@@ -1311,5 +1331,25 @@ mod tests {
                 ..before
             }
         );
+    }
+
+    fn tag(source: &str, confidence: Option<f64>) -> lenslocker_catalog::TagWithProvenance {
+        lenslocker_catalog::TagWithProvenance { name: "x".to_string(), source: source.to_string(), confidence, review_state: None }
+    }
+
+    #[test]
+    fn manual_tags_are_always_visible_by_default() {
+        assert!(tag_is_visible_by_default(&tag("manual", None), 0.5));
+    }
+
+    #[test]
+    fn auto_tags_below_the_display_threshold_are_hidden_by_default() {
+        assert!(!tag_is_visible_by_default(&tag("auto", Some(0.2)), 0.5));
+    }
+
+    #[test]
+    fn auto_tags_at_or_above_the_display_threshold_are_visible() {
+        assert!(tag_is_visible_by_default(&tag("auto", Some(0.5)), 0.5));
+        assert!(tag_is_visible_by_default(&tag("auto", Some(0.9)), 0.5));
     }
 }
