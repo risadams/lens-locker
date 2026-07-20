@@ -2348,6 +2348,7 @@ dependencies = [
 name = "lenslocker-ml"
 version = "0.1.0"
 dependencies = [
+ "image",
  "ort",
  "tempfile",
  "thiserror 2.0.18",

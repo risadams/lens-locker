@@ -15,6 +15,7 @@
 //! dependency, which `deny.toml` bans outright.
 
 pub mod placeholder;
+pub mod tagging;
 
 use std::path::{Path, PathBuf};
 
