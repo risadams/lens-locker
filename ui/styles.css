@@ -2,26 +2,48 @@
    (owner-approved visual design), Milestone 5. Visual identity and
    interaction-pattern CSS is carried over near-verbatim; only additions are
    the virtualized-grid scaffolding (.grid-spacer/.grid-window) that the
-   design's naive full-array render didn't need. */
+   design's naive full-array render didn't need.
+
+   Color tokens, brand mark, and type system updated to match the "LensLocker
+   Brand System" design (claude.ai/design brand pass). Google Fonts is not an
+   option here — zero network access, ever (CLAUDE.md) — so Space
+   Grotesk/Inter/JetBrains Mono are loaded from local .ttf files under
+   ./fonts/ (see fonts/README.md for exactly which files/weights are
+   expected and where to get them); the @font-face src paths are
+   local-relative and simply fail closed to the system-font fallback chain
+   if a file is missing, no network attempted. */
+
+@font-face { font-family: 'Space Grotesk'; src: url('fonts/SpaceGrotesk-Medium.ttf') format('truetype'); font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Space Grotesk'; src: url('fonts/SpaceGrotesk-SemiBold.ttf') format('truetype'); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Space Grotesk'; src: url('fonts/SpaceGrotesk-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Inter'; src: url('fonts/Inter-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Inter'; src: url('fonts/Inter-Medium.ttf') format('truetype'); font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Inter'; src: url('fonts/Inter-SemiBold.ttf') format('truetype'); font-weight: 600; font-style: normal; font-display: swap; }
+@font-face { font-family: 'Inter'; src: url('fonts/Inter-Bold.ttf') format('truetype'); font-weight: 700; font-style: normal; font-display: swap; }
+@font-face { font-family: 'JetBrains Mono'; src: url('fonts/JetBrainsMono-Regular.ttf') format('truetype'); font-weight: 400; font-style: normal; font-display: swap; }
+@font-face { font-family: 'JetBrains Mono'; src: url('fonts/JetBrainsMono-Medium.ttf') format('truetype'); font-weight: 500; font-style: normal; font-display: swap; }
+@font-face { font-family: 'JetBrains Mono'; src: url('fonts/JetBrainsMono-SemiBold.ttf') format('truetype'); font-weight: 600; font-style: normal; font-display: swap; }
 
 :root {
-  --bg: #15141a;
-  --surface: #1d1c24;
-  --surface-raised: #24232c;
-  --surface-hover: #2a2933;
-  --border: #302f3a;
-  --border-soft: #24232c;
-  --text: #edeae3;
-  --text-muted: #8d8a99;
-  --text-faint: #5f5d6b;
-  --accent: #c9a24b;
-  --accent-dim: #8a7038;
-  --accent-soft: rgba(201, 162, 75, 0.12);
-  --danger: #b85c4a;
-  --danger-soft: rgba(184, 92, 74, 0.14);
+  --bg: oklch(0.16 0.01 280);
+  --surface: oklch(0.205 0.012 280);
+  --surface-raised: oklch(0.25 0.014 280);
+  --surface-hover: oklch(0.29 0.014 280);
+  --border: oklch(0.32 0.014 280);
+  --border-soft: oklch(0.25 0.012 280);
+  --text: oklch(0.95 0.008 280);
+  --text-muted: oklch(0.68 0.012 280);
+  --text-faint: oklch(0.48 0.012 280);
+  --accent: oklch(0.78 0.16 75);
+  --accent-dim: oklch(0.55 0.13 75);
+  --accent-soft: oklch(0.78 0.16 75 / 0.14);
+  --on-accent: oklch(0.16 0.02 75);
+  --danger: oklch(0.65 0.16 25);
+  --danger-soft: oklch(0.65 0.16 25 / 0.14);
   --radius: 3px;
-  --sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
-  --mono: ui-monospace, "Cascadia Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
+  --sans: 'Inter', -apple-system, BlinkMacSystemFont, "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --display: 'Space Grotesk', var(--sans);
+  --mono: 'JetBrains Mono', ui-monospace, "Cascadia Mono", "SF Mono", Consolas, "Liberation Mono", monospace;
 }
 * { box-sizing: border-box; }
 html, body {
@@ -50,13 +72,36 @@ button { font-family: inherit; }
   padding: 14px 0;
   gap: 4px;
 }
-.rail-mark {
-  width: 28px; height: 28px; border-radius: 6px;
-  background: linear-gradient(155deg, var(--accent), var(--accent-dim));
-  margin-bottom: 18px;
-  display: flex; align-items: center; justify-content: center;
-  font-family: var(--mono); font-weight: 600; font-size: 13px; color: #17151c;
+.rail-mark { margin-bottom: 18px; }
+
+/* Brand mark — aperture ring + keyhole (LensLocker Brand System §1 Logomark).
+   `--simple` is the ring-and-iris cut used below ~32px (nav rail, taskbar/
+   dock icon, favicon) where the keyhole notch stops reading; `--full` adds
+   the keyhole cutout for larger placements (first-run screen). Built from
+   layered divs rather than SVG to match the source design's own markup;
+   `--mark-bg` lets each placement cut the rings against whatever surface
+   it sits on (rail: var(--surface), first-run overlay: var(--bg)). */
+.mark { position: relative; flex-shrink: 0; }
+.mark span { position: absolute; border-radius: 50%; }
+.mark-ring { inset: 0; background: linear-gradient(155deg, var(--accent), var(--accent-dim)); }
+.mark-cut { background: var(--mark-bg, var(--surface)); }
+.mark-iris { background: linear-gradient(155deg, var(--accent), var(--accent-dim)); }
+.mark-keyhole-eye { background: var(--mark-bg, var(--surface)); }
+.mark-keyhole-wedge {
+  width: 0; height: 0; border-radius: 0;
+  border-left: 2.5px solid transparent; border-right: 2.5px solid transparent;
+  border-top: 4px solid var(--mark-bg, var(--surface));
 }
+
+.mark--simple { width: 28px; height: 28px; }
+.mark--simple .mark-cut { top: 4px; left: 4px; right: 4px; bottom: 4px; }
+.mark--simple .mark-iris { top: 6px; left: 6px; right: 6px; bottom: 6px; }
+
+.mark--full { width: 44px; height: 44px; }
+.mark--full .mark-cut { top: 5px; left: 5px; right: 5px; bottom: 5px; }
+.mark--full .mark-iris { top: 9px; left: 9px; right: 9px; bottom: 9px; }
+.mark--full .mark-keyhole-eye { top: 16px; left: 50%; transform: translateX(-50%); width: 6px; height: 6px; }
+.mark--full .mark-keyhole-wedge { top: 21px; left: 50%; transform: translateX(-50%); }
 .rail-btn {
   width: 40px; height: 40px; border-radius: var(--radius);
   background: transparent; border: none; color: var(--text-muted);
@@ -70,7 +115,7 @@ button { font-family: inherit; }
 .rail-badge {
   position: absolute; top: 3px; right: 3px;
   min-width: 15px; height: 15px; padding: 0 3px;
-  background: var(--accent); color: #17151c;
+  background: var(--accent); color: var(--on-accent);
   border-radius: 8px; font-size: 9.5px; font-weight: 700;
   font-family: var(--mono);
   display: flex; align-items: center; justify-content: center;
@@ -86,7 +131,7 @@ button { font-family: inherit; }
   display: flex; align-items: center;
   padding: 0 16px; gap: 14px;
 }
-.topbar-title { font-weight: 600; font-size: 14px; letter-spacing: 0.01em; }
+.topbar-title { font-family: var(--display); font-weight: 600; font-size: 14px; letter-spacing: 0.01em; }
 .topbar-count { color: var(--text-faint); font-family: var(--mono); font-size: 11.5px; }
 .filters { display: flex; gap: 6px; margin-left: 4px; }
 .chip {
@@ -120,7 +165,7 @@ button { font-family: inherit; }
 }
 .btn:hover { background: var(--surface-hover); border-color: var(--text-faint); }
 .btn-primary {
-  background: var(--accent); border-color: var(--accent); color: #17151c; font-weight: 600;
+  background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600;
 }
 .btn-primary:hover { background: #d6ad55; }
 .btn svg { width: 13px; height: 13px; }
@@ -260,7 +305,7 @@ button { font-family: inherit; }
 .review-candidate-img img { width: 100%; height: 100%; object-fit: cover; display: block; }
 .suggested-badge {
   position: absolute; top: 8px; left: 8px;
-  background: var(--accent); color: #17151c; font-size: 9.5px; font-weight: 700;
+  background: var(--accent); color: var(--on-accent); font-size: 9.5px; font-weight: 700;
   padding: 2px 7px; border-radius: 999px; letter-spacing: 0.03em;
 }
 .candidate-meta { font-family: var(--mono); font-size: 11px; color: var(--text-muted); line-height: 1.7; }
@@ -281,7 +326,7 @@ button { font-family: inherit; }
   width: 420px; background: var(--surface); border: 1px solid var(--border);
   border-radius: 8px; padding: 22px;
 }
-.modal h3 { margin: 0 0 6px; font-size: 15px; }
+.modal h3 { font-family: var(--display); margin: 0 0 6px; font-size: 15px; }
 .modal p { color: var(--text-muted); font-size: 12px; line-height: 1.6; margin: 0 0 16px; }
 .modal-drop {
   border: 1.5px dashed var(--border); border-radius: 6px; padding: 26px;
@@ -311,7 +356,7 @@ button { font-family: inherit; }
   flex-shrink: 0; display: flex; align-items: center; justify-content: center;
 }
 .popover-item.checked .box { background: var(--accent); border-color: var(--accent); }
-.popover-item.checked .box svg { width: 9px; height: 9px; color: #17151c; }
+.popover-item.checked .box svg { width: 9px; height: 9px; color: var(--on-accent); }
 .popover-item .label { flex: 1; }
 .popover-item .n { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
 .popover-divider { height: 1px; background: var(--border); margin: 5px 2px; }
@@ -439,14 +484,9 @@ button { font-family: inherit; }
 .firstrun.hidden { display: none; }
 .app.hidden { display: none; }
 .firstrun-card { width: 520px; }
-.firstrun-mark {
-  width: 44px; height: 44px; border-radius: 10px;
-  background: linear-gradient(155deg, var(--accent), var(--accent-dim));
-  display: flex; align-items: center; justify-content: center;
-  font-family: var(--mono); font-weight: 700; font-size: 18px; color: #17151c;
-  margin-bottom: 22px;
-}
-.firstrun h1 { font-size: 20px; margin: 0 0 8px; font-weight: 600; }
+.firstrun-mark { margin-bottom: 22px; }
+.firstrun-mark .mark { --mark-bg: var(--bg); }
+.firstrun h1 { font-family: var(--display); font-size: 20px; margin: 0 0 8px; font-weight: 600; }
 .firstrun-lede {
   color: var(--text-muted); font-size: 13px; line-height: 1.6; margin: 0 0 26px;
   max-width: 440px;
@@ -502,7 +542,7 @@ button { font-family: inherit; }
 .toggle { width: 34px; height: 19px; border-radius: 999px; background: var(--border); position: relative; cursor: pointer; flex-shrink: 0; }
 .toggle.on { background: var(--accent-dim); }
 .toggle::after { content: ''; position: absolute; width: 15px; height: 15px; border-radius: 50%; background: var(--text); top: 2px; left: 2px; transition: left 0.12s; }
-.toggle.on::after { left: 17px; background: #17151c; }
+.toggle.on::after { left: 17px; background: var(--on-accent); }
 
 /* Settings modal number inputs reuse .search's look outside the search bar */
 input[type="number"].search { padding-left: 10px; }
