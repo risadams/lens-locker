@@ -96,9 +96,20 @@ No `attention_mask` input — this export expects fixed-length-padded token
 sequences (SigLIP's own convention; `config.json`'s
 `max_position_embeddings` is 64). `logits_per_image` is the model's own
 sigmoid-loss logits (SigLIP's zero-shot recipe: `sigmoid(logits_per_image)`
-per label, no separate cosine-similarity+threshold math needed) — ML-2's
-scoring code should request that output directly rather than computing
-similarity from the embeddings by hand.
+per label) — but it's computed *inside* the graph from both towers at
+once, not reachable from a stored `image_embeds` row, so it can't satisfy
+§4's "adding a custom label is a cheap backfill... not a re-embed."
+**Correction to this doc's own earlier note** (this paragraph originally
+said ML-2's scoring code should request `logits_per_image` directly
+instead — wrong, written before working through that requirement):
+`crates/ml/src/tagging.rs`'s `zero_shot_probability` instead replicates
+the formula by hand (`sigmoid(dot(image_embeds, text_embeds) *
+exp(logit_scale) + logit_bias)`, the two scalars read directly from the
+model's own initializers, not guessed), verified to ~1e-4 against the
+model's real `logits_per_image` output for the same inputs
+(`crates/ml/tests/siglip_scoring_formula.rs`) — this is what makes
+scoring a new label against every already-stored image embedding
+possible without re-running the vision tower.
 
 ## 5. SigLIP tokenizer files — **not yet supplied, blocks ML-2's text side**
 
