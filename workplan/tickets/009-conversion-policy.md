@@ -55,10 +55,10 @@ libraries, so consistency-for-its-own-sake didn't win there.
 shelling out to the `cjxl`/`djxl` CLI or deferring JPEG conversion. Chosen for a
 cleaner in-process Rust API over subprocess management — but this is a **real,
 unresolved consequence**: GPL-3.0-or-later linkage very likely constrains
-LumenVault's own distributable license. That question was previously out of scope
+LensLocker's own distributable license. That question was previously out of scope
 for this map and is now sharp enough to ticket:
 [Survey GPL-3.0 linkage implications of jpegxl-rs](020-research-gpl-linkage.md) →
-[Decide LumenVault's project license](021-decide-project-license.md).
+[Decide LensLocker's project license](021-decide-project-license.md).
 
 **Metadata preservation is binding, per** [Decide metadata and tag portability](012-metadata-portability.md):
 every conversion path must explicitly request full EXIF/XMP/ICC preservation

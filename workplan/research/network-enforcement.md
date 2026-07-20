@@ -5,7 +5,7 @@ status: findings-delivered
 
 # Network enforcement — layered defense research
 
-"100% offline" for LumenVault needs proof, not a promise. No single layer below is
+"100% offline" for LensLocker needs proof, not a promise. No single layer below is
 sufficient alone; each catches a different failure mode. Ordered load-bearing → belt-and-braces.
 
 ## Recommended checklist
@@ -143,8 +143,8 @@ Practically, this means the enforcement surface a spec can actually configure is
 Windows Defender Firewall rules (which sit on top of WFP), created at install time:
 
 ```powershell
-New-NetFirewallRule -DisplayName "LumenVault - block outbound" `
-  -Direction Outbound -Program "C:\Program Files\LumenVault\lumenvault.exe" `
+New-NetFirewallRule -DisplayName "LensLocker - block outbound" `
+  -Direction Outbound -Program "C:\Program Files\LensLocker\lenslocker.exe" `
   -Action Block -Profile Any
 ```
 
@@ -184,7 +184,7 @@ WebView2's own traffic) is to observe actual socket activity while exercising th
   [Event 5156](https://learn.microsoft.com/en-us/previous-versions/windows/it-pro/windows-10/security/threat-protection/auditing/event-5156))
   This is the load-bearing verification mechanism: drive every app flow (import, dedupe,
   tag, browse, close) with this auditing on, then assert the log contains **zero**
-  5156/5157 events for `lumenvault.exe`. It doesn't matter whether the attempt came from
+  5156/5157 events for `lenslocker.exe`. It doesn't matter whether the attempt came from
   Rust code, WebView2, or a shelled-out process — only whether a socket was ever created.
 - **ETW for finer-grained diagnosis.** `Microsoft-Windows-Winsock-AFD` tracing gives
   per-socket create/connect/send events "with minimal overhead"
@@ -209,7 +209,7 @@ WebView2's own traffic) is to observe actual socket activity while exercising th
   §2's WebView2-hardening steps (SmartScreen/crash-reporting APIs, Fixed Version
   runtime, CSP) become load-bearing requirements in the spec, not optional hardening —
   this research should be weighed directly in that decision.
-- Whether LumenVault ships as a plain NSIS/MSI Win32 exe or as MSIX changes the
+- Whether LensLocker ships as a plain NSIS/MSI Win32 exe or as MSIX changes the
   AppContainer/LPAC cost-benefit materially (§3) — packaging format isn't yet decided
   in the workplan.
 - Exact CI mechanics for the WFP-audit gate (§4) — GitHub Actions Windows runners vs.

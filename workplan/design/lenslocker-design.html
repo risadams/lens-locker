@@ -1,4 +1,4 @@
-<title>LumenVault — UI Design</title>
+<title>LensLocker — UI Design</title>
 <style>
   :root {
     --bg: #15141a;
@@ -505,7 +505,7 @@
     <div class="firstrun-mark">LV</div>
     <h1>Choose where your vault lives</h1>
     <p class="firstrun-lede">
-      LumenVault <b>moves</b> your photos here — it doesn't copy them, so the
+      LensLocker <b>moves</b> your photos here — it doesn't copy them, so the
       originals won't be left behind wherever they are now. Pick a drive with
       room for your whole library; you can't change this later without moving
       everything by hand.
@@ -522,15 +522,15 @@
       </div>
       <div class="fake-picker-menu" id="fakePickerMenu">
         <div class="fake-picker-item" data-choice="empty-d">
-          <div class="path">D:\Photos\LumenVault</div>
+          <div class="path">D:\Photos\LensLocker</div>
           <div class="note">empty folder · 812 GB free — simulates a fresh vault</div>
         </div>
         <div class="fake-picker-item" data-choice="existing">
-          <div class="path">E:\Backups\LumenVault</div>
+          <div class="path">E:\Backups\LensLocker</div>
           <div class="note">contains catalog.sqlite · 340 GB free — simulates reopening an existing vault</div>
         </div>
         <div class="fake-picker-item" data-choice="low-space">
-          <div class="path">C:\Users\chris\LumenVault</div>
+          <div class="path">C:\Users\chris\LensLocker</div>
           <div class="note">empty folder · 4.2 GB free — simulates picking the wrong drive</div>
         </div>
       </div>
@@ -538,7 +538,7 @@
 
     <div id="firstrunExisting" class="firstrun-existing" style="display:none">
       <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M9 12l2 2 4-4m5 2a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
-      A LumenVault library already exists here — opening it, not creating a new one.
+      A LensLocker library already exists here — opening it, not creating a new one.
     </div>
 
     <div id="firstrunNewOptions" style="display:none">
@@ -654,7 +654,7 @@
 <div class="modal-scrim" id="importModal">
   <div class="modal">
     <h3>Import a folder</h3>
-    <p>LumenVault moves files into the vault — the originals leave their current location. Nothing is deleted outright; anything replaced or superseded is kept in quarantine for 30 days.</p>
+    <p>LensLocker moves files into the vault — the originals leave their current location. Nothing is deleted outright; anything replaced or superseded is kept in quarantine for 30 days.</p>
     <div class="modal-drop">Drop a folder here, or choose one</div>
     <div class="modal-row">
       <span>Convert to save space (lossless)</span>
@@ -722,9 +722,9 @@ document.getElementById('d-verified').innerHTML = vg(13) + ' Hash verified';
 // a sandboxed mockup). No option here is pre-selected — the whole point of
 // this screen is that the app never silently picks a location on its own.
 const FAKE_CHOICES = {
-  'empty-d': { path: 'D:\\Photos\\LumenVault', freeGb: 812, existing: false, low: false },
-  'existing': { path: 'E:\\Backups\\LumenVault', freeGb: 340, existing: true, low: false },
-  'low-space': { path: 'C:\\Users\\chris\\LumenVault', freeGb: 4.2, existing: false, low: true },
+  'empty-d': { path: 'D:\\Photos\\LensLocker', freeGb: 812, existing: false, low: false },
+  'existing': { path: 'E:\\Backups\\LensLocker', freeGb: 340, existing: true, low: false },
+  'low-space': { path: 'C:\\Users\\chris\\LensLocker', freeGb: 4.2, existing: false, low: true },
 };
 
 let firstrunChoice = null;
@@ -1105,7 +1105,7 @@ function showToast(msg) {
 }
 function copyPath() {
   const item = visibleItems[lightboxIndex()];
-  const path = `D:\\LumenVault\\blobs\\a3\\a3f9c204b1${item.id}.${item.storedFormat}`;
+  const path = `D:\\LensLocker\\blobs\\a3\\a3f9c204b1${item.id}.${item.storedFormat}`;
   try { navigator.clipboard?.writeText(path); } catch (e) {}
   showToast('File path copied');
 }

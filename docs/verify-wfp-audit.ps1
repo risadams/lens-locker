@@ -3,13 +3,13 @@
 .SYNOPSIS
     Layer 3 of workplan/SPEC.md §8's offline-enforcement package (Milestone 6):
     runtime WFP connection-audit, empirical proof (not just static analysis)
-    that LumenVault never opens an outbound connection.
+    that LensLocker never opens an outbound connection.
 
 .DESCRIPTION
     Enables the "Filtering Platform Connection" Windows Security audit
     subcategory, which makes Windows log event 5156 for every connection WFP
     *permits* and 5157 for every one it *blocks* — regardless of whether the
-    attempt came from LumenVault's own Rust code, a shelled-out process, or
+    attempt came from LensLocker's own Rust code, a shelled-out process, or
     WebView2's own background traffic (see
     workplan/research/network-enforcement.md §4). Static analysis (cargo-deny,
     §8.2) cannot see any of those; this is the only layer that can.
@@ -25,7 +25,7 @@
 
 .PARAMETER ProcessName
     The executable name to filter Security log events on. Defaults to
-    lumenvault-app.exe (src-tauri's [[bin]] name).
+    lenslocker-app.exe (src-tauri's [[bin]] name).
 
 .PARAMETER DurationSeconds
     How long to wait, after auditing is enabled, before checking the log.
@@ -56,7 +56,7 @@
 #>
 [CmdletBinding()]
 param(
-    [string]$ProcessName = 'lumenvault-app.exe',
+    [string]$ProcessName = 'lenslocker-app.exe',
     [int]$DurationSeconds = 300,
     [switch]$LeavePolicyChanged
 )
@@ -93,7 +93,7 @@ function Restore-AuditSetting {
     }
 }
 
-Write-Host "=== LumenVault WFP connection audit (workplan/SPEC.md §8.3) ===" -ForegroundColor Cyan
+Write-Host "=== LensLocker WFP connection audit (workplan/SPEC.md §8.3) ===" -ForegroundColor Cyan
 
 $originalSetting = Get-CurrentAuditSetting
 Write-Host "Current '$subcategory' audit setting: $originalSetting"
@@ -112,12 +112,12 @@ try {
     $elapsed = 0
     while ($elapsed -lt $DurationSeconds) {
         $remaining = $DurationSeconds - $elapsed
-        Write-Progress -Activity "Driving LumenVault" -Status "$remaining s remaining" `
+        Write-Progress -Activity "Driving LensLocker" -Status "$remaining s remaining" `
             -PercentComplete (100 * $elapsed / $DurationSeconds)
         Start-Sleep -Seconds 5
         $elapsed += 5
     }
-    Write-Progress -Activity "Driving LumenVault" -Completed
+    Write-Progress -Activity "Driving LensLocker" -Completed
 
     Write-Host "Window closed. Querying the Security log for 5156/5157 events since $startTime..."
 

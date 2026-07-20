@@ -150,15 +150,15 @@ mod tests {
 
     #[test]
     fn hashing_the_same_bytes_twice_is_deterministic() {
-        let a = super::hash_bytes(b"lumenvault");
-        let b = super::hash_bytes(b"lumenvault");
+        let a = super::hash_bytes(b"lenslocker");
+        let b = super::hash_bytes(b"lenslocker");
         assert_eq!(a, b);
     }
 
     #[test]
     fn different_bytes_hash_differently() {
-        let a = super::hash_bytes(b"lumenvault");
-        let b = super::hash_bytes(b"lumenvault2");
+        let a = super::hash_bytes(b"lenslocker");
+        let b = super::hash_bytes(b"lenslocker2");
         assert_ne!(a, b);
     }
 
@@ -176,7 +176,7 @@ mod tests {
 
     #[test]
     fn to_hex_round_trips_through_a_known_length() {
-        let digest = super::hash_bytes(b"lumenvault");
+        let digest = super::hash_bytes(b"lenslocker");
         let hex = super::to_hex(&digest);
         assert_eq!(
             hex.len(),

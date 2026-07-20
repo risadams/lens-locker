@@ -1,5 +1,5 @@
 [package]
-name = "lumenvault-core"
+name = "lenslocker-core"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

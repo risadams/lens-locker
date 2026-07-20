@@ -7,6 +7,6 @@
 use std::process::ExitCode;
 
 fn main() -> ExitCode {
-    eprintln!("lumenvault-raw-worker: not yet implemented (Milestone 0 stub)");
+    eprintln!("lenslocker-raw-worker: not yet implemented (Milestone 0 stub)");
     ExitCode::FAILURE
 }

@@ -1,5 +1,5 @@
 [package]
-name = "lumenvault-catalog"
+name = "lenslocker-catalog"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

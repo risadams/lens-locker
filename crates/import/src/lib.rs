@@ -5,14 +5,14 @@
 //! dedupe/RAW+JPEG pairing, and XMP sidecars. Milestone 2 added conversion.
 //! Milestone 3 (this milestone) adds:
 //! - Perceptual hashing of every decode-validated image (§3 step 3), via
-//!   [`lumenvault_hash::perceptual_hash`] over the already-decoded pixels
-//!   `lumenvault_decode::probe` returns.
+//!   [`lenslocker_hash::perceptual_hash`] over the already-decoded pixels
+//!   `lenslocker_decode::probe` returns.
 //! - RAW+JPEG pairing (§3 step 2) — see [`pair_raw_and_jpeg`].
 //! - The `dedupe_review_queue` (§6) — see [`record_near_duplicates`].
 //!
 //! Milestone 4 adds the [`rebuild`] module: the rebuild-from-sidecars
 //! recovery path (§7). Manual tagging itself is direct
-//! `lumenvault-catalog`/`lumenvault-xmp` calls, not something this crate
+//! `lenslocker-catalog`/`lenslocker-xmp` calls, not something this crate
 //! wraps — no pipeline step needs it.
 //!
 //! **Design note on crash safety** (a genuine ambiguity SPEC.md §3 states as
@@ -112,9 +112,9 @@ pub enum ImportError {
         source: walkdir::Error,
     },
     #[error(transparent)]
-    Xmp(#[from] lumenvault_xmp::XmpError),
+    Xmp(#[from] lenslocker_xmp::XmpError),
     #[error(transparent)]
-    Thumbnail(#[from] lumenvault_decode::ThumbnailError),
+    Thumbnail(#[from] lenslocker_decode::ThumbnailError),
     #[error("review-queue entry {0} not found")]
     ReviewQueueEntryNotFound(i64),
     #[error("review-queue entry {0} is not pending (already resolved)")]
@@ -348,13 +348,13 @@ pub fn backfill_missing_grid_thumbnails(
 
     let mut backfilled = 0;
     for (image_id, original_hash, stored_path) in candidates {
-        let Ok(probe) = lumenvault_decode::probe(Path::new(&stored_path)) else {
+        let Ok(probe) = lenslocker_decode::probe(Path::new(&stored_path)) else {
             continue; // undecodable (missing file) or RAW with no pixels — nothing to generate from
         };
         let hash_hex: String = original_hash.iter().map(|b| format!("{b:02x}")).collect();
         let thumb_path = paths.thumbnail_path(&hash_hex);
-        lumenvault_decode::write_jpeg_thumbnail(&probe.image, &thumb_path, 256)?;
-        lumenvault_catalog::record_thumbnail(
+        lenslocker_decode::write_jpeg_thumbnail(&probe.image, &thumb_path, 256)?;
+        lenslocker_catalog::record_thumbnail(
             conn,
             image_id,
             "grid256",
@@ -368,7 +368,7 @@ pub fn backfill_missing_grid_thumbnails(
 
 /// Decodes `image_id`'s stored blob and re-encodes it as a full-resolution,
 /// browser-displayable JPEG, entirely in memory — see
-/// `lumenvault_decode::encode_jpeg_bytes`'s doc for why this is generated
+/// `lenslocker_decode::encode_jpeg_bytes`'s doc for why this is generated
 /// fresh on every call (JIT) rather than cached to disk. `Ok(None)` if the
 /// blob can't be decoded (a RAW file, or a genuinely missing/corrupt one) —
 /// the frontend falls back to the grid thumbnail in that case.
@@ -381,10 +381,10 @@ pub fn render_full_preview_bytes(
         [image_id],
         |row| row.get(0),
     )?;
-    let Ok(probe) = lumenvault_decode::probe(Path::new(&stored_path)) else {
+    let Ok(probe) = lenslocker_decode::probe(Path::new(&stored_path)) else {
         return Ok(None);
     };
-    Ok(Some(lumenvault_decode::encode_jpeg_bytes(
+    Ok(Some(lenslocker_decode::encode_jpeg_bytes(
         &probe.image,
         92,
     )?))
@@ -483,22 +483,22 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
     };
 
     // Step: hash source bytes.
-    let original_hash = lumenvault_hash::hash_file(source_path)?;
-    let original_hash_hex = lumenvault_hash::to_hex(&original_hash);
+    let original_hash = lenslocker_hash::hash_file(source_path)?;
+    let original_hash_hex = lenslocker_hash::to_hex(&original_hash);
     set_journal_step(conn, journal_id, "hashed", None)?;
 
     // Step: decode-validate, or fall back to RAW-extension recognition
     // (§5's "Full" RAW support isn't scheduled in any milestone yet — see
-    // lumenvault-decode's module doc). A file that's neither decodable nor
+    // lenslocker-decode's module doc). A file that's neither decodable nor
     // a recognized RAW extension is refused, not imported — the original is
     // left untouched at its source path. Perceptual hash (§3 step 3) is
     // computed here too, from the pixels probe() already decoded; RAW files
     // get `None`, which both keeps `perceptual_hash` NULL in the catalog
     // and — since NULL never matches in `record_near_duplicates` — is what
     // excludes them from perceptual dedupe candidacy without extra logic.
-    let (classified, decoded_image) = match lumenvault_decode::probe(source_path) {
+    let (classified, decoded_image) = match lenslocker_decode::probe(source_path) {
         Ok(probe) => {
-            let hash = lumenvault_hash::perceptual_hash(&probe.image);
+            let hash = lenslocker_hash::perceptual_hash(&probe.image);
             let classified = Classified {
                 format: probe.format.as_str(),
                 width: Some(probe.width),
@@ -507,7 +507,7 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
             };
             (classified, Some(probe.image))
         }
-        Err(e) => match lumenvault_decode::raw_extension(source_path) {
+        Err(e) => match lenslocker_decode::raw_extension(source_path) {
             Some(raw_format) => (
                 Classified {
                     format: raw_format,
@@ -564,11 +564,11 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
         // touched: the blob is supposed to be a verbatim copy, so a
         // mismatch means the write itself was corrupted. When conversion
         // *did* happen, stored_hash is expected to differ from
-        // original_hash by design (different bytes) — `lumenvault-convert`
+        // original_hash by design (different bytes) — `lenslocker-convert`
         // already did its own pixel/byte-exact verification internally
         // before ever reporting success, so no further equality check
         // applies here.
-        let stored_hash = lumenvault_hash::hash_file(&blob_path)?;
+        let stored_hash = lenslocker_hash::hash_file(&blob_path)?;
         if conversion.bytes.is_none() && stored_hash != original_hash {
             return Err(ImportError::BlobIntegrity { path: blob_path });
         }
@@ -614,7 +614,7 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
     // `decoded_image`) rather than re-decoding the blob. Content-addressed
     // by the *original* hash so it's stable and collision-free; skipped for
     // RAW files, which have no decoded pixels this milestone (see
-    // lumenvault-decode's module doc) — a genuine, documented gap, not
+    // lenslocker-decode's module doc) — a genuine, documented gap, not
     // silently swallowed.
     //
     // Deliberately runs here, after `image_id` is resolved either way —
@@ -641,8 +641,8 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
             .is_some();
         if !has_grid_thumbnail {
             let thumb_path = paths.thumbnail_path(&original_hash_hex);
-            lumenvault_decode::write_jpeg_thumbnail(image, &thumb_path, 256)?;
-            lumenvault_catalog::record_thumbnail(
+            lenslocker_decode::write_jpeg_thumbnail(image, &thumb_path, 256)?;
+            lenslocker_catalog::record_thumbnail(
                 conn,
                 image_id,
                 "grid256",
@@ -687,7 +687,7 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
     // 5) current with the latest-known filename — cheap to re-run
     // unconditionally, same idempotent-retry rationale as the rest of this
     // function.
-    lumenvault_catalog::sync_fts_row(conn, image_id)?;
+    lenslocker_catalog::sync_fts_row(conn, image_id)?;
 
     // §3 steps 2 and 3. Run unconditionally (not just for a fresh
     // `Imported` outcome) so both stay correct under this module's
@@ -712,7 +712,7 @@ pub fn import_file(ctx: &ImportContext, source_path: &Path) -> Result<FileOutcom
 // ── Review-queue resolution (workplan/SPEC.md §6, Milestone 5) ──────────
 //
 // Milestone 3 built detection only (`dedupe_review_queue` rows) — this is
-// the first resolution logic. Lives in this crate (not `lumenvault-catalog`)
+// the first resolution logic. Lives in this crate (not `lenslocker-catalog`)
 // because a merge does real file I/O (quarantining the loser's stored blob),
 // which `catalog` deliberately stays free of.
 
@@ -727,7 +727,7 @@ pub enum ReviewAction {
 }
 
 /// Resolves one review-queue entry per §6's exact merge UX: on merge, tags
-/// union onto the keeper (reusing [`lumenvault_catalog::add_tag`]), the
+/// union onto the keeper (reusing [`lenslocker_catalog::add_tag`]), the
 /// loser's `images.status` becomes `merged` (with `merged_into_id`/
 /// `merged_at` set), its **stored blob** (not an import original) is
 /// quarantined under `quarantine_type = 'merge_discard'` — the same
@@ -782,10 +782,10 @@ pub fn resolve_review_pair(
             };
 
             // Tags union onto the keeper (§6).
-            for tag in lumenvault_catalog::tags_for_image(conn, loser_id)? {
-                lumenvault_catalog::add_tag(conn, keeper_id, &tag)?;
+            for tag in lenslocker_catalog::tags_for_image(conn, loser_id)? {
+                lenslocker_catalog::add_tag(conn, keeper_id, &tag)?;
             }
-            lumenvault_xmp::sync_sidecar(conn, keeper_id)?;
+            lenslocker_xmp::sync_sidecar(conn, keeper_id)?;
 
             // Quarantine the loser's stored blob — quarantine_type =
             // 'merge_discard', the schema's dedicated case for this
@@ -906,7 +906,7 @@ fn pair_raw_and_jpeg(
     format: &str,
     source_path: &Path,
 ) -> rusqlite::Result<()> {
-    let is_raw = lumenvault_decode::is_raw_extension(format);
+    let is_raw = lenslocker_decode::is_raw_extension(format);
     let is_jpeg = format == "jpeg";
     if !is_raw && !is_jpeg {
         return Ok(());
@@ -932,7 +932,7 @@ fn pair_raw_and_jpeg(
         }
         let pair = if is_raw && other_format == "jpeg" {
             Some((image_id, other_id))
-        } else if is_jpeg && lumenvault_decode::is_raw_extension(&other_format) {
+        } else if is_jpeg && lenslocker_decode::is_raw_extension(&other_format) {
             Some((other_id, image_id))
         } else {
             continue;
@@ -1005,7 +1005,7 @@ fn record_near_duplicates(
     drop(stmt);
 
     for (other_id, other_hash) in candidates {
-        let distance = lumenvault_hash::hamming_distance(perceptual_hash as u64, other_hash as u64);
+        let distance = lenslocker_hash::hamming_distance(perceptual_hash as u64, other_hash as u64);
         if i64::from(distance) > threshold {
             continue;
         }
@@ -1063,8 +1063,8 @@ fn write_blob_bytes_idempotent(bytes: &[u8], blob_path: &Path) -> Result<(), Imp
 /// applies to it, if any. `None` means the format has no defined
 /// conversion path at all (WebP, GIF, or anything outside JPEG/PNG/BMP/
 /// TIFF) — exactly workplan/SPEC.md §4's `not_applicable` case.
-fn convertible_format(format: &str) -> Option<lumenvault_convert::ConvertibleFormat> {
-    use lumenvault_convert::ConvertibleFormat;
+fn convertible_format(format: &str) -> Option<lenslocker_convert::ConvertibleFormat> {
+    use lenslocker_convert::ConvertibleFormat;
     match format {
         "jpeg" => Some(ConvertibleFormat::Jpeg),
         "png" => Some(ConvertibleFormat::Png),
@@ -1098,7 +1098,7 @@ struct ConversionResult {
 }
 
 /// Runs the §4 conversion policy for one file: attempt → verify →
-/// never-degrade. Any verification failure inside `lumenvault-convert`, or
+/// never-degrade. Any verification failure inside `lenslocker-convert`, or
 /// a genuine encode/library error, is treated identically — the original
 /// is left untouched and `conversion_status` records `failed_kept_original`,
 /// never a partial/best-effort result.
@@ -1124,7 +1124,7 @@ fn resolve_conversion(
 
     let source_bytes = fs::read(source_path)?;
     Ok(
-        match lumenvault_convert::convert(convertible, &source_bytes) {
+        match lenslocker_convert::convert(convertible, &source_bytes) {
             Ok(Ok(converted)) => ConversionResult {
                 bytes: Some(converted.bytes),
                 stored_format: converted.stored_format,
@@ -1183,8 +1183,8 @@ fn quarantine_original(
             // Cross-volume: rename fails (e.g. ERROR_NOT_SAME_DEVICE on
             // Windows) — copy, verify, then delete the source explicitly.
             fs::copy(source_path, &quarantine_path)?;
-            let source_hash = lumenvault_hash::hash_file(source_path)?;
-            let copy_hash = lumenvault_hash::hash_file(&quarantine_path)?;
+            let source_hash = lenslocker_hash::hash_file(source_path)?;
+            let copy_hash = lenslocker_hash::hash_file(&quarantine_path)?;
             if source_hash != copy_hash {
                 return Err(ImportError::BlobIntegrity {
                     path: quarantine_path,
@@ -1260,7 +1260,7 @@ mod tests {
 
     fn test_conn() -> Connection {
         let mut conn = Connection::open_in_memory().unwrap();
-        lumenvault_catalog::migrate(&mut conn).unwrap();
+        lenslocker_catalog::migrate(&mut conn).unwrap();
         conn
     }
 
@@ -1489,7 +1489,7 @@ mod tests {
         let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
         let path = write_png(source_dir.path(), "crashed.png", 42);
 
-        let original_hash = lumenvault_hash::hash_file(&path).unwrap();
+        let original_hash = lenslocker_hash::hash_file(&path).unwrap();
         conn.execute(
             "INSERT INTO images (
                 library_id, original_hash, stored_hash, stored_path,
@@ -1713,7 +1713,7 @@ mod tests {
     #[test]
     fn a_jpeg_is_converted_to_jxl_through_the_real_pipeline() {
         // Proves §4's conversion policy is actually wired into import_file,
-        // not just callable directly from lumenvault-convert: a JPEG source
+        // not just callable directly from lenslocker-convert: a JPEG source
         // file, run through the real import pipeline, ends up stored as a
         // .jxl blob with conversion_status = 'converted'.
         let conn = test_conn();
@@ -1986,7 +1986,7 @@ mod tests {
         let stale_path = library_dir.path().join("previews").join("stale.jpg");
         fs::create_dir_all(stale_path.parent().unwrap()).unwrap();
         fs::write(&stale_path, b"fake jpeg bytes").unwrap();
-        lumenvault_catalog::record_thumbnail(
+        lenslocker_catalog::record_thumbnail(
             &conn,
             image_id,
             "preview_full",
@@ -2074,8 +2074,8 @@ mod tests {
         let (_library_id, paths, image_a, image_b, queue_id) =
             library_with_two_review_candidates(&conn, library_dir.path());
 
-        lumenvault_catalog::add_tag(&conn, image_a, "keeper-tag").unwrap();
-        lumenvault_catalog::add_tag(&conn, image_b, "loser-tag").unwrap();
+        lenslocker_catalog::add_tag(&conn, image_a, "keeper-tag").unwrap();
+        lenslocker_catalog::add_tag(&conn, image_b, "loser-tag").unwrap();
 
         let loser_stored_path: String = conn
             .query_row(
@@ -2098,7 +2098,7 @@ mod tests {
         .unwrap();
 
         // Tags unioned onto the keeper.
-        let keeper_tags = lumenvault_catalog::tags_for_image(&conn, image_a).unwrap();
+        let keeper_tags = lenslocker_catalog::tags_for_image(&conn, image_a).unwrap();
         assert!(keeper_tags.contains(&"keeper-tag".to_string()));
         assert!(keeper_tags.contains(&"loser-tag".to_string()));
 
@@ -2258,8 +2258,8 @@ mod tests {
             panic!("expected Imported")
         };
 
-        lumenvault_catalog::add_tag(&conn, image_id, "vacation").unwrap();
-        lumenvault_xmp::sync_sidecar(&conn, image_id).unwrap();
+        lenslocker_catalog::add_tag(&conn, image_id, "vacation").unwrap();
+        lenslocker_xmp::sync_sidecar(&conn, image_id).unwrap();
 
         let dest = export_image(&conn, image_id, export_dir.path()).unwrap();
 
@@ -2282,7 +2282,7 @@ mod tests {
             exported_sidecar.exists(),
             "the sidecar must be exported alongside the image"
         );
-        let sidecar_tags = lumenvault_xmp::read_sidecar(&exported_sidecar).unwrap();
+        let sidecar_tags = lenslocker_xmp::read_sidecar(&exported_sidecar).unwrap();
         assert_eq!(sidecar_tags, vec!["vacation".to_string()]);
     }
 }

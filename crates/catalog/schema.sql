@@ -1,4 +1,4 @@
--- LumenVault catalog schema — v1
+-- LensLocker catalog schema — v1
 -- Source of truth: workplan/prototypes/017-catalog-schema.md
 -- Applied as a single rusqlite_migration step; do not hand-edit an existing
 -- migration once it has shipped — add a new one instead.

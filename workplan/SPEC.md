@@ -1,11 +1,11 @@
-# LumenVault — Technical Specification & Build Plan
+# LensLocker — Technical Specification & Build Plan
 
 Status: **LOCKED** (2026-07-17). Assembled from every closed ticket on
 [the work-plan map](MAP.md); each section cites the ticket that decided it. This
 document is the destination — a build session should be able to execute the MVP
 milestones below without deciding anything further.
 
-## 1. What LumenVault is
+## 1. What LensLocker is
 
 A 100% offline, Windows-first desktop application that takes custody of a local
 image library — importing files with a destructive move, converting them
@@ -46,7 +46,7 @@ thin platform shell), so Linux/macOS can follow later without a rewrite.
 is a reasonable synthesis of everything above)*:
 
 ```
-lumenvault/
+lenslocker/
 ├── crates/
 │   ├── core/        domain types (Image, Library, Tag…), no I/O
 │   ├── catalog/      SQLite access layer, migrations, queries (owns schema.sql, §5)
@@ -219,7 +219,7 @@ after closing the two gaps recorded below):
    session); run from an elevated session afterward via
    `docs/verify-wfp-audit.ps1` while driving the real compiled app through
    import/browse/tag/merge/export/close — **PASS**: zero WFP events (5156
-   permitted / 5157 blocked) attributed to `lumenvault-app.exe`.
+   permitted / 5157 blocked) attributed to `lenslocker-app.exe`.
 4. **Closed.** Originally blocked by a missing `Visual Studio 17 2022`
    CMake generator; installing VS2022 Build Tools plus its separate
    `VC.Llvm.Clang`/`VC.Llvm.ClangToolset` components (jpegxl-sys's CMake
@@ -234,7 +234,7 @@ after closing the two gaps recorded below):
    Fixed by passing the app's own local-data directory as an explicit
    `user_data_folder` in `webview2_hardening::create_environment`. With that
    fix, the firewall rule was verified live: `netsh advfirewall firewall
-   show rule name="LumenVault - block outbound"` showed the rule present
+   show rule name="LensLocker - block outbound"` showed the rule present
    after install and absent after uninstall.
 
 ## 9. GUI shell & thumbnail grid
@@ -302,7 +302,7 @@ picked up:
   brute-force search inside the existing catalog (benchmarked ≤75ms/query at
   100k×768-dim, adequate with headroom).
 - **Re-benchmark `sqlite-vec` on real hardware** before locking this milestone's
-  own spec — the published number isn't LumenVault-specific.
+  own spec — the published number isn't LensLocker-specific.
 - Face-grouping is explicitly **not** covered by this sketch — InsightFace-style
   models aren't freely redistributable, unlike SigLIP/CLIP; a separate license
   and design pass would be needed.
@@ -368,8 +368,8 @@ implemented behind the M3 review-queue detection), the tagging UI, an import
 trigger (implied by needing any way to get photos into the grid, never
 separately scoped), a full-size lightbox (zoom/pan/keyboard prev-next), and
 export (§7, amended into v1 scope alongside this milestone). Full interaction
-design, owner-approved before build: `workplan/design/lumenvault-design.html`.
-This is the milestone where LumenVault becomes a usable app.
+design, owner-approved before build: `workplan/design/lenslocker-design.html`.
+This is the milestone where LensLocker becomes a usable app.
 
 **Milestone 6 — Offline hardening & release gate.** Implement all four §8 layers
 for real (not just documented); run the WFP connection audit at least once;
@@ -391,7 +391,7 @@ turned out to be a real problem, not a placeholder: AppData is typically a small
 system-drive folder, actively wrong for something meant to hold a large personal
 photo library. **The app must never silently default the library location
 anywhere, under any circumstance.** Owner-approved design:
-`workplan/design/lumenvault-design.html`'s first-run screen (no path
+`workplan/design/lenslocker-design.html`'s first-run screen (no path
 pre-filled — a folder must be explicitly chosen; free space shown after
 choosing; an existing library at the chosen path is detected and opened rather
 than re-created).

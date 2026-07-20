@@ -1,4 +1,4 @@
-/* LumenVault UI — ported from workplan/design/lumenvault-design.html
+/* LensLocker UI — ported from workplan/design/lenslocker-design.html
    (owner-approved visual design), Milestone 5. Visual identity and
    interaction-pattern CSS is carried over near-verbatim; only additions are
    the virtualized-grid scaffolding (.grid-spacer/.grid-window) that the
@@ -428,7 +428,7 @@ button { font-family: inherit; }
 .toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
 
 /* ── First-run: choose the vault location (Milestone 5.5) ────────────────
-   Ported from workplan/design/lumenvault-design.html's #firstrun screen
+   Ported from workplan/design/lenslocker-design.html's #firstrun screen
    (owner-approved) — the design's FAKE_CHOICES/simulated picker menu is
    replaced with real `pick_library_folder`/`inspect_library_folder`
    backend calls; the fake-picker-menu markup itself isn't needed here. */

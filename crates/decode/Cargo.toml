@@ -1,5 +1,5 @@
 [package]
-name = "lumenvault-decode"
+name = "lenslocker-decode"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true

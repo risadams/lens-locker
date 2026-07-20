@@ -2,8 +2,8 @@
 //! "test by deleting the `.sqlite` file and rescanning."
 //!
 //! This is a real, executed end-to-end test against the actual pipeline —
-//! import through `lumenvault-import::import_file`, tag via
-//! `lumenvault-catalog`, sync via `lumenvault-xmp::sync_sidecar`, delete the
+//! import through `lenslocker-import::import_file`, tag via
+//! `lenslocker-catalog`, sync via `lenslocker-xmp::sync_sidecar`, delete the
 //! real on-disk `.sqlite` file, then run `rebuild_from_store` against a
 //! *fresh* catalog and assert the recovered state against what was true
 //! before deletion.
@@ -12,7 +12,7 @@ use std::fs;
 use std::path::Path;
 
 use image::{ImageBuffer, Rgb};
-use lumenvault_import::{
+use lenslocker_import::{
     ImportContext, LibraryPaths, ensure_library, import_file, rebuild_from_store,
     start_or_resume_batch,
 };
@@ -60,7 +60,7 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
 
     // ── Step 1: import a real fixture set through the real pipeline ──────
     let mut conn = Connection::open(paths.catalog_db()).unwrap();
-    lumenvault_catalog::migrate(&mut conn).unwrap();
+    lenslocker_catalog::migrate(&mut conn).unwrap();
 
     let library_id = ensure_library(&conn, library_dir.path()).unwrap();
     let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
@@ -80,13 +80,13 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
     let webp_outcome = import_file(&ctx, &webp_path).unwrap();
     let raw_outcome = import_file(&ctx, &raw_path).unwrap();
 
-    let lumenvault_import::FileOutcome::Imported { image_id: jpeg_id } = jpeg_outcome else {
+    let lenslocker_import::FileOutcome::Imported { image_id: jpeg_id } = jpeg_outcome else {
         panic!("expected the JPEG to import fresh, got {jpeg_outcome:?}")
     };
-    let lumenvault_import::FileOutcome::Imported { image_id: webp_id } = webp_outcome else {
+    let lenslocker_import::FileOutcome::Imported { image_id: webp_id } = webp_outcome else {
         panic!("expected the WebP to import fresh, got {webp_outcome:?}")
     };
-    let lumenvault_import::FileOutcome::Imported { image_id: raw_id } = raw_outcome else {
+    let lenslocker_import::FileOutcome::Imported { image_id: raw_id } = raw_outcome else {
         panic!("expected the RAW file to import fresh, got {raw_outcome:?}")
     };
 
@@ -103,13 +103,13 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
     assert_eq!(jpeg_conversion_status, "converted");
 
     // ── Step 2: tag several images, sync sidecars, confirm on disk ──────
-    lumenvault_catalog::add_tag(&conn, jpeg_id, "sunset").unwrap();
-    lumenvault_catalog::add_tag(&conn, jpeg_id, "vacation").unwrap();
-    lumenvault_catalog::add_tag(&conn, webp_id, "keep").unwrap();
-    lumenvault_catalog::add_tag(&conn, webp_id, "drop-me").unwrap();
+    lenslocker_catalog::add_tag(&conn, jpeg_id, "sunset").unwrap();
+    lenslocker_catalog::add_tag(&conn, jpeg_id, "vacation").unwrap();
+    lenslocker_catalog::add_tag(&conn, webp_id, "keep").unwrap();
+    lenslocker_catalog::add_tag(&conn, webp_id, "drop-me").unwrap();
 
-    let jpeg_sidecar = lumenvault_xmp::sync_sidecar(&conn, jpeg_id).unwrap();
-    let webp_sidecar = lumenvault_xmp::sync_sidecar(&conn, webp_id).unwrap();
+    let jpeg_sidecar = lenslocker_xmp::sync_sidecar(&conn, jpeg_id).unwrap();
+    let webp_sidecar = lenslocker_xmp::sync_sidecar(&conn, webp_id).unwrap();
 
     assert!(
         jpeg_sidecar.exists(),
@@ -120,18 +120,18 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
         "WebP image's sidecar must exist on disk"
     );
     assert_eq!(
-        lumenvault_xmp::read_sidecar(&jpeg_sidecar).unwrap(),
+        lenslocker_xmp::read_sidecar(&jpeg_sidecar).unwrap(),
         vec!["sunset".to_string(), "vacation".to_string()]
     );
     assert_eq!(
-        lumenvault_xmp::read_sidecar(&webp_sidecar).unwrap(),
+        lenslocker_xmp::read_sidecar(&webp_sidecar).unwrap(),
         vec!["drop-me".to_string(), "keep".to_string()]
     );
 
     // ── Step 3: remove a tag, re-sync, confirm the sidecar content changes ──
-    lumenvault_catalog::remove_tag(&conn, webp_id, "drop-me").unwrap();
-    lumenvault_xmp::sync_sidecar(&conn, webp_id).unwrap();
-    let webp_tags_after_removal = lumenvault_xmp::read_sidecar(&webp_sidecar).unwrap();
+    lenslocker_catalog::remove_tag(&conn, webp_id, "drop-me").unwrap();
+    lenslocker_xmp::sync_sidecar(&conn, webp_id).unwrap();
+    let webp_tags_after_removal = lenslocker_xmp::read_sidecar(&webp_sidecar).unwrap();
     assert_eq!(
         webp_tags_after_removal,
         vec!["keep".to_string()],
@@ -180,7 +180,7 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
 
     // ── Rebuild against a brand fresh catalog ─────────────────────────────
     let mut fresh_conn = Connection::open(&catalog_path).unwrap();
-    lumenvault_catalog::migrate(&mut fresh_conn).unwrap();
+    lenslocker_catalog::migrate(&mut fresh_conn).unwrap();
 
     let report = rebuild_from_store(&fresh_conn, &paths).unwrap();
 
@@ -251,7 +251,7 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
         )
         .unwrap();
     let recovered_webp_tags =
-        lumenvault_catalog::tags_for_image(&fresh_conn, recovered_webp_id).unwrap();
+        lenslocker_catalog::tags_for_image(&fresh_conn, recovered_webp_id).unwrap();
     assert_eq!(
         recovered_webp_tags,
         vec!["keep".to_string()],
@@ -266,7 +266,7 @@ fn rebuild_from_store_recovers_hashes_perceptual_hashes_and_tags_after_the_catal
         )
         .unwrap();
     let recovered_jpeg_tags =
-        lumenvault_catalog::tags_for_image(&fresh_conn, recovered_jpeg_id).unwrap();
+        lenslocker_catalog::tags_for_image(&fresh_conn, recovered_jpeg_id).unwrap();
     assert_eq!(
         recovered_jpeg_tags,
         vec!["sunset".to_string(), "vacation".to_string()]

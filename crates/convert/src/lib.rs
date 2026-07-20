@@ -12,7 +12,7 @@
 //!
 //! **Never-convert is a hard stop, not a degrade** (§4): any verification
 //! failure below returns [`ConversionOutcome`]'s `Err` side, never a
-//! partially-verified success. The caller (`lumenvault-import`) is
+//! partially-verified success. The caller (`lenslocker-import`) is
 //! responsible for leaving the original file untouched when that happens.
 
 pub mod jpeg;
@@ -21,7 +21,7 @@ pub mod tiff;
 
 /// The four source formats §4 defines a conversion path for. Every other
 /// format (WebP, GIF, AVIF, RAW, unrecognized) has no path at all —
-/// `lumenvault-import` never calls into this crate for them.
+/// `lenslocker-import` never calls into this crate for them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ConvertibleFormat {
     Jpeg,
@@ -76,7 +76,7 @@ pub enum SkipReason {
 pub type ConversionOutcome = Result<Converted, SkipReason>;
 
 /// Internal-error type for conditions that aren't a §4 verification
-/// failure but a genuine I/O/library-usage problem. `lumenvault-import`
+/// failure but a genuine I/O/library-usage problem. `lenslocker-import`
 /// treats this the same as a [`SkipReason`] — never touch the original —
 /// but it's kept distinct because it signals a bug or environment problem,
 /// not an expected "this file can't be converted".

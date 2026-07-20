@@ -354,7 +354,7 @@ mod tests {
                 .unwrap();
             image
                 .encoder()
-                .write_tag(Tag::Make, "LumenVault Test Co")
+                .write_tag(Tag::Make, "LensLocker Test Co")
                 .unwrap();
             image.write_data(&pixels).unwrap();
         }
@@ -392,7 +392,7 @@ mod tests {
             .unwrap()
             .into_string()
             .unwrap();
-        assert_eq!(make, "LumenVault Test Co");
+        assert_eq!(make, "LensLocker Test Co");
         let exif_dir = exif_directory(&mut decoder)
             .unwrap()
             .expect("EXIF sub-IFD must survive");

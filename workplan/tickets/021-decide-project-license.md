@@ -1,6 +1,6 @@
 ---
 id: 021
-title: "Decide LumenVault's project license"
+title: "Decide LensLocker's project license"
 type: workplan:grilling
 status: closed
 assignee: chris
@@ -10,7 +10,7 @@ blocked-by: [020]
 ## Question
 
 Given [Survey GPL-3.0 linkage implications of jpegxl-rs](020-research-gpl-linkage.md)'s
-findings: what license does LumenVault itself ship under? If GPL-3.0-or-later
+findings: what license does LensLocker itself ship under? If GPL-3.0-or-later
 linkage forces the whole distributed binary into GPL-compatible terms, is that
 acceptable, or does it change the earlier encoder choice — reopening
 [Define the conversion policy](009-conversion-policy.md)'s decision to link
@@ -21,7 +21,7 @@ even a real fork or a non-issue.
 
 ## Resolution
 
-**Dissolved by scope, not chosen.** The owner has clarified LumenVault is a
+**Dissolved by scope, not chosen.** The owner has clarified LensLocker is a
 personal/internal project with no distribution outside themselves — it will never
 be conveyed to anyone else. Per
 [Survey GPL-3.0 linkage implications of jpegxl-rs](020-research-gpl-linkage.md),

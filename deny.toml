@@ -1,4 +1,4 @@
-# cargo-deny config — the automated backstop for LumenVault's zero-network
+# cargo-deny config — the automated backstop for LensLocker's zero-network
 # guarantee. Per workplan/SPEC.md §8.2: bans network crates transitively.
 # Run via `cargo deny check`. This is layer 2 of 4 in the offline-enforcement
 # checklist (see §8) — the others (WebView2 COM settings, WFP audit, firewall
@@ -8,7 +8,7 @@
 ignore = [
     # Deep in tauri-utils' own dependency chain (urlpattern -> unic-ucd-ident
     # -> unic-ucd-version -> unic-char-property/-range/-common), not
-    # something LumenVault can fix by changing its own code. No safe upgrade
+    # something LensLocker can fix by changing its own code. No safe upgrade
     # exists per the advisories themselves. Revisit when Tauri drops its
     # urlpattern dependency or migrates off the unmaintained unic-* crates.
     { id = "RUSTSEC-2025-0081", reason = "transitive via tauri-utils' urlpattern dep; no safe upgrade available" },
@@ -24,7 +24,7 @@ all-features = true
 # actual shipping target. Without this, cargo-deny evaluates Tauri's
 # mobile-target dependencies too (Android/iOS pull in reqwest+hyper for
 # their own asset loading, entirely absent from a Windows build) and the
-# ban list would be checking a graph LumenVault never actually links.
+# ban list would be checking a graph LensLocker never actually links.
 targets = ["x86_64-pc-windows-msvc"]
 
 [bans]
@@ -42,7 +42,7 @@ deny = [
     { crate = "isahc" },
     { crate = "surf" },
     { crate = "attohttpc" },
-    # Lower-level networking — nothing in LumenVault's own stack needs raw
+    # Lower-level networking — nothing in LensLocker's own stack needs raw
     # sockets; if a future dependency legitimately does, add it here with a
     # `reason` rather than silently allowing the ban to lapse.
     { crate = "mio" },
@@ -81,7 +81,7 @@ allow = [
 ]
 
 [licenses.private]
-# LumenVault's own crates are `publish = false` (workspace.package) — personal,
+# LensLocker's own crates are `publish = false` (workspace.package) — personal,
 # never published. Don't demand an SPDX license field on our own code.
 ignore = true
 

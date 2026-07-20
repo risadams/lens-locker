@@ -1,5 +1,5 @@
 [package]
-name = "lumenvault-import"
+name = "lenslocker-import"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -8,11 +8,11 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
-lumenvault-catalog = { version = "0.1.0", path = "../catalog" }
-lumenvault-convert = { version = "0.1.0", path = "../convert" }
-lumenvault-decode = { version = "0.1.0", path = "../decode" }
-lumenvault-hash = { version = "0.1.0", path = "../hash" }
-lumenvault-xmp = { version = "0.1.0", path = "../xmp" }
+lenslocker-catalog = { version = "0.1.0", path = "../catalog" }
+lenslocker-convert = { version = "0.1.0", path = "../convert" }
+lenslocker-decode = { version = "0.1.0", path = "../decode" }
+lenslocker-hash = { version = "0.1.0", path = "../hash" }
+lenslocker-xmp = { version = "0.1.0", path = "../xmp" }
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 thiserror = "2.0.18"
 walkdir = "2.5.0"

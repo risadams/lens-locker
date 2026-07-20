@@ -1,9 +1,9 @@
-//! Milestone 1 import CLI: `lumenvault-import <source-dir> <library-root>`.
+//! Milestone 1 import CLI: `lenslocker-import <source-dir> <library-root>`.
 //! No flags — deliberately minimal for a milestone with no UI yet.
 //!
 //! Prints one flushed line per file processed, so a test harness (or a
 //! human) can observe progress without waiting for the whole batch. An
-//! optional `LUMENVAULT_IMPORT_DELAY_MS` env var sleeps that long after each
+//! optional `LENSLOCKER_IMPORT_DELAY_MS` env var sleeps that long after each
 //! file — used by the crash-recovery integration test to reliably kill the
 //! process partway through a batch; unset (0) in normal use.
 
@@ -11,7 +11,7 @@ use std::io::Write;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use lumenvault_import::{
+use lenslocker_import::{
     FileOutcome, ImportContext, LibraryPaths, conversion_enabled, ensure_library, import_directory,
     start_or_resume_batch, sweep_expired_quarantine,
 };
@@ -20,19 +20,19 @@ use rusqlite::Connection;
 fn main() -> std::process::ExitCode {
     let args: Vec<String> = std::env::args().collect();
     let [_, source_dir, library_root] = args.as_slice() else {
-        eprintln!("usage: lumenvault-import <source-dir> <library-root>");
+        eprintln!("usage: lenslocker-import <source-dir> <library-root>");
         return std::process::ExitCode::FAILURE;
     };
 
     if let Err(e) = run(PathBuf::from(source_dir), PathBuf::from(library_root)) {
-        eprintln!("lumenvault-import: {e}");
+        eprintln!("lenslocker-import: {e}");
         return std::process::ExitCode::FAILURE;
     }
     std::process::ExitCode::SUCCESS
 }
 
 fn run(source_dir: PathBuf, library_root: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
-    let delay = std::env::var("LUMENVAULT_IMPORT_DELAY_MS")
+    let delay = std::env::var("LENSLOCKER_IMPORT_DELAY_MS")
         .ok()
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(0);
@@ -41,7 +41,7 @@ fn run(source_dir: PathBuf, library_root: PathBuf) -> Result<(), Box<dyn std::er
     let paths = LibraryPaths::new(&library_root);
 
     let mut conn = Connection::open(paths.catalog_db())?;
-    lumenvault_catalog::migrate(&mut conn)?;
+    lenslocker_catalog::migrate(&mut conn)?;
 
     let purged = sweep_expired_quarantine(&conn)?;
     if purged > 0 {

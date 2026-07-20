@@ -2263,6 +2263,103 @@ dependencies = [
 ]
 
 [[package]]
+name = "lenslocker-app"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "lenslocker-catalog",
+ "lenslocker-import",
+ "lenslocker-xmp",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tauri",
+ "tauri-build",
+ "tauri-plugin-dialog",
+ "tauri-plugin-opener",
+ "tempfile",
+ "thiserror 2.0.18",
+ "webview2-com",
+ "windows",
+]
+
+[[package]]
+name = "lenslocker-catalog"
+version = "0.1.0"
+dependencies = [
+ "rusqlite",
+ "rusqlite_migration",
+]
+
+[[package]]
+name = "lenslocker-convert"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "jpegxl-rs",
+ "jxl-oxide",
+ "png 0.18.1",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tiff",
+]
+
+[[package]]
+name = "lenslocker-core"
+version = "0.1.0"
+
+[[package]]
+name = "lenslocker-decode"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "jpegxl-rs",
+ "jxl-oxide",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
+name = "lenslocker-hash"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "image",
+ "tempfile",
+]
+
+[[package]]
+name = "lenslocker-import"
+version = "0.1.0"
+dependencies = [
+ "image",
+ "lenslocker-catalog",
+ "lenslocker-convert",
+ "lenslocker-decode",
+ "lenslocker-hash",
+ "lenslocker-xmp",
+ "rusqlite",
+ "tempfile",
+ "thiserror 2.0.18",
+ "walkdir",
+]
+
+[[package]]
+name = "lenslocker-raw-worker"
+version = "0.1.0"
+
+[[package]]
+name = "lenslocker-xmp"
+version = "0.1.0"
+dependencies = [
+ "lenslocker-catalog",
+ "quick-xml",
+ "rusqlite",
+ "tempfile",
+ "thiserror 2.0.18",
+]
+
+[[package]]
 name = "libappindicator"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2357,103 +2454,6 @@ name = "log"
 version = "0.4.33"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0ceec5bc11778974d1bcb055b18002eba7f4b3518b6a0081b3af5f21666da9ad"
-
-[[package]]
-name = "lumenvault-app"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "lumenvault-catalog",
- "lumenvault-import",
- "lumenvault-xmp",
- "rusqlite",
- "serde",
- "serde_json",
- "tauri",
- "tauri-build",
- "tauri-plugin-dialog",
- "tauri-plugin-opener",
- "tempfile",
- "thiserror 2.0.18",
- "webview2-com",
- "windows",
-]
-
-[[package]]
-name = "lumenvault-catalog"
-version = "0.1.0"
-dependencies = [
- "rusqlite",
- "rusqlite_migration",
-]
-
-[[package]]
-name = "lumenvault-convert"
-version = "0.1.0"
-dependencies = [
- "image",
- "jpegxl-rs",
- "jxl-oxide",
- "png 0.18.1",
- "tempfile",
- "thiserror 2.0.18",
- "tiff",
-]
-
-[[package]]
-name = "lumenvault-core"
-version = "0.1.0"
-
-[[package]]
-name = "lumenvault-decode"
-version = "0.1.0"
-dependencies = [
- "image",
- "jpegxl-rs",
- "jxl-oxide",
- "tempfile",
- "thiserror 2.0.18",
-]
-
-[[package]]
-name = "lumenvault-hash"
-version = "0.1.0"
-dependencies = [
- "blake3",
- "image",
- "tempfile",
-]
-
-[[package]]
-name = "lumenvault-import"
-version = "0.1.0"
-dependencies = [
- "image",
- "lumenvault-catalog",
- "lumenvault-convert",
- "lumenvault-decode",
- "lumenvault-hash",
- "lumenvault-xmp",
- "rusqlite",
- "tempfile",
- "thiserror 2.0.18",
- "walkdir",
-]
-
-[[package]]
-name = "lumenvault-raw-worker"
-version = "0.1.0"
-
-[[package]]
-name = "lumenvault-xmp"
-version = "0.1.0"
-dependencies = [
- "lumenvault-catalog",
- "quick-xml",
- "rusqlite",
- "tempfile",
- "thiserror 2.0.18",
-]
 
 [[package]]
 name = "markup5ever"

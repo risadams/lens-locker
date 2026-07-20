@@ -1,8 +1,8 @@
 {
   "$schema": "https://schema.tauri.app/config/2",
-  "productName": "LumenVault",
+  "productName": "LensLocker",
   "version": "0.1.0",
-  "identifier": "com.lumenvault.app",
+  "identifier": "com.lenslocker.app",
   "build": {
     "frontendDist": "../ui"
   },
@@ -11,7 +11,7 @@
     "windows": [
       {
         "create": false,
-        "title": "LumenVault",
+        "title": "LensLocker",
         "width": 1200,
         "height": 800
       }

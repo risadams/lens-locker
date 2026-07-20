@@ -11,7 +11,7 @@ blocked-by: [006]
 
 Tauri (webview, best UI velocity, larger attack surface to neutralize) vs a
 pure-Rust GUI (egui/iced/Slint — smaller offline surface, less polish headroom):
-which shell does LumenVault commit to for v1? Decide with the survey findings from
+which shell does LensLocker commit to for v1? Decide with the survey findings from
 [Survey Rust GUI shells for an offline image grid](006-research-gui-shells.md) in
 hand, weighing: thumbnail-grid performance at 100k+ images, offline
 enforceability, binary size, and how much UI iteration speed matters to the owner.

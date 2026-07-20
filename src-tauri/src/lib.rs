@@ -1,4 +1,4 @@
-//! LumenVault Tauri app shell: real commands binding the domain crates to
+//! LensLocker Tauri app shell: real commands binding the domain crates to
 //! the UI, per workplan/SPEC.md §2/§9, Milestone 5 — and, as of Milestone
 //! 5.5, first-run vault setup.
 //!
@@ -34,7 +34,7 @@ use std::sync::Mutex;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64_STANDARD;
-use lumenvault_catalog::{GridImage, ImageFilters, SortOrder};
+use lenslocker_catalog::{GridImage, ImageFilters, SortOrder};
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
@@ -44,7 +44,7 @@ mod webview2_hardening;
 
 struct AppState {
     conn: Mutex<Connection>,
-    paths: lumenvault_import::LibraryPaths,
+    paths: lenslocker_import::LibraryPaths,
     library_id: i64,
 }
 
@@ -75,7 +75,7 @@ struct AppState {
 /// apart from "the first one is stuck." `cancel_import` sets this flag;
 /// `import_directory`'s per-file callback checks it and stops the walk
 /// early, safe by the crate's own crash-safety design (see
-/// `lumenvault_import::import_directory`'s doc) — a canceled import needs
+/// `lenslocker_import::import_directory`'s doc) — a canceled import needs
 /// no special cleanup, it's resumable exactly like a killed process would
 /// leave it.
 #[derive(Default)]
@@ -142,9 +142,9 @@ enum CmdError {
     #[error(transparent)]
     Sqlite(#[from] rusqlite::Error),
     #[error(transparent)]
-    Import(#[from] lumenvault_import::ImportError),
+    Import(#[from] lenslocker_import::ImportError),
     #[error(transparent)]
-    Xmp(#[from] lumenvault_xmp::XmpError),
+    Xmp(#[from] lenslocker_xmp::XmpError),
     #[error(transparent)]
     Io(#[from] std::io::Error),
     #[error("image {0} not found")]
@@ -160,10 +160,10 @@ enum CmdError {
     #[error("background task panicked: {0}")]
     TaskPanicked(String),
     #[error(
-        "a LumenVault library already exists at this location — open it instead of creating a new one"
+        "a LensLocker library already exists at this location — open it instead of creating a new one"
     )]
     LibraryAlreadyExists,
-    #[error("no LumenVault library was found at this location")]
+    #[error("no LensLocker library was found at this location")]
     LibraryNotFound,
     #[error("could not set up the catalog database: {0}")]
     Migration(String),
@@ -273,7 +273,7 @@ fn with_ready<T>(
 /// default — `app.dialog().file()` alone does *not* make the dialog
 /// application-modal to any window. On Windows that means the picker can
 /// end up behind the main window with no OS-enforced link between the two:
-/// the user can keep interacting with (and closing) LumenVault's own modals
+/// the user can keep interacting with (and closing) LensLocker's own modals
 /// while the real native dialog is still open elsewhere, waiting on a
 /// choice that never comes — the backend command stays blocked on it
 /// forever, and any UI state gated on that command (e.g. a disabled
@@ -299,7 +299,7 @@ fn list_images(
 ) -> CmdResult<ListImagesResult> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        let (items, total) = lumenvault_catalog::list_images(
+        let (items, total) = lenslocker_catalog::list_images(
             &conn,
             &filters.into(),
             parse_sort(&sort),
@@ -342,7 +342,7 @@ fn get_image_detail(
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
         let d =
-            lumenvault_catalog::get_image_detail(&conn, id)?.ok_or(CmdError::ImageNotFound(id))?;
+            lenslocker_catalog::get_image_detail(&conn, id)?.ok_or(CmdError::ImageNotFound(id))?;
         Ok(ImageDetailDto {
             id: d.id,
             filename: d.filename,
@@ -365,7 +365,7 @@ fn get_image_detail(
 
 /// Renders `id`'s stored blob as a full-resolution, browser-displayable
 /// JPEG and returns it as a `data:` URL — generated fresh on every call,
-/// nothing is written to disk (see `lumenvault_import::render_full_preview_bytes`'s
+/// nothing is written to disk (see `lenslocker_import::render_full_preview_bytes`'s
 /// doc for why: an earlier design cached this to disk at import time and it
 /// roughly doubled the vault's footprint for photos nobody ever opened
 /// full-size). Run via `spawn_blocking` since decode+encode is real,
@@ -377,7 +377,7 @@ async fn get_full_preview(app: tauri::AppHandle, id: i64) -> CmdResult<Option<St
     tauri::async_runtime::spawn_blocking(move || {
         with_ready(&app.state::<Mutex<LibraryState>>(), |app_state| {
             let conn = app_state.conn.lock().unwrap();
-            let bytes = lumenvault_import::render_full_preview_bytes(&conn, id)?;
+            let bytes = lenslocker_import::render_full_preview_bytes(&conn, id)?;
             Ok(bytes.map(|b| format!("data:image/jpeg;base64,{}", BASE64_STANDARD.encode(b))))
         })
     })
@@ -389,8 +389,8 @@ async fn get_full_preview(app: tauri::AppHandle, id: i64) -> CmdResult<Option<St
 fn add_tag(state: tauri::State<Mutex<LibraryState>>, image_id: i64, tag: String) -> CmdResult<()> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        lumenvault_catalog::add_tag(&conn, image_id, &tag)?;
-        lumenvault_xmp::sync_sidecar(&conn, image_id)?;
+        lenslocker_catalog::add_tag(&conn, image_id, &tag)?;
+        lenslocker_xmp::sync_sidecar(&conn, image_id)?;
         Ok(())
     })
 }
@@ -403,8 +403,8 @@ fn remove_tag(
 ) -> CmdResult<()> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        lumenvault_catalog::remove_tag(&conn, image_id, &tag)?;
-        lumenvault_xmp::sync_sidecar(&conn, image_id)?;
+        lenslocker_catalog::remove_tag(&conn, image_id, &tag)?;
+        lenslocker_xmp::sync_sidecar(&conn, image_id)?;
         Ok(())
     })
 }
@@ -419,7 +419,7 @@ struct TagCountDto {
 fn list_tags(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<Vec<TagCountDto>> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        Ok(lumenvault_catalog::list_tags(&conn)?
+        Ok(lenslocker_catalog::list_tags(&conn)?
             .into_iter()
             .map(|t| TagCountDto {
                 name: t.name,
@@ -440,7 +440,7 @@ struct SourceCountDto {
 fn list_sources(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<Vec<SourceCountDto>> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        Ok(lumenvault_catalog::list_sources(&conn)?
+        Ok(lenslocker_catalog::list_sources(&conn)?
             .into_iter()
             .map(|s| SourceCountDto {
                 source_root: s.source_root,
@@ -465,7 +465,7 @@ fn list_review_queue(
 ) -> CmdResult<Vec<ReviewQueueEntryDto>> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        Ok(lumenvault_catalog::list_review_queue(&conn)?
+        Ok(lenslocker_catalog::list_review_queue(&conn)?
             .into_iter()
             .map(|e| ReviewQueueEntryDto {
                 queue_id: e.queue_id,
@@ -487,12 +487,12 @@ fn resolve_review_pair(
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
         let action = match action.as_str() {
-            "merge" => lumenvault_import::ReviewAction::Merge {
+            "merge" => lenslocker_import::ReviewAction::Merge {
                 keeper_id: keeper_id.ok_or(CmdError::MissingKeeper)?,
             },
-            _ => lumenvault_import::ReviewAction::Dismiss,
+            _ => lenslocker_import::ReviewAction::Dismiss,
         };
-        lumenvault_import::resolve_review_pair(&conn, &app_state.paths, queue_id, action)?;
+        lenslocker_import::resolve_review_pair(&conn, &app_state.paths, queue_id, action)?;
         Ok(())
     })
 }
@@ -502,7 +502,7 @@ fn copy_file_path(state: tauri::State<Mutex<LibraryState>>, id: i64) -> CmdResul
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
         let d =
-            lumenvault_catalog::get_image_detail(&conn, id)?.ok_or(CmdError::ImageNotFound(id))?;
+            lenslocker_catalog::get_image_detail(&conn, id)?.ok_or(CmdError::ImageNotFound(id))?;
         Ok(d.stored_path)
     })
 }
@@ -531,7 +531,7 @@ struct ImportResultDto {
 /// Sets the flag `import_directory`'s per-file callback checks after every
 /// file, stopping the walk early — safe with no cleanup needed, since a
 /// canceled import is resumable exactly like one left behind by a killed
-/// process (see `lumenvault_import::import_directory`'s doc). A no-op if no
+/// process (see `lenslocker_import::import_directory`'s doc). A no-op if no
 /// import is currently running. Cannot close a native folder-picker dialog
 /// that hasn't resolved yet (there's no API for that here) — it only stops
 /// an already-running import loop, which is the case the frontend's Cancel
@@ -583,7 +583,7 @@ async fn import_directory(
         .await
         .map_err(|e| CmdError::TaskPanicked(e.to_string()))??;
 
-    let total = lumenvault_import::count_importable_files(&source_root)?;
+    let total = lenslocker_import::count_importable_files(&source_root)?;
     let _ = app.emit(
         "import-progress",
         ImportProgressPayload {
@@ -597,14 +597,14 @@ async fn import_directory(
     tauri::async_runtime::spawn_blocking(move || {
         with_ready(&import_app.state::<Mutex<LibraryState>>(), |app_state| {
             let conn = app_state.conn.lock().unwrap();
-            let batch_id = lumenvault_import::start_or_resume_batch(
+            let batch_id = lenslocker_import::start_or_resume_batch(
                 &conn,
                 app_state.library_id,
                 &source_root,
             )?;
             let conversion_enabled =
-                lumenvault_import::conversion_enabled(&conn, app_state.library_id)?;
-            let ctx = lumenvault_import::ImportContext {
+                lenslocker_import::conversion_enabled(&conn, app_state.library_id)?;
+            let ctx = lenslocker_import::ImportContext {
                 conn: &conn,
                 paths: &app_state.paths,
                 library_id: app_state.library_id,
@@ -616,9 +616,9 @@ async fn import_directory(
             let mut current = 0usize;
             let mut imported = 0usize;
             let mut canceled = false;
-            lumenvault_import::import_directory(&ctx, &source_root, |_path, outcome| {
+            lenslocker_import::import_directory(&ctx, &source_root, |_path, outcome| {
                 current += 1;
-                if matches!(outcome, lumenvault_import::FileOutcome::Imported { .. }) {
+                if matches!(outcome, lenslocker_import::FileOutcome::Imported { .. }) {
                     imported += 1;
                 }
                 let _ = import_app.emit(
@@ -665,7 +665,7 @@ async fn export_image(
 
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        let dest = lumenvault_import::export_image(&conn, id, &dest_dir)?;
+        let dest = lenslocker_import::export_image(&conn, id, &dest_dir)?;
         Ok(dest.to_string_lossy().into_owned())
     })
 }
@@ -686,7 +686,7 @@ struct AppSettingsDto {
 fn get_app_settings(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<AppSettingsDto> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        let s = lumenvault_catalog::get_app_settings(&conn)?;
+        let s = lenslocker_catalog::get_app_settings(&conn)?;
         Ok(AppSettingsDto {
             hamming_threshold: s.hamming_threshold,
             retention_days: s.retention_days,
@@ -702,9 +702,9 @@ fn update_app_settings(
 ) -> CmdResult<()> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        lumenvault_catalog::update_app_settings(
+        lenslocker_catalog::update_app_settings(
             &conn,
-            lumenvault_catalog::AppSettings {
+            lenslocker_catalog::AppSettings {
                 hamming_threshold,
                 retention_days,
             },
@@ -760,23 +760,23 @@ fn write_bootstrap_config_at(config_path: &Path, root: &Path) -> CmdResult<()> {
 /// `libraries` row exists — the shared plumbing behind both "app boots with
 /// a previously-configured library" and "user picks an existing vault in
 /// the first-run screen." Not used for the "create a brand-new vault"
-/// path — that needs [`lumenvault_import::create_library_row`] instead, to
+/// path — that needs [`lenslocker_import::create_library_row`] instead, to
 /// set `conversion_enabled` at creation per ticket 009.
 fn try_init_state(root: &Path) -> CmdResult<AppState> {
-    let paths = lumenvault_import::LibraryPaths::new(root);
+    let paths = lenslocker_import::LibraryPaths::new(root);
     std::fs::create_dir_all(root)?;
     let mut conn = Connection::open(paths.catalog_db())?;
-    lumenvault_catalog::migrate(&mut conn).map_err(|e| CmdError::Migration(e.to_string()))?;
-    let library_id = lumenvault_import::ensure_library(&conn, root)?;
+    lenslocker_catalog::migrate(&mut conn).map_err(|e| CmdError::Migration(e.to_string()))?;
+    let library_id = lenslocker_import::ensure_library(&conn, root)?;
     // Launch-only retention sweep (workplan/SPEC.md §3).
-    let _ = lumenvault_import::sweep_expired_quarantine(&conn);
+    let _ = lenslocker_import::sweep_expired_quarantine(&conn);
     // Launch-only cleanup: reclaim any preview_full files/rows left behind
     // by the old eager-generation design (see `sweep_stale_previews`'s doc).
-    let _ = lumenvault_import::sweep_stale_previews(&conn);
+    let _ = lenslocker_import::sweep_stale_previews(&conn);
     // Launch-only repair: images left with no grid256 thumbnail by a fixed
     // bug (see `backfill_missing_grid_thumbnails`'s doc) — a crash between
     // the images row insert and thumbnail generation used to be permanent.
-    let _ = lumenvault_import::backfill_missing_grid_thumbnails(&conn, &paths);
+    let _ = lenslocker_import::backfill_missing_grid_thumbnails(&conn, &paths);
     Ok(AppState {
         conn: Mutex::new(conn),
         paths,
@@ -918,7 +918,7 @@ fn free_space_bytes(path: &Path) -> CmdResult<u64> {
 
 #[cfg(not(windows))]
 fn free_space_bytes(_path: &Path) -> CmdResult<u64> {
-    // LumenVault ships Windows-only (workplan/SPEC.md); this stub exists
+    // LensLocker ships Windows-only (workplan/SPEC.md); this stub exists
     // only so the crate still type-checks on other hosts.
     Ok(0)
 }
@@ -954,11 +954,11 @@ fn create_library_at(root: &Path, conversion_enabled: bool) -> CmdResult<AppStat
     }
 
     std::fs::create_dir_all(root)?;
-    let paths = lumenvault_import::LibraryPaths::new(root);
+    let paths = lenslocker_import::LibraryPaths::new(root);
     let mut conn = Connection::open(paths.catalog_db())?;
-    lumenvault_catalog::migrate(&mut conn).map_err(|e| CmdError::Migration(e.to_string()))?;
-    let library_id = lumenvault_import::create_library_row(&conn, root, conversion_enabled)?;
-    let _ = lumenvault_import::sweep_expired_quarantine(&conn);
+    lenslocker_catalog::migrate(&mut conn).map_err(|e| CmdError::Migration(e.to_string()))?;
+    let library_id = lenslocker_import::create_library_row(&conn, root, conversion_enabled)?;
+    let _ = lenslocker_import::sweep_expired_quarantine(&conn);
 
     Ok(AppState {
         conn: Mutex::new(conn),
@@ -1227,28 +1227,28 @@ mod tests {
         let app_state = create_library_at(&dir.path().join("vault"), true).unwrap();
         let conn = app_state.conn.lock().unwrap();
 
-        let before = lumenvault_catalog::get_app_settings(&conn).unwrap();
+        let before = lenslocker_catalog::get_app_settings(&conn).unwrap();
         assert_eq!(
             before,
-            lumenvault_catalog::AppSettings {
+            lenslocker_catalog::AppSettings {
                 hamming_threshold: 5,
                 retention_days: 30
             }
         );
 
-        lumenvault_catalog::update_app_settings(
+        lenslocker_catalog::update_app_settings(
             &conn,
-            lumenvault_catalog::AppSettings {
+            lenslocker_catalog::AppSettings {
                 hamming_threshold: 12,
                 retention_days: 7,
             },
         )
         .unwrap();
-        let after = lumenvault_catalog::get_app_settings(&conn).unwrap();
+        let after = lenslocker_catalog::get_app_settings(&conn).unwrap();
 
         assert_eq!(
             after,
-            lumenvault_catalog::AppSettings {
+            lenslocker_catalog::AppSettings {
                 hamming_threshold: 12,
                 retention_days: 7
             }

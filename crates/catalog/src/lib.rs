@@ -27,9 +27,9 @@ pub fn migrate(conn: &mut Connection) -> rusqlite_migration::Result<()> {
 // ── Tags (workplan/SPEC.md §7, Milestone 4) ─────────────────────────────
 //
 // "Manual tagging via direct catalog calls" per the Milestone 4 line — no
-// UI yet, just the CRUD this crate's callers (`lumenvault-xmp`'s sidecar
+// UI yet, just the CRUD this crate's callers (`lenslocker-xmp`'s sidecar
 // sync, and eventually the UI) need. Kept pure SQL, no file I/O, matching
-// this crate's existing character — sidecar mirroring is `lumenvault-xmp`'s
+// this crate's existing character — sidecar mirroring is `lenslocker-xmp`'s
 // job, not this crate's.
 
 /// Finds or creates the `tags` row for `name` and returns its id.
@@ -73,7 +73,7 @@ pub fn remove_tag(conn: &Connection, image_id: i64, tag_name: &str) -> rusqlite:
 }
 
 /// The tags currently applied to `image_id`, sorted alphabetically —
-/// deterministic ordering so sidecar output (`lumenvault-xmp`) doesn't
+/// deterministic ordering so sidecar output (`lenslocker-xmp`) doesn't
 /// churn on every sync from a nondeterministic row order.
 pub fn tags_for_image(conn: &Connection, image_id: i64) -> rusqlite::Result<Vec<String>> {
     let mut stmt = conn.prepare(

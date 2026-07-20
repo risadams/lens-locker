@@ -12,7 +12,7 @@ blocked-by: []
 Where do tags and edited metadata live: SQLite only (fast, but locked into the app),
 XMP sidecar files in the managed store, or written back into image files
 (EXIF/XMP embed — mutates managed files)? What must survive a future export out of
-LumenVault, and what must survive format conversion at import? Does the managed
+LensLocker, and what must survive format conversion at import? Does the managed
 store remain meaningful if the catalog database is lost — is that a design
 requirement (rebuildable catalog) or not?
 

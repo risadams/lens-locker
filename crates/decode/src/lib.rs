@@ -1,5 +1,5 @@
 //! Format decode: image crate, jxl-oxide, re_rav1d/dav1d, resvg, Windows WIC (HEIC).
-//! Camera RAW is deliberately excluded — see `lumenvault-raw-worker`.
+//! Camera RAW is deliberately excluded — see `lenslocker-raw-worker`.
 //! Per workplan/SPEC.md §5.
 //!
 //! Milestone 1 implemented standard-format probing for JPEG, PNG, WebP, GIF,
@@ -7,18 +7,18 @@
 //! deliberate, narrow extension (not the full §5 matrix, which still leaves
 //! RAW, HEIC, AVIF, JPEG XL, and SVG for later milestones): §4's conversion
 //! policy defines a TIFF→TIFF recompression path, and without decode-
-//! validating TIFF here it could never reach `lumenvault-convert` through
+//! validating TIFF here it could never reach `lenslocker-convert` through
 //! the real import pipeline. This is a genuine ambiguity §4 doesn't
-//! resolve directly (only `lumenvault-convert`'s scope is named in the
+//! resolve directly (only `lenslocker-convert`'s scope is named in the
 //! Milestone 2 line) — flagged here rather than silently assumed.
 //!
 //! Milestone 4 adds JPEG XL decode ([`StandardFormat::Jxl`], via
-//! `jxl-oxide`) — needed for `lumenvault-import`'s rebuild-from-sidecars
+//! `jxl-oxide`) — needed for `lenslocker-import`'s rebuild-from-sidecars
 //! recovery path (workplan/SPEC.md §7): some blobs in the store are `.jxl`
 //! (Milestone 2's conversion output), and rebuilding `perceptual_hash` for
 //! them after the catalog is lost requires actually decoding those pixels,
 //! not just re-hashing the file's raw bytes. This reuses the same
-//! `jxl-oxide` version `lumenvault-convert` already depends on (there for
+//! `jxl-oxide` version `lenslocker-convert` already depends on (there for
 //! metadata-readback verification) — the same kind of narrow,
 //! spec-consistent extension Milestone 2 made when it added TIFF here.
 //!
@@ -26,9 +26,9 @@
 //! of common camera RAW formats, **no pixel decode attempted**. This is a
 //! deliberate, narrow stand-in for real RAW support: §5's format matrix
 //! promises "Full" v1 support for camera RAW via the `rawler` crate in an
-//! isolated `lumenvault-raw-worker` process, but no milestone (0-7) in
+//! isolated `lenslocker-raw-worker` process, but no milestone (0-7) in
 //! workplan/SPEC.md Part 2 ever schedules building that integration —
-//! `lumenvault-raw-worker` is still the Milestone 0 stub. Milestone 3's own
+//! `lenslocker-raw-worker` is still the Milestone 0 stub. Milestone 3's own
 //! exit criteria requires testing "a RAW+JPEG pair," which only needs
 //! RAW+JPEG *pairing* (filename stem matching, §3 step 2) to work, not full
 //! RAW pixel decode. Recognizing the extension is enough for that: a
@@ -62,7 +62,7 @@ pub enum StandardFormat {
     Bmp,
     Tiff,
     /// JPEG XL — decode only (via `jxl-oxide`); encoding is
-    /// `lumenvault-convert`'s job (§4). Not detected through the `image`
+    /// `lenslocker-convert`'s job (§4). Not detected through the `image`
     /// crate's format-guessing (it has no JXL support at all), so
     /// [`probe`] falls back to a dedicated JXL attempt when the standard
     /// path finds no recognizable signature — see [`probe`]'s doc comment.
@@ -105,7 +105,7 @@ pub struct Probe {
     /// The fully decoded image — probing already does a full decode (see
     /// `probe`'s doc comment), so this is free to carry forward rather than
     /// re-decoding later. Milestone 3 uses it to compute the perceptual
-    /// hash (`lumenvault-hash::perceptual_hash`) without a second decode.
+    /// hash (`lenslocker-hash::perceptual_hash`) without a second decode.
     pub image: image::DynamicImage,
 }
 
@@ -351,7 +351,7 @@ pub fn raw_extension(path: &Path) -> Option<&'static str> {
 }
 
 /// Whether `format` (an `images.original_format` value, already lowercase)
-/// is one of [`RAW_EXTENSIONS`] — used by `lumenvault-import`'s RAW+JPEG
+/// is one of [`RAW_EXTENSIONS`] — used by `lenslocker-import`'s RAW+JPEG
 /// pairing to tell which side of a candidate pair is the RAW file, without
 /// re-deriving the extension from a path a second time.
 pub fn is_raw_extension(format: &str) -> bool {
@@ -492,7 +492,7 @@ mod tests {
     }
 
     /// Encodes a real JXL fixture via `jpegxl-rs` (the same encoder
-    /// `lumenvault-convert` uses in production) — proving `probe`'s JXL
+    /// `lenslocker-convert` uses in production) — proving `probe`'s JXL
     /// path decodes an actual, real-world-shaped JXL file, not just bytes
     /// this test happens to hand-construct.
     fn write_jxl(dir: &std::path::Path, name: &str, width: u32, height: u32) -> std::path::PathBuf {

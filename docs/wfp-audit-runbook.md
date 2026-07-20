@@ -1,7 +1,7 @@
 # Runtime WFP connection-audit runbook
 
 Layer 3 of `workplan/SPEC.md` §8's offline-enforcement package (Milestone 6):
-empirical proof, not just static analysis, that LumenVault never opens an
+empirical proof, not just static analysis, that LensLocker never opens an
 outbound network connection. cargo-deny (§8.2) can only see the declared
 dependency graph — it cannot catch a raw `windows-sys` socket call, a
 shelled-out `curl.exe`, or WebView2's own background traffic. Windows
@@ -45,7 +45,7 @@ Milestone 2 used for its Clang-compiler gap).
 From an **elevated** PowerShell prompt, at the repo root:
 
 ```powershell
-cd A:\LumenVault
+cd A:\LensLocker
 .\docs\verify-wfp-audit.ps1
 ```
 
@@ -58,13 +58,13 @@ This will:
    (`auditpol /set /subcategory:"Filtering Platform Connection"
    /success:enable /failure:enable`).
 3. Wait `-DurationSeconds` (default 300s) for you to drive the **real
-   compiled app** — launch `target\release\lumenvault-app.exe` (or the
+   compiled app** — launch `target\release\lenslocker-app.exe` (or the
    installed copy) separately — through every flow: import a folder, browse
    the grid with filters/search, tag an image, resolve a dedupe-review
    merge, export an image, close the app.
 4. Query the `Security` log for event IDs 5156 (WFP permitted a connection)
    and 5157 (WFP blocked one) since the script started, filtered to
-   `lumenvault-app.exe` by matching the event's rendered message text (the
+   `lenslocker-app.exe` by matching the event's rendered message text (the
    `Application:` field WFP always logs — event IDs are the fast/indexed
    filter, the process name match happens client-side since it isn't a
    stable XPath-queryable field across OS builds).
@@ -74,7 +74,7 @@ This will:
 
 ## What "pass" means
 
-**Zero** 5156 and **zero** 5157 events attributed to `lumenvault-app.exe`
+**Zero** 5156 and **zero** 5157 events attributed to `lenslocker-app.exe`
 across the driven window. A *blocked* connection attempt (5157) is still a
 failure, not a partial success — "100% offline" (`workplan/SPEC.md` §1) means
 the app never tries, not that a firewall caught it when it did. (The

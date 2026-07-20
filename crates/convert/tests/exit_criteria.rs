@@ -16,7 +16,7 @@
 
 use std::io::Cursor;
 
-use lumenvault_convert::{ConvertibleFormat, SkipReason, convert};
+use lenslocker_convert::{ConvertibleFormat, SkipReason, convert};
 
 const CAMERA_LIKE_JPEG: &[u8] = include_bytes!("fixtures/camera_like.jpg");
 
@@ -36,7 +36,7 @@ fn jpeg_with_injected_exif(jpeg: &[u8]) -> Vec<u8> {
         (tag, bytes)
     }
 
-    let make = ascii_entry(0x010F, "LumenVault Test Co");
+    let make = ascii_entry(0x010F, "LensLocker Test Co");
     let model = ascii_entry(0x0110, "Fixture Camera Mk1");
     let date_time = ascii_entry(0x0132, "2026:07:17 12:00:00");
 
@@ -159,7 +159,7 @@ fn real_png_with_exif_and_xmp_round_trips_pixel_exact_and_metadata_survives() {
 
     let exif = {
         // A tiny but real EXIF blob: TIFF header + one-entry IFD0 (Make).
-        let make = b"LumenVault Test Co\0";
+        let make = b"LensLocker Test Co\0";
         let mut tiff = Vec::new();
         tiff.extend_from_slice(b"II");
         tiff.extend_from_slice(&42u16.to_le_bytes());
@@ -255,7 +255,7 @@ fn real_tiff_with_metadata_recompresses_and_metadata_survives() {
             .unwrap();
         image
             .encoder()
-            .write_tag(Tag::Make, "LumenVault Test Co")
+            .write_tag(Tag::Make, "LensLocker Test Co")
             .unwrap();
         image
             .encoder()
@@ -286,7 +286,7 @@ fn real_tiff_with_metadata_recompresses_and_metadata_survives() {
         .unwrap()
         .into_string()
         .unwrap();
-    assert_eq!(make, "LumenVault Test Co");
+    assert_eq!(make, "LensLocker Test Co");
     let xmp = decoder
         .find_tag(Tag::Unknown(700))
         .unwrap()
@@ -330,6 +330,6 @@ fn a_png_with_a_deliberately_unsafe_ancillary_chunk_is_never_converted() {
     );
     // Never-convert is a hard stop: nothing about the file's original bytes
     // is touched by this crate (it only ever returns bytes-or-a-reason —
-    // `lumenvault-import` is what leaves the original file in place, which
+    // `lenslocker-import` is what leaves the original file in place, which
     // is covered by its own test suite).
 }

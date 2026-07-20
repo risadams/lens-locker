@@ -1,4 +1,4 @@
-; LumenVault NSIS installer hooks — layer 4 of workplan/SPEC.md §8's
+; LensLocker NSIS installer hooks — layer 4 of workplan/SPEC.md §8's
 ; offline-enforcement package (Milestone 6): an install-time Windows
 ; Firewall outbound-block rule on the app's own executable.
 ;
@@ -21,19 +21,19 @@
 ; `${MAINBINARYNAME}` / `$INSTDIR` are supplied by Tauri's own NSIS
 ; template at the point these macros are inserted.
 
-!define LUMENVAULT_FW_RULE_NAME "LumenVault - block outbound"
+!define LENSLOCKER_FW_RULE_NAME "LensLocker - block outbound"
 
 !macro NSIS_HOOK_POSTINSTALL
   DetailPrint "Adding Windows Firewall outbound-block rule for $INSTDIR\${MAINBINARYNAME}.exe"
-  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="${LUMENVAULT_FW_RULE_NAME}" dir=out action=block program="$INSTDIR\${MAINBINARYNAME}.exe" enable=yes profile=any'
+  nsExec::ExecToLog 'netsh advfirewall firewall add rule name="${LENSLOCKER_FW_RULE_NAME}" dir=out action=block program="$INSTDIR\${MAINBINARYNAME}.exe" enable=yes profile=any'
   Pop $0
   ${If} $0 != 0
-    DetailPrint "warning: could not add the LumenVault outbound-block firewall rule (netsh exit code $0) — install continues; the app itself has no network-capable code path regardless (workplan/SPEC.md §8.1-3)"
+    DetailPrint "warning: could not add the LensLocker outbound-block firewall rule (netsh exit code $0) — install continues; the app itself has no network-capable code path regardless (workplan/SPEC.md §8.1-3)"
   ${EndIf}
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL
-  DetailPrint "Removing Windows Firewall outbound-block rule for LumenVault"
-  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="${LUMENVAULT_FW_RULE_NAME}" program="$INSTDIR\${MAINBINARYNAME}.exe"'
+  DetailPrint "Removing Windows Firewall outbound-block rule for LensLocker"
+  nsExec::ExecToLog 'netsh advfirewall firewall delete rule name="${LENSLOCKER_FW_RULE_NAME}" program="$INSTDIR\${MAINBINARYNAME}.exe"'
   Pop $0
 !macroend

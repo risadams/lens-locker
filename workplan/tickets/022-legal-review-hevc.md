@@ -16,7 +16,7 @@ Velos Media). The codec research
 ([Survey Windows codec sourcing and licensing](013-research-codec-licensing.md))
 is engineering-facing, not a legal opinion, and explicitly flags this as needing
 real review: confirm with counsel that calling the OS-provided codec — rather than
-bundling one — actually avoids HEVC patent-licensing obligations for LumenVault as
+bundling one — actually avoids HEVC patent-licensing obligations for LensLocker as
 the app vendor, not just for Microsoft/the OEM who already pay into the pools.
 
 This is a HITL task: the agent cannot stand in for counsel here. Resolution is
@@ -27,7 +27,7 @@ drafting — but the spec should note it as an open pre-ship gate.
 
 ## Resolution
 
-**Dissolved by scope, not reviewed.** The owner has clarified LumenVault is
+**Dissolved by scope, not reviewed.** The owner has clarified LensLocker is
 personal/internal use only, never distributed to anyone else. The patent exposure
 this ticket worried about attaches specifically to *distributing* HEVC-decoding
 software — per

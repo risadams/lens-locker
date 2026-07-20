@@ -8,12 +8,12 @@ use std::path::Path;
 
 use image::codecs::jpeg::JpegEncoder;
 use image::{ImageBuffer, ImageEncoder, Rgb};
-use lumenvault_import::{
+use lenslocker_import::{
     ImportContext, LibraryPaths, ensure_library, import_directory, start_or_resume_batch,
 };
 use rusqlite::Connection;
 
-/// A smooth gradient (see `lumenvault-hash`'s own tests for why smooth, not
+/// A smooth gradient (see `lenslocker-hash`'s own tests for why smooth, not
 /// fixed-period) — the base image both near-duplicate fixtures re-encode.
 fn gradient(width: u32, height: u32) -> ImageBuffer<Rgb<u8>, Vec<u8>> {
     ImageBuffer::from_fn(width, height, |x, y| {
@@ -112,7 +112,7 @@ fn importing_a_folder_with_known_dupes_and_a_raw_jpeg_pair_produces_a_correct_qu
     // 4. RAW+JPEG pair, sharing filename stem "IMG_0001". The RAW file is
     // dummy bytes with a recognized extension — this milestone recognizes
     // the extension only, it doesn't decode RAW pixels (see
-    // lumenvault-decode's module doc for why no milestone schedules that).
+    // lenslocker-decode's module doc for why no milestone schedules that).
     std::fs::write(
         source_dir.path().join("IMG_0001.cr2"),
         b"not a real RAW file, dummy bytes for extension recognition",
@@ -128,24 +128,24 @@ fn importing_a_folder_with_known_dupes_and_a_raw_jpeg_pair_produces_a_correct_qu
     let near_1_decoded = image::open(source_dir.path().join("near_1.jpg")).unwrap();
     let near_2_decoded = image::open(source_dir.path().join("near_2.jpg")).unwrap();
     let control_decoded = image::open(source_dir.path().join("control.jpg")).unwrap();
-    let hash_near_1 = lumenvault_hash::perceptual_hash(&near_1_decoded);
-    let hash_near_2 = lumenvault_hash::perceptual_hash(&near_2_decoded);
-    let hash_control = lumenvault_hash::perceptual_hash(&control_decoded);
-    let observed_near_distance = lumenvault_hash::hamming_distance(hash_near_1, hash_near_2);
+    let hash_near_1 = lenslocker_hash::perceptual_hash(&near_1_decoded);
+    let hash_near_2 = lenslocker_hash::perceptual_hash(&near_2_decoded);
+    let hash_control = lenslocker_hash::perceptual_hash(&control_decoded);
+    let observed_near_distance = lenslocker_hash::hamming_distance(hash_near_1, hash_near_2);
     println!("observed near-duplicate Hamming distance: {observed_near_distance}");
     assert!(
         observed_near_distance <= 5,
         "fixture must genuinely land within the default threshold, got {observed_near_distance}"
     );
     assert!(
-        lumenvault_hash::hamming_distance(hash_near_1, hash_control) > 5,
+        lenslocker_hash::hamming_distance(hash_near_1, hash_control) > 5,
         "control image must not accidentally match the near-duplicate pair"
     );
 
     // Run the real import pipeline, once, over the whole fixture folder.
     let paths = LibraryPaths::new(library_dir.path());
     let mut conn = Connection::open(paths.catalog_db()).unwrap();
-    lumenvault_catalog::migrate(&mut conn).unwrap();
+    lenslocker_catalog::migrate(&mut conn).unwrap();
     let library_id = ensure_library(&conn, library_dir.path()).unwrap();
     let batch_id = start_or_resume_batch(&conn, library_id, source_dir.path()).unwrap();
     let ctx = ImportContext {

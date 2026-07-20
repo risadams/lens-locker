@@ -1,22 +1,22 @@
 ---
 label: workplan:map
-title: "LumenVault — route to a locked spec for the offline image manager"
+title: "LensLocker — route to a locked spec for the offline image manager"
 created: 2026-07-17
 tracker: TRACKER.md
 ---
 
-# LumenVault work-plan map
+# LensLocker work-plan map
 
 ## Destination — REACHED (2026-07-17)
 
-A locked technical spec + milestone build plan for **LumenVault** — a 100% offline
+A locked technical spec + milestone build plan for **LensLocker** — a 100% offline
 Windows-first Rust desktop app that imports local image libraries into a managed,
 space-efficient store and organizes, classifies, de-duplicates, and tags them.
 Every architectural and product decision resolved; a build session can execute the
 plan without needing to decide anything.
 
 **→ [SPEC.md](SPEC.md) is the locked artifact.** Every ticket on this map is
-closed. Building LumenVault is no longer a work-plan session — it's a build
+closed. Building LensLocker is no longer a work-plan session — it's a build
 session working from the spec.
 
 ## Notes
@@ -62,16 +62,16 @@ session working from the spec.
 - [Survey GPL-3.0 linkage implications of jpegxl-rs](tickets/020-research-gpl-linkage.md) — static/dynamic linking is irrelevant to GPL (unlike LGPL); obligation triggers only at distribution, not private builds; libjxl itself is BSD, only jpegxl-rs's bindings are GPL — a fresh-bindings middle path exists; CLI-subprocess has real but non-guaranteed FSF backing.
 - [Draft the catalog schema](tickets/017-draft-catalog-schema.md) — DDL prototype in `workplan/prototypes/017-catalog-schema.md`; images 1:1 with unique content (one grid card per photo), tags global, dedupe threshold/retention global settings; content-addressed storage, unified quarantine, merge-as-status, empty-but-shaped ML tables reserved for later.
 - [Validate virtualized thumbnail-grid performance at 100k+ images](tickets/019-validate-thumbnail-grid-performance.md) — real prototype, not estimated: flat 60fps/zero dropped frames under realistic momentum-scroll at 100k items; graceful (not catastrophic) degradation under an unrealistic worst-case sweep; validates the Tauri shell choice. Custom URI-scheme protocol serving failed silently on Windows — static-asset serving works and is the fallback plan.
-- [Decide LumenVault's project license](tickets/021-decide-project-license.md) — dissolved, not chosen: GPL-3.0 obligation triggers only at distribution (GPLv3 §2), and this never ships to anyone else; the 009 encoder choice stands unchanged. Reopen if distribution scope ever changes.
+- [Decide LensLocker's project license](tickets/021-decide-project-license.md) — dissolved, not chosen: GPL-3.0 obligation triggers only at distribution (GPLv3 §2), and this never ships to anyone else; the 009 encoder choice stands unchanged. Reopen if distribution scope ever changes.
 - [Get legal review on the HEIC/HEVC delegation strategy](tickets/022-legal-review-hevc.md) — dissolved, not reviewed: HEVC patent exposure attaches to distributing decode software, not personal use; no vendor role exists here. The OS-codec-delegation technical decision (014) stands unchanged.
 - [Assemble the locked spec and build plan](tickets/018-assemble-spec.md) — **destination reached.** [SPEC.md](SPEC.md) locked: 12-section spec + 7-milestone build plan, every section citing its deciding ticket. Crate layout and thumbnail defaults (never separately ticketed) confirmed during assembly.
 
 ## Not yet specified
 
-- **ML auto-tagging design** — model/runtime choice, embedding storage, similarity
-  search UI, face grouping yes/no. Sharpens after
-  [Survey offline auto-tagging options](tickets/016-research-offline-autotagging.md)
-  and the MVP schema land.
+- **ML auto-tagging design** — graduated 2026-07-20 into its own effort:
+  [LensLocker ML work-plan map](ML-MAP.md) (tagging, categorization, smart
+  albums, similarity search, and face auto-recognition — broader than this
+  item's original framing).
 - **Thumbnail/preview cache strategy** — sizes, format, eviction, GPU decode, and
   now also *serving mechanism* (static files vs. a custom protocol — the latter
   failed silently on Windows/WebView2 per

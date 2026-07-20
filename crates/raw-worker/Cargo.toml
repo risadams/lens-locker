@@ -1,5 +1,5 @@
 [package]
-name = "lumenvault-raw-worker"
+name = "lenslocker-raw-worker"
 version.workspace = true
 edition.workspace = true
 publish.workspace = true
@@ -8,7 +8,7 @@ publish.workspace = true
 workspace = true
 
 [[bin]]
-name = "lumenvault-raw-worker"
+name = "lenslocker-raw-worker"
 path = "src/main.rs"
 
 [dependencies]

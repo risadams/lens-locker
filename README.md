@@ -1,6 +1,6 @@
-# LumenVault
+# LensLocker
 
-A 100% offline, Windows-first desktop image manager. LumenVault takes custody
+A 100% offline, Windows-first desktop image manager. LensLocker takes custody
 of a local photo library — importing files with a **destructive move**,
 converting them losslessly where it saves real space (JPEG/PNG/BMP → JPEG XL,
 TIFF recompressed in place), de-duplicating exact and near-duplicate images,
@@ -65,10 +65,10 @@ cargo test --workspace
 cargo tauri dev
 ```
 
-If `cargo-tauri` isn't installed, `cargo run -p lumenvault-app` also launches
+If `cargo-tauri` isn't installed, `cargo run -p lenslocker-app` also launches
 the compiled app directly (no hot-reload, but avoids the extra install).
 
-On first launch, LumenVault shows a first-run screen to choose where the
+On first launch, LensLocker shows a first-run screen to choose where the
 library lives — there is no default location (see `workplan/SPEC.md`'s
 Milestone 5.5 section for why). Pick an empty folder to create a new vault, or
 point it at an existing one to open it.
@@ -79,7 +79,7 @@ point it at an existing one to open it.
 cargo tauri build --bundles nsis
 ```
 
-Produces `target/release/bundle/nsis/LumenVault_<version>_x64-setup.exe`. The
+Produces `target/release/bundle/nsis/LensLocker_<version>_x64-setup.exe`. The
 installer adds a Windows Firewall outbound-block rule on the app's executable
 as a regression catcher (`src-tauri/windows/hooks.nsh`) — real network access
 is already impossible per the layers above, this just catches an accidental

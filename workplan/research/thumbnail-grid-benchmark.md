@@ -61,7 +61,7 @@ to fetch`, and neither `<img>` `load` nor `error` events ever fired (a genuinely
 confusing failure mode; it took a `fetch()`-based diagnostic to get a clear
 signal, since `<img>` gave no error at all). Root cause not fully isolated within
 this ticket's time-box — worth a note for whoever builds the real import
-pipeline's thumbnail-serving mechanism, since LumenVault will likely want
+pipeline's thumbnail-serving mechanism, since LensLocker will likely want
 on-demand/generated thumbnail serving rather than static files. The prototype
 worked around it by serving thumbnails through Tauri's default static-asset
 pipeline instead (the same mechanism that serves `index.html` itself), which

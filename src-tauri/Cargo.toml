@@ -1,13 +1,13 @@
 [package]
-name = "lumenvault-app"
+name = "lenslocker-app"
 version.workspace = true
-description = "LumenVault — offline image library manager"
+description = "LensLocker — offline image library manager"
 authors = ["chris"]
 edition.workspace = true
 publish.workspace = true
 
 [lib]
-name = "lumenvault_app_lib"
+name = "lenslocker_app_lib"
 crate-type = ["staticlib", "cdylib", "rlib"]
 
 [lints]
@@ -29,9 +29,9 @@ thiserror = "2.0.18"
 # adds no new version to the dependency graph, just direct access to it.
 base64 = "0.22"
 
-lumenvault-catalog = { version = "0.1.0", path = "../crates/catalog" }
-lumenvault-import = { version = "0.1.0", path = "../crates/import" }
-lumenvault-xmp = { version = "0.1.0", path = "../crates/xmp" }
+lenslocker-catalog = { version = "0.1.0", path = "../crates/catalog" }
+lenslocker-import = { version = "0.1.0", path = "../crates/import" }
+lenslocker-xmp = { version = "0.1.0", path = "../crates/xmp" }
 
 # Windows-only: WebView2 COM hardening (workplan/SPEC.md §8.1, Milestone 6).
 # Both crates are already transitive dependencies of `wry`/`tauri-runtime-wry`

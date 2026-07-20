@@ -11,7 +11,7 @@
 -- insert/update/delete as tags and filenames change, so this migration
 -- switches it to FTS5's default (self-contained) mode, which stores its own
 -- copy of the indexed text and supports normal `DELETE FROM images_fts
--- WHERE rowid = ?` — see `lumenvault_catalog::sync_fts_row`.
+-- WHERE rowid = ?` — see `lenslocker_catalog::sync_fts_row`.
 --
 -- Per crates/catalog/src/lib.rs's own comment: "do not hand-edit an
 -- existing migration once it has shipped — add a new one instead." This is

@@ -14,8 +14,8 @@
 //! the write and read side.
 //!
 //! **Where sync orchestration lives**: [`sync_sidecar`] reads tags via
-//! `lumenvault-catalog` and writes/updates the sidecar file, so this crate
-//! depends on `lumenvault-catalog` (not the other way around) — keeping
+//! `lenslocker-catalog` and writes/updates the sidecar file, so this crate
+//! depends on `lenslocker-catalog` (not the other way around) — keeping
 //! `catalog` pure SQL/no-I/O as it's been since Milestone 0. This also
 //! reads naturally as "xmp owns keeping the sidecar in sync," which is the
 //! reasonable default the Milestone 4 brief suggested when no better home
@@ -192,7 +192,7 @@ fn local_name(name: &quick_xml::name::QName) -> String {
 }
 
 /// The sidecar path for a managed file: same directory and basename as its
-/// blob, `.xmp` extension — mirrors `lumenvault-import::LibraryPaths`'
+/// blob, `.xmp` extension — mirrors `lenslocker-import::LibraryPaths`'
 /// blob-path convention without depending on that crate (this crate takes
 /// `stored_path` from the `images` row instead, which already encodes the
 /// exact on-disk location).
@@ -201,7 +201,7 @@ fn sidecar_path_for(stored_path: &Path) -> PathBuf {
 }
 
 /// Syncs `image_id`'s sidecar to match its current tags in the catalog:
-/// reads tags via `lumenvault-catalog`, writes them to the `.xmp` file next
+/// reads tags via `lenslocker-catalog`, writes them to the `.xmp` file next
 /// to the image's blob, and updates `images.sidecar_path`/
 /// `sidecar_synced_at`. Per §7: "every tag/metadata change mirrors to an
 /// XMP sidecar" — this is the one function that makes that true; callers
@@ -218,7 +218,7 @@ pub fn sync_sidecar(conn: &Connection, image_id: i64) -> Result<PathBuf, XmpErro
     let stored_path = stored_path.ok_or(XmpError::NoStoredPath(image_id))?;
     let sidecar_path = sidecar_path_for(Path::new(&stored_path));
 
-    let tags = lumenvault_catalog::tags_for_image(conn, image_id)?;
+    let tags = lenslocker_catalog::tags_for_image(conn, image_id)?;
     write_sidecar(&sidecar_path, &tags)?;
 
     conn.execute(
@@ -307,7 +307,7 @@ mod tests {
 
     fn test_conn_with_image(blob_path: &Path, format: &str) -> (Connection, i64) {
         let mut conn = Connection::open_in_memory().unwrap();
-        lumenvault_catalog::migrate(&mut conn).unwrap();
+        lenslocker_catalog::migrate(&mut conn).unwrap();
         fs::write(blob_path, b"fake blob bytes").unwrap();
 
         conn.execute(
@@ -334,8 +334,8 @@ mod tests {
         let blob_path = dir.path().join("blob.jxl");
         let (conn, image_id) = test_conn_with_image(&blob_path, "jxl");
 
-        lumenvault_catalog::add_tag(&conn, image_id, "sunset").unwrap();
-        lumenvault_catalog::add_tag(&conn, image_id, "beach").unwrap();
+        lenslocker_catalog::add_tag(&conn, image_id, "sunset").unwrap();
+        lenslocker_catalog::add_tag(&conn, image_id, "beach").unwrap();
 
         let sidecar_path = sync_sidecar(&conn, image_id).unwrap();
 
@@ -363,15 +363,15 @@ mod tests {
         let blob_path = dir.path().join("blob.webp");
         let (conn, image_id) = test_conn_with_image(&blob_path, "webp");
 
-        lumenvault_catalog::add_tag(&conn, image_id, "keep").unwrap();
-        lumenvault_catalog::add_tag(&conn, image_id, "drop").unwrap();
+        lenslocker_catalog::add_tag(&conn, image_id, "keep").unwrap();
+        lenslocker_catalog::add_tag(&conn, image_id, "drop").unwrap();
         let sidecar_path = sync_sidecar(&conn, image_id).unwrap();
         assert_eq!(
             read_sidecar(&sidecar_path).unwrap(),
             vec!["drop".to_string(), "keep".to_string()]
         );
 
-        lumenvault_catalog::remove_tag(&conn, image_id, "drop").unwrap();
+        lenslocker_catalog::remove_tag(&conn, image_id, "drop").unwrap();
         sync_sidecar(&conn, image_id).unwrap();
 
         assert_eq!(

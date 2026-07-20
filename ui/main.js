@@ -1,6 +1,6 @@
-// LumenVault frontend — Milestone 5.
+// LensLocker frontend — Milestone 5.
 //
-// Ports workplan/design/lumenvault-design.html's DOM structure/interaction
+// Ports workplan/design/lenslocker-design.html's DOM structure/interaction
 // patterns (owner-approved) onto real backend commands. The design's fake
 // in-memory 140-item array and naive full-array render are replaced with:
 // real SQL-backed paging (`list_images` offset/limit) and a virtualized
@@ -862,7 +862,7 @@ document.getElementById('view-review').style.display = 'none';
 
 // ── First-run vault setup (Milestone 5.5) ────────────────────────────────
 //
-// Ports workplan/design/lumenvault-design.html's #firstrun screen
+// Ports workplan/design/lenslocker-design.html's #firstrun screen
 // (owner-approved) onto the real backend: `pick_library_folder` opens the
 // native folder dialog (tauri-plugin-dialog, no default/pre-filled path,
 // matching the design), `inspect_library_folder` replaces the design's

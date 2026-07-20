@@ -2,13 +2,13 @@
 //! catalog is lost, the app rescans the store, re-hashes everything (BLAKE3
 //! + perceptual), and re-imports tags/metadata from sidecars."
 //!
-//! **Why this lives in `lumenvault-import`, not `lumenvault-xmp`**: rebuild
-//! needs `lumenvault-decode` (re-probe every blob), `lumenvault-hash`
-//! (re-hash), `lumenvault-catalog` (recreate rows, re-apply tags), and
-//! `lumenvault-xmp` (read sidecars) all at once — exactly the set of
-//! dependencies `lumenvault-import` already has (plus `lumenvault-xmp`,
+//! **Why this lives in `lenslocker-import`, not `lenslocker-xmp`**: rebuild
+//! needs `lenslocker-decode` (re-probe every blob), `lenslocker-hash`
+//! (re-hash), `lenslocker-catalog` (recreate rows, re-apply tags), and
+//! `lenslocker-xmp` (read sidecars) all at once — exactly the set of
+//! dependencies `lenslocker-import` already has (plus `lenslocker-xmp`,
 //! added this milestone) as the crate that "owns pipeline orchestration"
-//! per its own module doc. Putting it in `lumenvault-xmp` instead would
+//! per its own module doc. Putting it in `lenslocker-xmp` instead would
 //! make the sidecar crate depend on `decode`/`convert`-adjacent concerns
 //! it has no other reason to know about.
 //!
@@ -64,7 +64,7 @@ pub struct RebuildReport {
     /// recovered images.
     pub tags_recovered: usize,
     /// Blob files under `<root>/blobs` that could not be classified at all
-    /// (not decodable by `lumenvault-decode`, not a recognized RAW
+    /// (not decodable by `lenslocker-decode`, not a recognized RAW
     /// extension, or not a validly-named content-addressed blob) —
     /// `(path, reason)`. Rebuild does not abort on these; it records and
     /// continues, since one corrupt/foreign file in the store shouldn't
@@ -79,7 +79,7 @@ pub struct RebuildReport {
 /// `image_sources` row per image (see module doc), and tags re-imported
 /// from each blob's `.xmp` sidecar, if one exists next to it.
 ///
-/// `conn` must already be freshly migrated (`lumenvault_catalog::migrate`)
+/// `conn` must already be freshly migrated (`lenslocker_catalog::migrate`)
 /// — this function only populates rows, it doesn't apply the schema.
 pub fn rebuild_from_store(
     conn: &Connection,
@@ -186,17 +186,17 @@ fn recover_one_blob(
         });
     };
 
-    let stored_hash = lumenvault_hash::hash_file(blob_path)?;
+    let stored_hash = lenslocker_hash::hash_file(blob_path)?;
 
     // Re-decode (or RAW-recognize) exactly like import time — see
-    // lumenvault-decode's module doc for why RAW gets no pixel data.
-    let (width, height, perceptual_hash) = match lumenvault_decode::probe(blob_path) {
+    // lenslocker-decode's module doc for why RAW gets no pixel data.
+    let (width, height, perceptual_hash) = match lenslocker_decode::probe(blob_path) {
         Ok(probe) => {
-            let hash = lumenvault_hash::perceptual_hash(&probe.image);
+            let hash = lenslocker_hash::perceptual_hash(&probe.image);
             (Some(probe.width), Some(probe.height), Some(hash as i64))
         }
         Err(e) => {
-            if lumenvault_decode::raw_extension(blob_path).is_some() {
+            if lenslocker_decode::raw_extension(blob_path).is_some() {
                 (None, None, None)
             } else {
                 return Ok(RecoverOutcome::Skipped {
@@ -259,22 +259,22 @@ fn recover_one_blob(
     // Keeps search (Milestone 5) working after a rebuild even for images
     // with no tags at all — add_tag below already re-syncs when tags exist,
     // but an untagged image otherwise never gets its filename indexed.
-    lumenvault_catalog::sync_fts_row(conn, image_id)?;
+    lenslocker_catalog::sync_fts_row(conn, image_id)?;
 
     // Re-import tags from the sidecar, if one exists next to this blob.
     let sidecar_path = blob_path.with_extension("xmp");
     let mut tags_applied = 0;
     if sidecar_path.exists() {
-        let tags = lumenvault_xmp::read_sidecar(&sidecar_path)?;
+        let tags = lenslocker_xmp::read_sidecar(&sidecar_path)?;
         for tag in &tags {
-            lumenvault_catalog::add_tag(conn, image_id, tag)?;
+            lenslocker_catalog::add_tag(conn, image_id, tag)?;
             tags_applied += 1;
         }
         // Stamp sidecar_path/sidecar_synced_at to reflect that this image's
         // sidecar is in sync as of the rebuild — sync_sidecar re-derives
         // the same path and re-writes the same tags, so this is a no-op on
         // content, just catalog bookkeeping.
-        lumenvault_xmp::sync_sidecar(conn, image_id)?;
+        lenslocker_xmp::sync_sidecar(conn, image_id)?;
     }
 
     Ok(RecoverOutcome::Recovered { tags_applied })

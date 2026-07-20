@@ -7,7 +7,7 @@ Status: findings complete, open questions flagged for decision (feeds
 **Not legal advice.** Engineering-facing research from primary sources (the
 jpegxl-rs repo, gnu.org's GPL FAQ/license text, named real-world precedents) to
 inform a build decision. Everything in §3 needs real legal review before it's
-release-blocking — and per §1.3, nothing here is urgent yet: LumenVault has
+release-blocking — and per §1.3, nothing here is urgent yet: LensLocker has
 never been conveyed to anyone.
 
 ## 1. Summary — Decision-Oriented
@@ -23,14 +23,14 @@ never been conveyed to anyone.
    panics if not found); **static linking is opt-in via the `vendored` feature**
    (`cmake`-builds libjxl from vendored source). Per point 1 this is a
    build-mechanics choice, not a licensing one — but `vendored`/static is the
-   only realistic mode for LumenVault's single-static-binary goal, since end
+   only realistic mode for LensLocker's single-static-binary goal, since end
    users' Windows machines don't have a system `libjxl.dll`. Source:
    [jpegxl-sys/build.rs](https://github.com/inflation/jpegxl-rs/blob/master/jpegxl-sys/build.rs),
    [jpegxl-rs/README.md](https://github.com/inflation/jpegxl-rs/blob/master/jpegxl-rs/README.md).
 
 3. **The obligation only triggers at *conveying* (distributing), not at
    building/running privately.** GPLv3 §2: "You may make, run and propagate
-   covered works that you do not convey, without conditions." LumenVault has
+   covered works that you do not convey, without conditions." LensLocker has
    never shipped a build to anyone — **the clock hasn't started.** Source:
    [GPLv3 §2](https://www.gnu.org/licenses/gpl-3.0.en.html#section2).
 
@@ -121,7 +121,7 @@ From the **FAQ**:
 > compatible with the GPL... The combination itself is then available under
 > those GPL versions."
 
-**Answer to Q2**: yes — if LumenVault links `jpegxl-rs` (static or dynamic) and
+**Answer to Q2**: yes — if LensLocker links `jpegxl-rs` (static or dynamic) and
 is then *conveyed* to end users, the whole executable must go out under
 GPL-3.0-or-later-compatible terms: full source availability to every
 recipient, no additional restrictions. Full copyleft, not attribution-only.
@@ -177,7 +177,7 @@ at all.
 
 **Caveat**: FSF itself says the line is "a legal question, which ultimately
 judges will decide" — real-world-relied-upon opinion, not adjudicated case law
-for this fact pattern. If LumenVault's wrapper ever grows beyond simple
+for this fact pattern. If LensLocker's wrapper ever grows beyond simple
 file/argument passing, re-run this analysis. Practical costs (bundling
 libjxl's pre-1.0 CLI binaries cross-platform, subprocess management) are
 already covered in [recompression.md §2 / open question 1](recompression.md) —
@@ -186,7 +186,7 @@ not re-derived here.
 ### 2.5 A fourth option: bind directly against libjxl's BSD C API
 
 Since libjxl is BSD-3-Clause and only the `jpegxl-sys`/`jpegxl-rs` *binding
-code* is GPL by its author's choice, LumenVault could write new, minimal FFI
+code* is GPL by its author's choice, LensLocker could write new, minimal FFI
 bindings (`bindgen` against libjxl's public headers) covering just
 encode+jbrd-reconstruct, bypassing `jpegxl-sys`/`jpegxl-rs` entirely.
 `jpegxl-src` (BSD-3-Clause) already solves "vendor + `cmake`-build libjxl" and
@@ -200,23 +200,23 @@ original ticket, but a legitimate middle path between "accept GPL" and
 ## 3. Open Questions Requiring Real Legal Review
 
 1. Whether the "mere aggregation" subprocess argument (§2.4) actually holds for
-   LumenVault's *specific* IPC implementation once designed — review before
+   LensLocker's *specific* IPC implementation once designed — review before
    shipping on that basis, not after.
-2. Whether publishing LumenVault's own source (a Cargo.toml merely *declaring*
+2. Whether publishing LensLocker's own source (a Cargo.toml merely *declaring*
    a `jpegxl-rs` dependency, no compiled binary ever conveyed) itself triggers
-   any obligation on LumenVault's source license — unclear from primary
+   any obligation on LensLocker's source license — unclear from primary
    sources surveyed here.
-3. What exactly counts as LumenVault's first "conveying" event in practice (one
+3. What exactly counts as LensLocker's first "conveying" event in practice (one
    beta build shared, a private update server, open-sourcing the repo
    pre-release) — don't assume informally that "no one has a build yet"
    protects every choice made right up to public release.
 4. If §2.5's direct-BSD-binding option is pursued, confirm none of
    `jpegxl-sys`'s GPL-licensed binding code (struct layouts, constants) is
    reused — clean-room the header parsing.
-5. If GPL-3.0-or-later is accepted for all/part of LumenVault, confirm the
+5. If GPL-3.0-or-later is accepted for all/part of LensLocker, confirm the
    mechanics with counsel (full Corresponding Source to every recipient,
    preserved downstream) against any future paid tier, code signing, or EULA
    plans.
 6. The precedent survey (§2.3) is not validation — none of the surveyed
    projects show evidence of legal review behind their choice; don't treat
-   "other small projects did X" as legal cover for LumenVault.
+   "other small projects did X" as legal cover for LensLocker.

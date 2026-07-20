@@ -31,18 +31,18 @@ fn killing_the_import_mid_batch_and_resuming_finishes_correctly() {
         expected_paths.push(write_distinct_png(source_dir.path(), i));
     }
 
-    let bin = env!("CARGO_BIN_EXE_lumenvault-import");
+    let bin = env!("CARGO_BIN_EXE_lenslocker-import");
 
     // First run: slow it down so we can observe progress and kill it
     // partway through a batch of six files.
     let mut child = Command::new(bin)
         .arg(source_dir.path())
         .arg(library_dir.path())
-        .env("LUMENVAULT_IMPORT_DELAY_MS", "150")
+        .env("LENSLOCKER_IMPORT_DELAY_MS", "150")
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
         .spawn()
-        .expect("failed to spawn lumenvault-import");
+        .expect("failed to spawn lenslocker-import");
 
     let stdout = child.stdout.take().unwrap();
     let mut lines = BufReader::new(stdout).lines();
@@ -84,7 +84,7 @@ fn killing_the_import_mid_batch_and_resuming_finishes_correctly() {
         .stdout(Stdio::null())
         .stderr(Stdio::inherit())
         .status()
-        .expect("failed to spawn the resumed lumenvault-import run");
+        .expect("failed to spawn the resumed lenslocker-import run");
     assert!(status.success(), "the resumed run must exit successfully");
 
     // Assert on the real, final state.
@@ -156,7 +156,7 @@ fn killing_the_import_mid_batch_and_resuming_finishes_correctly() {
     for (stored_path, stored_hash) in rows {
         let blob_path = std::path::Path::new(&stored_path);
         assert!(blob_path.exists(), "blob missing on disk: {stored_path}");
-        let actual_hash = lumenvault_hash::hash_file(blob_path).unwrap();
+        let actual_hash = lenslocker_hash::hash_file(blob_path).unwrap();
         assert_eq!(
             actual_hash.to_vec(),
             stored_hash,

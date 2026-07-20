@@ -1,4 +1,4 @@
-# LumenVault catalog schema — draft prototype
+# LensLocker catalog schema — draft prototype
 
 Ticket: [../tickets/017-draft-catalog-schema.md](../tickets/017-draft-catalog-schema.md)
 Status: draft, iterating with the owner before the ticket closes.
