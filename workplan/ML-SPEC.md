@@ -412,6 +412,25 @@ runs a forward pass for each of the three models. No inference pipeline
 logic yet, no UI. Exit criteria: all three models load and run a smoke-test
 inference in a test harness; installer builds with the real files bundled.
 
+**Build-time addendum to ML-1 (found during implementation, 2026-07-20,
+after this spec locked):** §2's "one shared `ort` environment, three
+separate `Session` objects... avoiding redundant DirectML device
+initialization" does not hold as built. A second `Session` created with
+the DirectML EP in the same process reliably crashes the whole process
+(`STATUS_ACCESS_VIOLATION`) at session-creation time — reproduced against
+the official stable `onnxruntime` v1.27.1 DirectML build, independent of
+model/shape/file-vs-memory loading; a single DirectML session works fine,
+as does any number of CPU-only sessions. Root cause unresolved (full repro
+notes: `crates/ml/src/lib.rs`, the `#[ignore]`d
+`sessions_load_and_run_a_forward_pass_for_each_model_slot` test's doc
+comment). **Owner-confirmed workaround, adopted going forward**: never
+hold two DirectML-backed `Session`s open concurrently — load a model, run
+its batch of work, drop the session, load the next. Slower on every
+model-switch (reloads weights each time) but avoids the crash entirely.
+This changes how ML-2's background backlog (§9) and ML-3's face pipeline
+must sequence SigLIP/YuNet/SFace work: never interleaved, only ever one
+model's `Session` alive at a time.
+
 **Milestone ML-2 — Tagging pipeline, no UI.** SigLIP embedding generation
 via the background backlog (§9); zero-shot scoring against the starter
 label set (§2/§4); auto-tag insertion into `image_tags` with
