@@ -16,6 +16,9 @@ fn migrations() -> Migrations<'static> {
         // ML-SPEC.md Milestone ML-1 — see migrations/0003_ml_extensions.sql's
         // own header comment; DDL sourced from workplan/prototypes/035-ml-schema.md.
         M::up(include_str!("../migrations/0003_ml_extensions.sql")),
+        // ML-SPEC.md Milestone ML-2 — see migrations/0004_tag_confidence_thresholds.sql's
+        // own header comment.
+        M::up(include_str!("../migrations/0004_tag_confidence_thresholds.sql")),
     ])
 }
 
@@ -609,20 +612,30 @@ pub fn record_thumbnail(
 // the two values tickets 011/005 explicitly called user-tunable but no
 // milestone ever gave a UI: dedupe sensitivity and quarantine retention.
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq)]
 pub struct AppSettings {
     pub hamming_threshold: i64,
     pub retention_days: i64,
+    /// §4's storage floor — an auto-tag score below this never gets an
+    /// `image_tags` row at all (migration 0004; placeholder pending real
+    /// calibration, see that migration's own header comment).
+    pub tag_storage_threshold: f64,
+    /// §4's display floor — an auto-tag at or above the storage floor but
+    /// below this still gets a row (so confirming it later doesn't need a
+    /// re-score), it just doesn't surface as a visible chip by default.
+    pub tag_display_threshold: f64,
 }
 
 pub fn get_app_settings(conn: &Connection) -> rusqlite::Result<AppSettings> {
     conn.query_row(
-        "SELECT hamming_threshold, retention_days FROM app_settings WHERE id = 1",
+        "SELECT hamming_threshold, retention_days, tag_storage_threshold, tag_display_threshold FROM app_settings WHERE id = 1",
         [],
         |row| {
             Ok(AppSettings {
                 hamming_threshold: row.get(0)?,
                 retention_days: row.get(1)?,
+                tag_storage_threshold: row.get(2)?,
+                tag_display_threshold: row.get(3)?,
             })
         },
     )
@@ -630,8 +643,14 @@ pub fn get_app_settings(conn: &Connection) -> rusqlite::Result<AppSettings> {
 
 pub fn update_app_settings(conn: &Connection, settings: AppSettings) -> rusqlite::Result<()> {
     conn.execute(
-        "UPDATE app_settings SET hamming_threshold = ?1, retention_days = ?2 WHERE id = 1",
-        params![settings.hamming_threshold, settings.retention_days],
+        "UPDATE app_settings SET hamming_threshold = ?1, retention_days = ?2,
+         tag_storage_threshold = ?3, tag_display_threshold = ?4 WHERE id = 1",
+        params![
+            settings.hamming_threshold,
+            settings.retention_days,
+            settings.tag_storage_threshold,
+            settings.tag_display_threshold
+        ],
     )?;
     Ok(())
 }
@@ -1699,7 +1718,9 @@ mod tests {
             settings,
             super::AppSettings {
                 hamming_threshold: 5,
-                retention_days: 30
+                retention_days: 30,
+                tag_storage_threshold: 0.1,
+                tag_display_threshold: 0.5,
             }
         );
     }
@@ -1713,6 +1734,8 @@ mod tests {
             super::AppSettings {
                 hamming_threshold: 8,
                 retention_days: 14,
+                tag_storage_threshold: 0.2,
+                tag_display_threshold: 0.6,
             },
         )
         .unwrap();
@@ -1722,8 +1745,20 @@ mod tests {
             settings,
             super::AppSettings {
                 hamming_threshold: 8,
-                retention_days: 14
+                retention_days: 14,
+                tag_storage_threshold: 0.2,
+                tag_display_threshold: 0.6,
             }
+        );
+    }
+
+    #[test]
+    fn tag_thresholds_preserve_the_required_storage_le_display_ordering() {
+        let conn = migrated_conn();
+        let settings = super::get_app_settings(&conn).unwrap();
+        assert!(
+            settings.tag_storage_threshold <= settings.tag_display_threshold,
+            "storage floor must never exceed the display floor"
         );
     }
 }

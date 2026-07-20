@@ -702,11 +702,17 @@ fn update_app_settings(
 ) -> CmdResult<()> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
+        // This command has no UI concept of the tag-confidence thresholds
+        // yet (Milestone ML-2 added them; a settings UI is Milestone
+        // ML-6's job) — read-then-write so this update never silently
+        // resets them back to their schema defaults.
+        let current = lenslocker_catalog::get_app_settings(&conn)?;
         lenslocker_catalog::update_app_settings(
             &conn,
             lenslocker_catalog::AppSettings {
                 hamming_threshold,
                 retention_days,
+                ..current
             },
         )?;
         Ok(())
@@ -1232,7 +1238,9 @@ mod tests {
             before,
             lenslocker_catalog::AppSettings {
                 hamming_threshold: 5,
-                retention_days: 30
+                retention_days: 30,
+                tag_storage_threshold: 0.1,
+                tag_display_threshold: 0.5,
             }
         );
 
@@ -1241,6 +1249,7 @@ mod tests {
             lenslocker_catalog::AppSettings {
                 hamming_threshold: 12,
                 retention_days: 7,
+                ..before
             },
         )
         .unwrap();
@@ -1250,7 +1259,8 @@ mod tests {
             after,
             lenslocker_catalog::AppSettings {
                 hamming_threshold: 12,
-                retention_days: 7
+                retention_days: 7,
+                ..before
             }
         );
     }
