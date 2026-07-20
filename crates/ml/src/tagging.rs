@@ -99,16 +99,166 @@ pub fn embed_image(session: &mut Session, pixel_values: &[f32]) -> Result<Vec<f3
     Ok(data.to_vec())
 }
 
-/// Text-side encoding — blocked on a tokenizer not yet bundled
-/// (`MODELS.md` §5). Intentionally unimplemented rather than guessed at:
-/// zero-shot label scoring and text-to-image search (§8) both need this,
-/// but a wrong tokenization silently produces wrong `input_ids`, not an
-/// error — not a risk worth taking to unblock a stub.
+/// SigLIP's own sigmoid-loss scale/bias — the model's two learned scalar
+/// parameters, **read directly from the real export's initializers**
+/// (`onnx::Exp_7146` = this raw value, exponentiated at use per SigLIP's
+/// own convention of storing `log(scale)`; `onnx::Add_7147` =
+/// [`LOGIT_BIAS`] directly) via a throwaway protobuf inspector, not
+/// guessed or taken from a paper. `logits_per_image`/`logits_per_text`
+/// aren't graph outputs reachable from stored embeddings — they're
+/// computed *inside* the graph from both towers at once — so replicating
+/// the formula here is what makes §4's "adding a custom label is a cheap
+/// backfill... not a re-embed" possible: score a new label against every
+/// already-stored `image_embeds` row without re-running the vision tower.
+pub const LOGIT_SCALE_RAW: f32 = 4.7214665;
+pub const LOGIT_BIAS: f32 = -16.546421;
+
+/// Zero-shot label-match probability for one image/text embedding pair —
+/// `sigmoid((image_embeds · text_embeds) * exp(LOGIT_SCALE_RAW) + LOGIT_BIAS)`,
+/// SigLIP's own scoring formula (§2/§4). Uses the raw dot product, not a
+/// separately L2-normalized one: `crates/ml/tests/siglip_scoring_formula.rs`
+/// confirmed against the real model (to ~1e-6) that `embed_image`/
+/// `text::embed_text`'s outputs are already unit-normalized by the graph
+/// itself, so re-normalizing here would be redundant work, not extra
+/// correctness.
+pub fn zero_shot_probability(image_embeds: &[f32], text_embeds: &[f32]) -> f32 {
+    debug_assert_eq!(image_embeds.len(), EMBEDDING_DIM);
+    debug_assert_eq!(text_embeds.len(), EMBEDDING_DIM);
+    let dot: f32 = image_embeds.iter().zip(text_embeds).map(|(a, b)| a * b).sum();
+    let logit = dot * LOGIT_SCALE_RAW.exp() + LOGIT_BIAS;
+    1.0 / (1.0 + (-logit).exp())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn zero_shot_probability_of_identical_unit_vectors_is_near_one() {
+        // A perfect match (image_embeds == text_embeds, both unit-length)
+        // is the largest possible dot product (1.0) — sanity-checks the
+        // formula's shape independent of the real model, before the
+        // ONNX-backed test (siglip_scoring_formula.rs) verifies the exact
+        // constants against real output.
+        let mut v = vec![0f32; EMBEDDING_DIM];
+        v[0] = 1.0;
+        let probability = zero_shot_probability(&v, &v);
+        assert!(probability > 0.999, "expected a near-1.0 probability for a perfect match, got {probability}");
+    }
+
+    #[test]
+    fn zero_shot_probability_of_orthogonal_vectors_is_low() {
+        let mut a = vec![0f32; EMBEDDING_DIM];
+        let mut b = vec![0f32; EMBEDDING_DIM];
+        a[0] = 1.0;
+        b[1] = 1.0;
+        let probability = zero_shot_probability(&a, &b);
+        assert!(probability < 0.5, "expected a low probability for orthogonal embeddings, got {probability}");
+    }
+}
+
+/// Text-side encoding: tokenizes a label or search query to the
+/// fixed-length `input_ids` sequence the text tower needs, then runs it
+/// through the same session `embed_image` uses (a different output
+/// selection, `text_embeds` instead of `image_embeds` — see that
+/// function's doc comment for why a placeholder `pixel_values` is still
+/// required, by the same unconditional-graph-dependency reasoning).
 pub mod text {
-    /// Will tokenize `text` to a length-[`super::TEXT_MAX_LEN`] `input_ids`
-    /// sequence once a real tokenizer is bundled. Panics unconditionally for
-    /// now so a caller can't silently ship wrong tokenization.
-    pub fn tokenize(_text: &str) -> Vec<i64> {
-        unimplemented!("needs a real tokenizer — see MODELS.md §5")
+    use std::path::Path;
+
+    use ort::inputs;
+    use ort::session::{OutputSelector, RunOptions, Session};
+    use ort::value::Tensor;
+    use tokenizers::Tokenizer;
+
+    use super::{IMAGE_SIZE, TEXT_MAX_LEN};
+    use crate::{MlError, Result};
+
+    /// `siglip-so400m-onnx/tokenizer.json`'s `added_tokens[0]`: `<pad>`,
+    /// id `0` — confirmed by reading the real bundled file (`MODELS.md` §5),
+    /// not the SentencePiece-library-wide default (which is usually `<unk>`
+    /// at id 0; this export's isn't).
+    const PAD_TOKEN_ID: i64 = 0;
+
+    pub struct TextEncoder {
+        tokenizer: Tokenizer,
+    }
+
+    impl TextEncoder {
+        /// Loads the real tokenizer from `tokenizer_path` (the sibling
+        /// `tokenizer.json` next to SigLIP's `model.onnx` —
+        /// `ModelKind::Siglip.relative_path()`'s parent directory).
+        pub fn load(tokenizer_path: &Path) -> Result<Self> {
+            let tokenizer = Tokenizer::from_file(tokenizer_path).map_err(|e| MlError::Tokenizer(e.to_string()))?;
+            Ok(Self { tokenizer })
+        }
+
+        /// Tokenizes `text`, applying the tokenizer's own post-processor
+        /// (appends `</s>`, per the bundled `tokenizer.json`'s
+        /// `TemplateProcessing` config — `add_special_tokens: true`), then
+        /// pads with [`PAD_TOKEN_ID`] or truncates to exactly
+        /// [`TEXT_MAX_LEN`], matching the export's fixed-length,
+        /// no-`attention_mask` input shape.
+        pub fn tokenize(&self, text: &str) -> Result<Vec<i64>> {
+            let encoding = self.tokenizer.encode(text, true).map_err(|e| MlError::Tokenizer(e.to_string()))?;
+            let mut ids: Vec<i64> = encoding.get_ids().iter().map(|&id| id as i64).collect();
+            ids.truncate(TEXT_MAX_LEN);
+            ids.resize(TEXT_MAX_LEN, PAD_TOKEN_ID);
+            Ok(ids)
+        }
+    }
+
+    /// Runs the text tower for one already-tokenized sequence:
+    /// `text_embeds` (`EMBEDDING_DIM`-long) out, via [`OutputSelector`]
+    /// restricted to just that output — a placeholder all-zero
+    /// `pixel_values` satisfies the vision-tower half of the graph the
+    /// same way [`super::embed_image`]'s placeholder `input_ids` does.
+    pub fn embed_text(session: &mut Session, input_ids: &[i64]) -> Result<Vec<f32>> {
+        debug_assert_eq!(input_ids.len(), TEXT_MAX_LEN);
+        let input_ids_tensor = Tensor::from_array((vec![1i64, TEXT_MAX_LEN as i64], input_ids.to_vec()))?;
+        let placeholder_pixels = Tensor::from_array((
+            vec![1i64, 3, IMAGE_SIZE as i64, IMAGE_SIZE as i64],
+            vec![0f32; 3 * IMAGE_SIZE as usize * IMAGE_SIZE as usize]
+        ))?;
+
+        let run_options = RunOptions::new()?.with_outputs(OutputSelector::no_default().with("text_embeds"));
+        let outputs = session.run_with_options(
+            inputs!["input_ids" => input_ids_tensor, "pixel_values" => placeholder_pixels],
+            &run_options
+        )?;
+
+        let (_shape, data) = outputs
+            .get("text_embeds")
+            .ok_or_else(|| MlError::Ort(ort::Error::new("SigLIP session did not return a text_embeds output")))?
+            .try_extract_tensor::<f32>()?;
+
+        Ok(data.to_vec())
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+
+        fn tokenizer_path() -> std::path::PathBuf {
+            crate::models_dir().join("siglip-so400m-onnx").join("tokenizer.json")
+        }
+
+        /// Doesn't need the ONNX Runtime dylib at all — pure tokenization,
+        /// so unlike this module's ONNX-backed tests, this one isn't
+        /// `#[ignore]`d; it just skips gracefully if the tokenizer file
+        /// isn't present in this environment.
+        #[test]
+        fn tokenize_pads_a_short_label_to_the_fixed_length() {
+            let path = tokenizer_path();
+            if !path.is_file() {
+                eprintln!("skipping: no tokenizer.json at {}", path.display());
+                return;
+            }
+            let encoder = TextEncoder::load(&path).unwrap();
+            let ids = encoder.tokenize("beach").unwrap();
+            assert_eq!(ids.len(), TEXT_MAX_LEN);
+            assert!(ids.contains(&1), "expected the </s> token (id 1) somewhere in a short, unpadded-length sequence");
+            assert_eq!(*ids.last().unwrap(), PAD_TOKEN_ID, "expected trailing padding for a short label");
+        }
     }
 }

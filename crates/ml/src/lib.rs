@@ -29,6 +29,8 @@ pub enum MlError {
     DylibNotFound(PathBuf),
     #[error(transparent)]
     Ort(#[from] ort::Error),
+    #[error("tokenizer error: {0}")]
+    Tokenizer(String),
 }
 
 pub type Result<T> = std::result::Result<T, MlError>;

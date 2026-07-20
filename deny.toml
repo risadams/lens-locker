@@ -16,6 +16,12 @@ ignore = [
     { id = "RUSTSEC-2025-0080", reason = "transitive via tauri-utils' urlpattern dep; no safe upgrade available" },
     { id = "RUSTSEC-2025-0100", reason = "transitive via tauri-utils' urlpattern dep; no safe upgrade available" },
     { id = "RUSTSEC-2025-0098", reason = "transitive via tauri-utils' urlpattern dep; no safe upgrade available" },
+    # Milestone ML-2 (workplan/ML-SPEC.md): transitive via
+    # tokenizers -> macro_rules_attribute -> paste. "Unmaintained", not a
+    # vulnerability — paste is a small, stable proc-macro crate with no
+    # safe upgrade path listed on the advisory itself. Revisit if
+    # tokenizers drops macro_rules_attribute or it migrates off paste.
+    { id = "RUSTSEC-2024-0436", reason = "transitive via tokenizers' macro_rules_attribute dep; unmaintained (not a vuln), no safe upgrade available" },
 ]
 
 [graph]

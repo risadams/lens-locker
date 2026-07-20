@@ -24,6 +24,18 @@ thiserror = "2.0.18"
 # needs `image`'s resize/pixel-buffer algorithms, which aren't gated by the
 # per-codec features those other crates enable.
 image = { version = "0.25.10", default-features = false }
+# default-features = false: the crate's defaults pull in `onig` (a C
+# regex library needing its own build toolchain setup) for BPE-style
+# tokenizers' regex pretokenizers and `esaxx_fast` for its BPE *trainer*
+# (irrelevant — this crate only ever loads a pre-built tokenizer.json to
+# encode text, never trains one). SigLIP's tokenizer.json (MODELS.md §5)
+# is a Unigram model with a Metaspace pretokenizer — no onig-dependent
+# component — but its normalizer chain does have Regex-pattern "Replace"
+# steps, which need *some* regex backend; `fancy-regex` (pure Rust, no C
+# toolchain) covers that without onig's extra build dependency. Also no
+# `hf-hub`/`http` (opt-in only, not default) — those would fetch
+# tokenizers from the network, the one thing this crate must never do.
+tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
