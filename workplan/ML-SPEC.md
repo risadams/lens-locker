@@ -413,23 +413,33 @@ logic yet, no UI. Exit criteria: all three models load and run a smoke-test
 inference in a test harness; installer builds with the real files bundled.
 
 **Build-time addendum to ML-1 (found during implementation, 2026-07-20,
-after this spec locked):** §2's "one shared `ort` environment, three
-separate `Session` objects... avoiding redundant DirectML device
-initialization" does not hold as built. A second `Session` created with
-the DirectML EP in the same process reliably crashes the whole process
-(`STATUS_ACCESS_VIOLATION`) at session-creation time — reproduced against
-the official stable `onnxruntime` v1.27.1 DirectML build, independent of
-model/shape/file-vs-memory loading; a single DirectML session works fine,
-as does any number of CPU-only sessions. Root cause unresolved (full repro
-notes: `crates/ml/src/lib.rs`, the `#[ignore]`d
-`sessions_load_and_run_a_forward_pass_for_each_model_slot` test's doc
-comment). **Owner-confirmed workaround, adopted going forward**: never
-hold two DirectML-backed `Session`s open concurrently — load a model, run
-its batch of work, drop the session, load the next. Slower on every
-model-switch (reloads weights each time) but avoids the crash entirely.
-This changes how ML-2's background backlog (§9) and ML-3's face pipeline
-must sequence SigLIP/YuNet/SFace work: never interleaved, only ever one
-model's `Session` alive at a time.
+after this spec locked; corrected 2026-07-20, same day, once ML-3
+implementation actually tested the first fix):** §2's "one shared `ort`
+environment, three separate `Session` objects... avoiding redundant
+DirectML device initialization" does not hold as built. A `Session`
+created with the DirectML EP in a process reliably crashes the whole
+process (`STATUS_ACCESS_VIOLATION`) at session-creation time — reproduced
+against the official stable `onnxruntime` v1.27.1 DirectML build,
+independent of model/shape/file-vs-memory loading. Root cause unresolved.
+
+**Corrected finding, verified empirically**: the crash is not about
+*concurrent* DirectML sessions — it's that **at most one DirectML session
+ever succeeds per process, full stop, for the process's entire lifetime**,
+regardless of whether earlier ones were already dropped. This session's
+first-pass "fix" (load a model, use it, drop the session, load the next)
+was itself never actually tested against the sequential case before being
+written down here — it does **not** work; a second DirectML session
+still crashes even after the first is fully out of scope. Plain CPU
+sessions (no execution provider registered) are unaffected: any number,
+any order, before or after the one DirectML session. Full repro notes:
+`crates/ml/src/lib.rs`'s `load_session` doc comment.
+
+**Adopted design, going forward**: exactly one model gets DirectML per
+process — SigLIP (Milestone ML-2's `TaggingModel`, the heaviest of the
+three models and run most often). YuNet and SFace (Milestone ML-3) both
+run CPU-only (`crates/ml::load_session_cpu`). Revisit only if CPU-only
+face-pipeline throughput proves inadequate on real hardware — untested at
+real scale as of this writing.
 
 **Milestone ML-2 — Tagging pipeline, no UI.** SigLIP embedding generation
 via the background backlog (§9); zero-shot scoring against the starter

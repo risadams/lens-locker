@@ -1,6 +1,6 @@
 //! Real proof that SFace loads and runs against the actual bundled file.
-//! `#[ignore]`d like this crate's other real-model tests. Kept in its own
-//! file/process — see `yunet_real_model.rs`'s doc comment for why.
+//! `#[ignore]`d like this crate's other real-model tests. Uses
+//! `load_session_cpu` — see `yunet_real_model.rs`'s doc comment for why.
 
 use image::{DynamicImage, RgbImage};
 use lenslocker_ml::faces;
@@ -12,7 +12,7 @@ fn sface_embeds_a_real_crop_into_128_dims() {
 
     let models_dir = lenslocker_ml::models_dir();
     let model_path = models_dir.join(lenslocker_ml::ModelKind::Sface.relative_path());
-    let mut session = lenslocker_ml::load_session(&model_path).expect("load the real SFace session");
+    let mut session = lenslocker_ml::load_session_cpu(&model_path).expect("load the real SFace session");
 
     let crop = DynamicImage::ImageRgb8(RgbImage::from_pixel(112, 112, image::Rgb([180, 140, 120])));
     let embedding = faces::embed_face(&mut session, &crop).expect("embed_face should succeed on a real 112x112 crop");

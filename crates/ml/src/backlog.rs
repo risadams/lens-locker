@@ -13,9 +13,10 @@
 //! Tagging pipeline", and this crate already houses the tagging-specific
 //! pipeline logic ([`tagging`]) this orchestration calls into, so keeping
 //! it here avoids a third crate boundary for what's currently a handful
-//! of functions. Revisit if Milestone ML-3's face pipeline (a
-//! structurally different shape — detection *and* embedding, clustering)
-//! needs something this doesn't fit.
+//! of functions. Milestone ML-3's face pipeline ([`process_face_backlog_batch`])
+//! turned out to fit the same file/crate fine, despite its different
+//! shape (detection *and* embedding, clustering) — it just needed its
+//! own function, not a new module boundary.
 //!
 //! **Not yet wired to the real background execution model (§9)** — no
 //! `AnalysisLock`, no ambient progress, no per-image connection-lock
@@ -132,4 +133,127 @@ impl TaggingModel {
 
         Ok(())
     }
+}
+
+/// This project's own name/version for the bundled SFace checkpoint —
+/// same judgment call as [`SIGLIP_MODEL_VERSION`], flagged rather than
+/// sourced from anywhere upstream.
+const SFACE_MODEL_NAME: &str = "sface-2021dec";
+const SFACE_MODEL_VERSION: &str = "v1";
+const SFACE_LICENSE_NOTE: &str = "Apache-2.0 (OpenCV Zoo face_recognition_sface — MODELS.md §3)";
+
+/// Score/NMS thresholds for [`crate::faces::detect_faces`] — OpenCV's own
+/// published `FaceDetectorYN` defaults (`crate::faces`'s module doc), not
+/// re-derived here.
+const YUNET_SCORE_THRESHOLD: f32 = 0.6;
+const YUNET_NMS_THRESHOLD: f32 = 0.3;
+
+struct PendingFaceCrop {
+    image_id: i64,
+    bbox: crate::faces::FaceBox,
+    detection_confidence: f32,
+    crop: image::DynamicImage,
+}
+
+/// Processes up to `batch_size` images from
+/// [`lenslocker_catalog::images_needing_embedding`] (reusing the exact
+/// same backlog mechanism [`TaggingModel::process_backlog_batch`] uses,
+/// keyed on SFace's own `model_id` instead of SigLIP's — a deliberate,
+/// flagged reuse: an image with zero detected faces would otherwise never
+/// get an `embeddings` row and would look permanently "unprocessed", so
+/// every backlogged image gets a marker row here regardless of face
+/// count — the mean of its faces' embeddings, or an all-zero vector if
+/// none were found).
+///
+/// Two passes, both CPU-only ([`crate::load_session_cpu`] — SigLIP already
+/// claims this process's one-ever DirectML session, per `load_session`'s
+/// doc comment): **Pass 1** loads YuNet, detects faces in every backlogged
+/// image, crops each one, and drops the session. **Pass 2** loads SFace,
+/// embeds each crop, and — for every face, in detection order, re-querying
+/// [`lenslocker_catalog::clustered_face_embeddings`] after each insert —
+/// runs [`crate::faces::match_face`] and applies its decision. Re-querying
+/// per face (not once for the whole batch) is deliberate, not an
+/// oversight: two repeated faces within the *same* batch (e.g. the same
+/// person across several photos in one import) must still cluster
+/// together, which only works if each face sees the clusters its own
+/// batch-mates already created.
+pub fn process_face_backlog_batch(conn: &Connection, models_dir: &Path, batch_size: i64, thresholds: &crate::faces::FaceThresholds) -> Result<usize> {
+    let model_id = lenslocker_catalog::find_or_create_model(conn, SFACE_MODEL_NAME, SFACE_MODEL_VERSION, crate::faces::EMBED_DIM as i64, SFACE_LICENSE_NOTE)?;
+
+    let image_ids = lenslocker_catalog::images_needing_embedding(conn, model_id, batch_size)?;
+    if image_ids.is_empty() {
+        return Ok(0);
+    }
+
+    let mut pending_crops: Vec<PendingFaceCrop> = Vec::new();
+    {
+        let yunet_path = models_dir.join(ModelKind::Yunet.relative_path());
+        // CPU, not DirectML: SigLIP already claims this process's one
+        // DirectML-session budget (crate::load_session's doc comment).
+        let mut yunet_session = crate::load_session_cpu(&yunet_path)?;
+
+        for &image_id in &image_ids {
+            let stored_path: String = conn.query_row("SELECT stored_path FROM images WHERE id = ?1", [image_id], |row| row.get(0))?;
+            let stored_path = PathBuf::from(stored_path);
+            let probe = lenslocker_decode::probe(&stored_path).map_err(|source| crate::MlError::Decode { path: stored_path, source })?;
+
+            let detections = crate::faces::detect_faces(&mut yunet_session, &probe.image, YUNET_SCORE_THRESHOLD, YUNET_NMS_THRESHOLD)?;
+            for detection in detections {
+                let crop = crate::faces::crop_face_for_embedding(&probe.image, &detection.bbox);
+                pending_crops.push(PendingFaceCrop { image_id, bbox: detection.bbox, detection_confidence: detection.score, crop });
+            }
+        }
+    }
+
+    {
+        let sface_path = models_dir.join(ModelKind::Sface.relative_path());
+        let mut sface_session = crate::load_session_cpu(&sface_path)?;
+
+        let mut per_image_embeddings: std::collections::HashMap<i64, Vec<Vec<f32>>> = std::collections::HashMap::new();
+
+        for crop in &pending_crops {
+            let embedding = crate::faces::embed_face(&mut sface_session, &crop.crop)?;
+
+            let new_detection = lenslocker_catalog::NewFaceDetection {
+                image_id: crop.image_id,
+                model_id,
+                detection_confidence: crop.detection_confidence as f64,
+                bbox_x: crop.bbox.x as i64,
+                bbox_y: crop.bbox.y as i64,
+                bbox_width: crop.bbox.width as i64,
+                bbox_height: crop.bbox.height as i64,
+                embedding: crate::encode_embedding(&embedding),
+                dimension: crate::faces::EMBED_DIM as i64,
+            };
+            let detection_id = lenslocker_catalog::insert_face_detection(conn, &new_detection)?;
+
+            let existing_members = lenslocker_catalog::clustered_face_embeddings(conn, model_id)?;
+            match crate::faces::match_face(&embedding, &existing_members, thresholds) {
+                crate::faces::FaceMatchDecision::AutoAttribute { cluster_id } => {
+                    lenslocker_catalog::attach_face_detection_to_cluster(conn, detection_id, cluster_id)?;
+                }
+                crate::faces::FaceMatchDecision::ReviewQueue { suggested_person_id, similarity } => {
+                    lenslocker_catalog::queue_face_match_review(conn, detection_id, suggested_person_id, similarity as f64)?;
+                }
+                crate::faces::FaceMatchDecision::JoinCluster { cluster_id } => {
+                    lenslocker_catalog::attach_face_detection_to_cluster(conn, detection_id, cluster_id)?;
+                }
+                crate::faces::FaceMatchDecision::NewCluster => {
+                    lenslocker_catalog::create_cluster_with_member(conn, detection_id)?;
+                }
+            }
+
+            per_image_embeddings.entry(crop.image_id).or_default().push(embedding);
+        }
+
+        for &image_id in &image_ids {
+            let marker = match per_image_embeddings.get(&image_id) {
+                Some(embeddings) => crate::faces::centroid(embeddings),
+                None => vec![0f32; crate::faces::EMBED_DIM],
+            };
+            lenslocker_catalog::upsert_embedding(conn, image_id, model_id, &crate::encode_embedding(&marker), crate::faces::EMBED_DIM as i64)?;
+        }
+    }
+
+    Ok(image_ids.len())
 }

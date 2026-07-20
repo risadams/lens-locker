@@ -141,10 +141,29 @@ pub fn init(dylib_path: &Path) -> Result<()> {
 }
 
 /// Opens `model_path` as a `Session` with the DirectML execution provider
-/// registered. Per-node fallback to CPU for any op DirectML doesn't
-/// support is ONNX Runtime's own built-in behavior, not something this
-/// wrapper implements. [`init`] must have already been called with a real
-/// dylib path.
+/// registered. [`init`] must have already been called with a real dylib
+/// path.
+///
+/// **Budget: at most one call to this function may ever succeed per
+/// process — not "at most one at a time," literally at most one, full
+/// stop, for the process's entire lifetime, regardless of whether earlier
+/// DirectML sessions have long since been dropped.** Confirmed
+/// empirically (a throwaway diagnostic harness, not committed): a second
+/// `Session::builder()...with_execution_providers([DirectML...])` call
+/// crashes the whole process with `STATUS_ACCESS_VIOLATION` even when the
+/// first session was already out of scope, on the official stable
+/// `onnxruntime` v1.27.1 DirectML build. This is *stricter* than this
+/// crate's earlier documented finding ("never hold two DirectML sessions
+/// open concurrently") — that workaround was itself untested for the
+/// sequential load→drop→load-again case, which also crashes; corrected
+/// here rather than left wrong (see `ML-SPEC.md`'s Milestone ML-1
+/// addendum for the fuller history). Plain CPU sessions
+/// ([`load_session_cpu`]) are unaffected — any number, any order, before
+/// or after the one DirectML session — so the practical rule for this
+/// codebase is: **exactly one model gets DirectML per process; every
+/// other model in that same process must use [`load_session_cpu`].**
+/// Milestone ML-2's `TaggingModel` claims that one slot for SigLIP;
+/// Milestone ML-3's YuNet/SFace both use [`load_session_cpu`] instead.
 pub fn load_session(model_path: &Path) -> Result<Session> {
     // `with_execution_providers`/`with_memory_pattern` return
     // `ort::Error<SessionBuilder>` (they hand the builder back on failure
@@ -162,14 +181,22 @@ pub fn load_session(model_path: &Path) -> Result<Session> {
     // itself the moment a DML EP is registered regardless (logged as
     // `inference_session.cc: Having memory pattern enabled is not
     // supported while using the DML Execution Provider... disabling it`)
-    // — so this did **not** turn out to be the fix for the real,
-    // still-open multi-session crash documented on this module's test.
+    // — so this did **not** turn out to be the fix for the crash this
+    // function's own doc comment now documents precisely.
     let mut builder = Session::builder()?
         .with_execution_providers([DirectML::default().build()])
         .map_err(flatten)?
         .with_memory_pattern(false)
         .map_err(flatten)?;
     Ok(builder.commit_from_file(model_path)?)
+}
+
+/// Opens `model_path` as a plain CPU `Session` — no execution provider
+/// registered. Safe to call any number of times, in any order relative to
+/// the one [`load_session`] (DirectML) call a process may make — see that
+/// function's doc comment for why this distinction exists at all.
+pub fn load_session_cpu(model_path: &Path) -> Result<Session> {
+    Ok(Session::builder()?.commit_from_file(model_path)?)
 }
 
 #[cfg(test)]
@@ -193,27 +220,20 @@ mod tests {
     /// touching (or depending on) whatever's actually sitting in the
     /// configured `models_dir()`.
     ///
-    /// **Known open issue, reproduced against a real dylib (ONNX Runtime
-    /// 1.27.20260709 — the version string's embedded date suggests a
-    /// nightly/dev build, not a tagged stable release; unconfirmed whether
-    /// a stable release avoids this):** the *first* `Session` created with
-    /// the DirectML EP in a process loads and runs correctly (confirmed via
-    /// ad-hoc single-session repro, both `commit_from_memory` and
-    /// `commit_from_file`, both pinned and auto-selected device IDs); the
-    /// *second* one — regardless of shape, source model, or file vs. memory
-    /// loading — crashes the whole process with `STATUS_ACCESS_VIOLATION`
-    /// (0xC0000005), no Rust panic, no `ort::Error`. A same-process
-    /// multi-session CPU-only loop (no DirectML) does not reproduce it, so
-    /// it's specific to a second DirectML session, not "any second
-    /// session." This directly contradicts §2's required shape — "one
-    /// shared `ort` environment, three separate `Session` objects
-    /// (SigLIP, YuNet, SFace)... avoiding redundant DirectML device
-    /// initialization" — so it's flagged here rather than silently worked
-    /// around; needs resolving (a different onnxruntime.dll build is the
-    /// first thing to try) before ML-2/ML-3 can build real multi-model
-    /// pipelines on this EP.
+    /// **Deliberately still reproduces the known DirectML budget** (see
+    /// [`load_session`]'s doc comment for the fully-characterized finding:
+    /// at most one DirectML session ever succeeds per process, confirmed
+    /// against the official stable `onnxruntime` v1.27.1 DirectML build,
+    /// not a nightly quirk as first suspected). Calling [`load_session`]
+    /// in a loop for all three model slots is exactly the crash case —
+    /// this test exists to keep that fact honest and reproducible in the
+    /// test suite rather than only in a doc comment, not because
+    /// Milestone ML-2/ML-3's real pipelines actually do this (they don't:
+    /// `crates/ml::backlog::TaggingModel` uses [`load_session`] for
+    /// SigLIP only; `crates/ml::backlog::process_face_backlog_batch` uses
+    /// [`load_session_cpu`] for both YuNet and SFace).
     #[test]
-    #[ignore = "known crash on the 2nd DirectML session in-process — see doc comment above"]
+    #[ignore = "known: only one DirectML session ever succeeds per process — see load_session's doc comment"]
     fn sessions_load_and_run_a_forward_pass_for_each_model_slot() {
         init(&dylib_path()).expect("init the bundled onnxruntime dylib");
 

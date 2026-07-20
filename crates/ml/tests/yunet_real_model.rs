@@ -3,10 +3,11 @@
 //! no network to fetch a licensed one), so this proves the plumbing
 //! (session creation, tensor shapes, decode-without-crashing), not real
 //! detection accuracy. `#[ignore]`d like this crate's other real-model
-//! tests. Kept in its own file/process, not alongside the SFace test —
-//! per the ML-1 addendum, a second DirectML session in one process
-//! crashes even after the first was dropped, and cargo runs every #[test]
-//! in one file's binary in the same process.
+//! tests. Uses `load_session_cpu`, matching `crates/ml::backlog`'s real
+//! usage — SigLIP claims this process's one-ever DirectML session
+//! (`load_session`'s doc comment), so YuNet/SFace both run CPU-only in
+//! production, and this test proves the real code path, not a
+//! DirectML-specific one that production doesn't actually use.
 
 use image::{DynamicImage, RgbImage};
 use lenslocker_ml::faces;
@@ -18,7 +19,7 @@ fn yunet_runs_on_a_real_image_without_crashing() {
 
     let models_dir = lenslocker_ml::models_dir();
     let model_path = models_dir.join(lenslocker_ml::ModelKind::Yunet.relative_path());
-    let mut session = lenslocker_ml::load_session(&model_path).expect("load the real YuNet session");
+    let mut session = lenslocker_ml::load_session_cpu(&model_path).expect("load the real YuNet session");
 
     // A non-square photo, so the letterbox path (not just a square
     // resize) actually gets exercised against the real model.
