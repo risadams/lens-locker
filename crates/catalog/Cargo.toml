@@ -10,3 +10,4 @@ workspace = true
 [dependencies]
 rusqlite = { version = "0.40.1", features = ["bundled"] }
 rusqlite_migration = "2.6.0"
+sqlite-vec = "0.1.9"

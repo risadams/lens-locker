@@ -4,6 +4,9 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
 
+pub mod vec_mirror;
+pub use vec_mirror::VecMirror;
+
 fn migrations() -> Migrations<'static> {
     Migrations::new(vec![
         M::up(include_str!("../schema.sql")),
