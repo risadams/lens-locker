@@ -45,6 +45,20 @@ pub enum MlError {
 
 pub type Result<T> = std::result::Result<T, MlError>;
 
+/// Encodes values as little-endian `f32` bytes — how every embedding
+/// column in this workspace (`embeddings.vector`, `face_detections.embedding`)
+/// is stored; shared by [`tagging`] and [`faces`] rather than each
+/// re-deriving its own copy.
+pub fn encode_embedding(values: &[f32]) -> Vec<u8> {
+    values.iter().flat_map(|v| v.to_le_bytes()).collect()
+}
+
+/// Decodes little-endian `f32` bytes back into values — the inverse of
+/// [`encode_embedding`].
+pub fn decode_embedding(bytes: &[u8]) -> Vec<f32> {
+    bytes.chunks_exact(4).map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]])).collect()
+}
+
 /// The three bundled models (§2), by their expected path within
 /// [`models_dir`]. Matches the upstream source layout exactly — OpenCV
 /// Zoo's own per-model subdirectories for the face pair, `optimum-cli`'s

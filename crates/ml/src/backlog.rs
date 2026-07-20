@@ -119,7 +119,7 @@ impl TaggingModel {
         let pixel_values = tagging::preprocess_image(&probe.image);
         let image_embedding = tagging::embed_image(&mut self.session, &pixel_values)?;
 
-        let vector_bytes: Vec<u8> = image_embedding.iter().flat_map(|v| v.to_le_bytes()).collect();
+        let vector_bytes = crate::encode_embedding(&image_embedding);
         lenslocker_catalog::upsert_embedding(conn, image_id, self.model_id, &vector_bytes, tagging::EMBEDDING_DIM as i64)?;
         vec_mirror.upsert(image_id, &vector_bytes)?;
 

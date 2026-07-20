@@ -36,7 +36,7 @@ use ort::inputs;
 use ort::session::{OutputSelector, RunOptions, Session};
 use ort::value::Tensor;
 
-use crate::{MlError, Result};
+use crate::{MlError, Result, decode_embedding};
 
 /// YuNet's fixed export input size (`MODELS.md` §2) — both dimensions.
 pub const DETECT_INPUT_SIZE: u32 = 640;
@@ -269,17 +269,198 @@ pub fn embed_face(session: &mut Session, face_crop: &DynamicImage) -> Result<Vec
 /// `0.363` default is SFace's *published* cosine-similarity verification
 /// threshold, not a distance).
 pub fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    debug_assert_eq!(a.len(), EMBED_DIM);
-    debug_assert_eq!(b.len(), EMBED_DIM);
+    debug_assert_eq!(a.len(), b.len(), "cosine similarity is undefined between differently-dimensioned embeddings");
     let dot: f32 = a.iter().zip(b).map(|(x, y)| x * y).sum();
     let mag_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
     let mag_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
     if mag_a == 0.0 || mag_b == 0.0 { 0.0 } else { dot / (mag_a * mag_b) }
 }
 
+/// Mean of one or more embeddings — a cluster's representative point for
+/// matching (a real per-member comparison would be more precise but
+/// scales worse; a judgment call, flagged rather than assumed correct at
+/// any scale — see `crates/ml/src/backlog.rs`'s face-matching doc
+/// comment). Panics on an empty slice; every caller only ever calls this
+/// with an already-nonempty cluster's members.
+pub fn centroid(embeddings: &[Vec<f32>]) -> Vec<f32> {
+    assert!(!embeddings.is_empty(), "centroid of zero embeddings is undefined");
+    let dim = embeddings[0].len();
+    let mut sum = vec![0f32; dim];
+    for embedding in embeddings {
+        for (i, v) in embedding.iter().enumerate() {
+            sum[i] += v;
+        }
+    }
+    let n = embeddings.len() as f32;
+    sum.iter().map(|v| v / n).collect()
+}
+
+/// §6/§11's three tunable thresholds, cosine-similarity-scaled (higher =
+/// more similar) — `app_settings`' own stored values, not hardcoded here.
+#[derive(Debug, Clone, Copy)]
+pub struct FaceThresholds {
+    pub cluster_threshold: f32,
+    pub review_threshold: f32,
+    pub auto_attribute_threshold: f32,
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub enum FaceMatchDecision {
+    /// High-confidence match against a named person — attach silently,
+    /// no human review (§6).
+    AutoAttribute { cluster_id: i64 },
+    /// Medium-confidence match against a named person — queue for human
+    /// review rather than silently attaching (§6).
+    ReviewQueue { suggested_person_id: i64, similarity: f32 },
+    /// No plausible match to any named person, but a good enough match to
+    /// an existing *unnamed* cluster — ordinary clustering (§6).
+    JoinCluster { cluster_id: i64 },
+    /// No match anywhere — starts a new unnamed, provisional cluster.
+    NewCluster,
+}
+
+/// Implements §6's three-tier match: compare `new_embedding` against
+/// every **named** person's cluster centroid first (auto-attribute /
+/// review queue / no match, in that strictness order), falling through to
+/// ordinary clustering against **unnamed** clusters only when no named
+/// person clears even the review floor — a low-confidence match to a
+/// named person's cluster must never silently fall back to joining that
+/// same cluster anonymously just because it also happens to be the
+/// nearest unnamed-shaped grouping; the review gate is the only path
+/// into a named identity below the auto-attribute bar.
+pub fn match_face(new_embedding: &[f32], members: &[lenslocker_catalog::ClusterMember], thresholds: &FaceThresholds) -> FaceMatchDecision {
+    let mut clusters: std::collections::BTreeMap<i64, (Option<i64>, Vec<Vec<f32>>)> = std::collections::BTreeMap::new();
+    for member in members {
+        let embedding = decode_embedding(&member.embedding);
+        clusters.entry(member.cluster_id).or_insert_with(|| (member.person_id, Vec::new())).1.push(embedding);
+    }
+    let centroids: Vec<(i64, Option<i64>, Vec<f32>)> =
+        clusters.into_iter().map(|(cluster_id, (person_id, embeddings))| (cluster_id, person_id, centroid(&embeddings))).collect();
+
+    let best_named = centroids
+        .iter()
+        .filter_map(|(cluster_id, person_id, centroid)| person_id.map(|p| (*cluster_id, p, cosine_similarity(new_embedding, centroid))))
+        .max_by(|a, b| a.2.partial_cmp(&b.2).unwrap_or(std::cmp::Ordering::Equal));
+
+    if let Some((cluster_id, person_id, similarity)) = best_named {
+        if similarity >= thresholds.auto_attribute_threshold {
+            return FaceMatchDecision::AutoAttribute { cluster_id };
+        }
+        if similarity >= thresholds.review_threshold {
+            return FaceMatchDecision::ReviewQueue { suggested_person_id: person_id, similarity };
+        }
+    }
+
+    let best_unnamed = centroids
+        .iter()
+        .filter(|(_, person_id, _)| person_id.is_none())
+        .map(|(cluster_id, _, centroid)| (*cluster_id, cosine_similarity(new_embedding, centroid)))
+        .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal));
+
+    match best_unnamed {
+        Some((cluster_id, similarity)) if similarity >= thresholds.cluster_threshold => FaceMatchDecision::JoinCluster { cluster_id },
+        _ => FaceMatchDecision::NewCluster,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn thresholds() -> FaceThresholds {
+        // Matches migration 0003's real defaults.
+        FaceThresholds { cluster_threshold: 0.30, review_threshold: 0.363, auto_attribute_threshold: 0.50 }
+    }
+
+    fn unit_vector(index: usize, dim: usize) -> Vec<f32> {
+        let mut v = vec![0f32; dim];
+        v[index] = 1.0;
+        v
+    }
+
+    fn member(face_detection_id: i64, cluster_id: i64, person_id: Option<i64>, embedding: &[f32]) -> lenslocker_catalog::ClusterMember {
+        lenslocker_catalog::ClusterMember { face_detection_id, cluster_id, person_id, embedding: crate::encode_embedding(embedding) }
+    }
+
+    #[test]
+    fn encode_decode_embedding_round_trips() {
+        let values = vec![1.5f32, -2.25, 0.0, 3.0];
+        assert_eq!(decode_embedding(&crate::encode_embedding(&values)), values);
+    }
+
+    #[test]
+    fn centroid_of_a_single_embedding_is_itself() {
+        let v = vec![1.0, 2.0, 3.0];
+        assert_eq!(centroid(&[v.clone()]), v);
+    }
+
+    #[test]
+    fn centroid_averages_multiple_embeddings() {
+        let a = vec![0.0, 0.0];
+        let b = vec![2.0, 4.0];
+        assert_eq!(centroid(&[a, b]), vec![1.0, 2.0]);
+    }
+
+    #[test]
+    fn match_face_auto_attributes_a_near_identical_match_to_a_named_person() {
+        let dim = 4;
+        let members = vec![member(1, 100, Some(7), &unit_vector(0, dim))];
+        let decision = match_face(&unit_vector(0, dim), &members, &thresholds());
+        assert_eq!(decision, FaceMatchDecision::AutoAttribute { cluster_id: 100 });
+    }
+
+    #[test]
+    fn match_face_queues_a_medium_confidence_named_match_for_review() {
+        // named=[1,0], probe=[cos(theta), sin(theta)] with theta chosen so
+        // cosine similarity lands at ~0.42 — between the review floor
+        // (0.363) and the auto-attribute bar (0.50).
+        let named = vec![1.0f32, 0.0];
+        let probe = vec![0.42f32, (1.0f32 - 0.42f32 * 0.42f32).sqrt()];
+        let similarity = cosine_similarity(&probe, &named);
+        assert!(
+            similarity >= thresholds().review_threshold && similarity < thresholds().auto_attribute_threshold,
+            "test fixture's own similarity ({similarity}) must land in the review band for this test to mean anything"
+        );
+
+        let members = vec![member(1, 100, Some(7), &named)];
+        let decision = match_face(&probe, &members, &thresholds());
+        assert_eq!(decision, FaceMatchDecision::ReviewQueue { suggested_person_id: 7, similarity });
+    }
+
+    #[test]
+    fn match_face_never_falls_back_to_silently_joining_a_named_clusters_low_similarity_match() {
+        // Below even the review floor against the only (named) cluster —
+        // must NOT silently join it just because it's the closest thing
+        // around; must fall through to NewCluster (no unnamed cluster
+        // exists to join either).
+        let named = vec![1.0f32, 0.0, 0.0, 0.0];
+        let probe = vec![0.0f32, 1.0, 0.0, 0.0]; // orthogonal: similarity 0.0
+        let members = vec![member(1, 100, Some(7), &named)];
+        let decision = match_face(&probe, &members, &thresholds());
+        assert_eq!(decision, FaceMatchDecision::NewCluster);
+    }
+
+    #[test]
+    fn match_face_joins_a_good_enough_unnamed_cluster_when_no_named_match_exists() {
+        let dim = 4;
+        let members = vec![member(1, 200, None, &unit_vector(0, dim))];
+        let decision = match_face(&unit_vector(0, dim), &members, &thresholds());
+        assert_eq!(decision, FaceMatchDecision::JoinCluster { cluster_id: 200 });
+    }
+
+    #[test]
+    fn match_face_starts_a_new_cluster_when_nothing_is_close_enough() {
+        let dim = 4;
+        let members = vec![member(1, 200, None, &unit_vector(0, dim))];
+        let decision = match_face(&unit_vector(1, dim), &members, &thresholds());
+        assert_eq!(decision, FaceMatchDecision::NewCluster);
+    }
+
+    #[test]
+    fn match_face_with_no_existing_members_always_starts_a_new_cluster() {
+        let decision = match_face(&unit_vector(0, 4), &[], &thresholds());
+        assert_eq!(decision, FaceMatchDecision::NewCluster);
+    }
 
     #[test]
     fn iou_of_identical_boxes_is_one() {
