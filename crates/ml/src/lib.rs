@@ -137,12 +137,10 @@ mod tests {
     /// The real end-to-end proof Milestone ML-1 asks for: [`load_session`]
     /// (the actual production function — not an ad-hoc rebuild of its
     /// internals) opens a `Session` at a [`ModelKind::relative_path`]-shaped
-    /// path and runs a forward pass, DirectML EP registered. `#[ignore]`d
-    /// because it needs the bundled ONNX Runtime DirectML dylib, which
-    /// isn't available in this environment (see `MODELS.md`) — run with
-    /// `cargo test -p lenslocker-ml -- --ignored` once
-    /// `LENSLOCKER_MODELS_DIR` (or the exe-relative `models/` dir) has a
-    /// real `onnxruntime.dll` in it.
+    /// path and runs a forward pass, DirectML EP registered. `#[ignore]`d by
+    /// default since it needs a real `onnxruntime.dll` at
+    /// `LENSLOCKER_MODELS_DIR` (or the exe-relative `models/` dir) — see
+    /// `MODELS.md`.
     ///
     /// Deliberately does NOT need the real YuNet/SFace/SigLIP weights too:
     /// each placeholder graph is written out to its own isolated temp
@@ -150,8 +148,28 @@ mod tests {
     /// `load_session`'s file-resolution is exercised for real without
     /// touching (or depending on) whatever's actually sitting in the
     /// configured `models_dir()`.
+    ///
+    /// **Known open issue, reproduced against a real dylib (ONNX Runtime
+    /// 1.27.20260709 — the version string's embedded date suggests a
+    /// nightly/dev build, not a tagged stable release; unconfirmed whether
+    /// a stable release avoids this):** the *first* `Session` created with
+    /// the DirectML EP in a process loads and runs correctly (confirmed via
+    /// ad-hoc single-session repro, both `commit_from_memory` and
+    /// `commit_from_file`, both pinned and auto-selected device IDs); the
+    /// *second* one — regardless of shape, source model, or file vs. memory
+    /// loading — crashes the whole process with `STATUS_ACCESS_VIOLATION`
+    /// (0xC0000005), no Rust panic, no `ort::Error`. A same-process
+    /// multi-session CPU-only loop (no DirectML) does not reproduce it, so
+    /// it's specific to a second DirectML session, not "any second
+    /// session." This directly contradicts §2's required shape — "one
+    /// shared `ort` environment, three separate `Session` objects
+    /// (SigLIP, YuNet, SFace)... avoiding redundant DirectML device
+    /// initialization" — so it's flagged here rather than silently worked
+    /// around; needs resolving (a different onnxruntime.dll build is the
+    /// first thing to try) before ML-2/ML-3 can build real multi-model
+    /// pipelines on this EP.
     #[test]
-    #[ignore = "needs the bundled ONNX Runtime DirectML dylib — see MODELS.md"]
+    #[ignore = "known crash on the 2nd DirectML session in-process — see doc comment above"]
     fn sessions_load_and_run_a_forward_pass_for_each_model_slot() {
         init(&dylib_path()).expect("init the bundled onnxruntime dylib");
 

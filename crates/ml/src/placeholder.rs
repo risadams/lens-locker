@@ -2,23 +2,23 @@
 //!
 //! Milestone ML-1's exit criteria ("a `Session` loads and runs a forward
 //! pass for each of the three models") needs real YuNet/SFace/SigLIP
-//! `.onnx` weight files, which aren't available in this environment (see
-//! `MODELS.md`). This module builds a minimal *structurally valid* ONNX
-//! graph — one `Identity` node, one input, one output, both the same
-//! float32 shape — entirely by hand, so the `ort`/DirectML `Session`
-//! plumbing itself can be exercised without waiting on those files.
+//! `.onnx` weight files, which weren't available for most of this
+//! milestone's development (see `MODELS.md`). This module builds a minimal
+//! *structurally valid* ONNX graph — one `Identity` node, one input, one
+//! output, both the same float32 shape — entirely by hand, so the
+//! `ort`/DirectML `Session` plumbing itself can be exercised without
+//! waiting on those files.
 //!
-//! **Unverified against real ONNX Runtime.** The field numbers below are
-//! transcribed from `onnx.proto`'s stable, long-published wire schema, but
-//! nothing in this crate can actually load them through the real ONNX
-//! Runtime C API in this environment (that needs the bundled dylib —
-//! `MODELS.md`). [`tests::placeholder_bytes_contain_the_expected_graph_shape`]
-//! only checks the encoded bytes structurally round-trip through this
-//! module's own tiny decoder; [`super::tests::sessions_load_and_run_a_forward_pass_for_each_model_slot`]
-//! is the real end-to-end check, `#[ignore]`d until the dylib exists.
-//! Flagging this rather than asserting untested certainty, matching this
-//! repo's convention for unconfirmed build-time numbers
-//! (workplan/ML-SPEC.md §10).
+//! **Verified against a real ONNX Runtime 1.27 dylib** (once one became
+//! available mid-milestone) — `ModelProto`'s field numbers below were
+//! initially transcribed wrong from memory (`graph`/`opset_import` swapped,
+//! `producer_name` off by one) and only caught by actually loading the
+//! bytes through the real C API; [`tests::placeholder_bytes_contain_the_expected_graph_shape`]'s
+//! byte-presence check could not have caught that class of bug on its own.
+//! [`super::tests::sessions_load_and_run_a_forward_pass_for_each_model_slot`]
+//! is the real end-to-end check and now passes against a single DirectML
+//! session — see that test's module for a separate, still-open finding
+//! about *multiple* DirectML sessions in one process.
 
 fn write_varint(buf: &mut Vec<u8>, mut value: u64) {
     loop {
@@ -103,9 +103,9 @@ pub fn identity_graph_model(input_name: &str, output_name: &str, dims: &[i64]) -
 
     let mut model = Vec::new();
     write_varint_field(&mut model, 1, 8); // ModelProto.ir_version
-    write_bytes_field(&mut model, 2, &opset); // ModelProto.opset_import
-    write_string_field(&mut model, 3, "lenslocker-ml"); // ModelProto.producer_name
-    write_bytes_field(&mut model, 8, &graph); // ModelProto.graph
+    write_string_field(&mut model, 2, "lenslocker-ml"); // ModelProto.producer_name
+    write_bytes_field(&mut model, 7, &graph); // ModelProto.graph
+    write_bytes_field(&mut model, 8, &opset); // ModelProto.opset_import
     model
 }
 
