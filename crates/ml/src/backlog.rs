@@ -165,6 +165,18 @@ struct PendingFaceCrop {
 /// count — the mean of its faces' embeddings, or an all-zero vector if
 /// none were found).
 ///
+/// **Landmine for a future generic feature, flagged explicitly**: §11
+/// describes `embeddings` in SigLIP terms only ("already fit the
+/// one-embedding-per-image-per-model shape"); repurposing it here as a
+/// bare processed-marker means any future feature that queries
+/// `embeddings` generically across models (e.g. a cross-model similarity
+/// view) must filter out or specially handle SFace-model rows for
+/// faceless images — they are not a real face embedding, they're a
+/// zero-vector placeholder. Not an issue for anything built so far
+/// ([`lenslocker_catalog::VecMirror::build`] already filters by
+/// `model_id`, so it never mixes SigLIP and SFace rows), but a real trap
+/// for anyone assuming "an `embeddings` row means a real embedding" later.
+///
 /// Two passes, both CPU-only ([`crate::load_session_cpu`] — SigLIP already
 /// claims this process's one-ever DirectML session, per `load_session`'s
 /// doc comment): **Pass 1** loads YuNet, detects faces in every backlogged
@@ -228,20 +240,8 @@ pub fn process_face_backlog_batch(conn: &Connection, models_dir: &Path, batch_si
             let detection_id = lenslocker_catalog::insert_face_detection(conn, &new_detection)?;
 
             let existing_members = lenslocker_catalog::clustered_face_embeddings(conn, model_id)?;
-            match crate::faces::match_face(&embedding, &existing_members, thresholds) {
-                crate::faces::FaceMatchDecision::AutoAttribute { cluster_id } => {
-                    lenslocker_catalog::attach_face_detection_to_cluster(conn, detection_id, cluster_id)?;
-                }
-                crate::faces::FaceMatchDecision::ReviewQueue { suggested_person_id, similarity } => {
-                    lenslocker_catalog::queue_face_match_review(conn, detection_id, suggested_person_id, similarity as f64)?;
-                }
-                crate::faces::FaceMatchDecision::JoinCluster { cluster_id } => {
-                    lenslocker_catalog::attach_face_detection_to_cluster(conn, detection_id, cluster_id)?;
-                }
-                crate::faces::FaceMatchDecision::NewCluster => {
-                    lenslocker_catalog::create_cluster_with_member(conn, detection_id)?;
-                }
-            }
+            let decision = crate::faces::match_face(&embedding, &existing_members, thresholds);
+            apply_face_match_decision(conn, detection_id, decision)?;
 
             per_image_embeddings.entry(crop.image_id).or_default().push(embedding);
         }
@@ -256,4 +256,138 @@ pub fn process_face_backlog_batch(conn: &Connection, models_dir: &Path, batch_si
     }
 
     Ok(image_ids.len())
+}
+
+/// Applies a [`crate::faces::FaceMatchDecision`] to the catalog — the
+/// dispatch table between §6's three-tier decision and the CRUD it
+/// implies. Factored out of [`process_face_backlog_batch`]'s inline loop
+/// so it's unit-testable against a real (in-memory) catalog without
+/// needing a real model to produce the decision — `match_face` itself
+/// already has thorough synthetic-embedding tests (`crates/ml/src/faces.rs`);
+/// this is what was previously untested: whether each of its four
+/// outcomes actually reaches the right catalog call.
+fn apply_face_match_decision(conn: &Connection, detection_id: i64, decision: crate::faces::FaceMatchDecision) -> Result<()> {
+    match decision {
+        crate::faces::FaceMatchDecision::AutoAttribute { cluster_id } => {
+            lenslocker_catalog::attach_face_detection_to_cluster(conn, detection_id, cluster_id)?;
+        }
+        crate::faces::FaceMatchDecision::ReviewQueue { suggested_person_id, similarity } => {
+            lenslocker_catalog::queue_face_match_review(conn, detection_id, suggested_person_id, similarity as f64)?;
+        }
+        crate::faces::FaceMatchDecision::JoinCluster { cluster_id } => {
+            lenslocker_catalog::attach_face_detection_to_cluster(conn, detection_id, cluster_id)?;
+        }
+        crate::faces::FaceMatchDecision::NewCluster => {
+            lenslocker_catalog::create_cluster_with_member(conn, detection_id)?;
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use rusqlite::OptionalExtension;
+
+    use super::*;
+
+    fn migrated_conn() -> Connection {
+        let mut conn = Connection::open_in_memory().unwrap();
+        lenslocker_catalog::migrate(&mut conn).unwrap();
+        conn
+    }
+
+    fn insert_test_image(conn: &Connection) -> i64 {
+        let library_id: i64 = conn
+            .query_row("SELECT id FROM libraries WHERE root_path = 'A:/lib'", [], |row| row.get(0))
+            .optional()
+            .unwrap()
+            .unwrap_or_else(|| {
+                conn.execute("INSERT INTO libraries (name, root_path) VALUES ('lib', 'A:/lib')", []).unwrap();
+                conn.last_insert_rowid()
+            });
+        conn.execute(
+            "INSERT INTO images (library_id, original_hash, stored_hash, stored_path, original_format, stored_format, file_size_bytes)
+             VALUES (?1, randomblob(8), x'00', 'x', 'jpeg', 'jpeg', 0)",
+            [library_id],
+        )
+        .unwrap();
+        conn.last_insert_rowid()
+    }
+
+    fn insert_test_detection(conn: &Connection, model_id: i64) -> i64 {
+        let image_id = insert_test_image(conn);
+        lenslocker_catalog::insert_face_detection(
+            conn,
+            &lenslocker_catalog::NewFaceDetection {
+                image_id,
+                model_id,
+                detection_confidence: 0.9,
+                bbox_x: 0,
+                bbox_y: 0,
+                bbox_width: 10,
+                bbox_height: 10,
+                embedding: crate::encode_embedding(&[0.0; 4]),
+                dimension: 4,
+            },
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn auto_attribute_attaches_the_detection_to_the_named_cluster() {
+        let conn = migrated_conn();
+        let model_id = lenslocker_catalog::find_or_create_model(&conn, "sface", "v1", 4, "Apache-2.0").unwrap();
+        let anchor = insert_test_detection(&conn, model_id);
+        let cluster_id = lenslocker_catalog::create_cluster_with_member(&conn, anchor).unwrap();
+
+        let detection_id = insert_test_detection(&conn, model_id);
+        apply_face_match_decision(&conn, detection_id, crate::faces::FaceMatchDecision::AutoAttribute { cluster_id }).unwrap();
+
+        let stored: i64 = conn.query_row("SELECT face_cluster_id FROM face_detections WHERE id = ?1", [detection_id], |row| row.get(0)).unwrap();
+        assert_eq!(stored, cluster_id);
+    }
+
+    #[test]
+    fn review_queue_inserts_a_pending_row_without_touching_the_detections_cluster() {
+        let conn = migrated_conn();
+        let model_id = lenslocker_catalog::find_or_create_model(&conn, "sface", "v1", 4, "Apache-2.0").unwrap();
+        let detection_id = insert_test_detection(&conn, model_id);
+        conn.execute("INSERT INTO persons (name) VALUES ('Alex')", []).unwrap();
+        let person_id = conn.last_insert_rowid();
+
+        apply_face_match_decision(&conn, detection_id, crate::faces::FaceMatchDecision::ReviewQueue { suggested_person_id: person_id, similarity: 0.4 }).unwrap();
+
+        let queued_count: i64 = conn.query_row("SELECT COUNT(*) FROM face_match_review_queue WHERE face_detection_id = ?1", [detection_id], |row| row.get(0)).unwrap();
+        assert_eq!(queued_count, 1);
+        let cluster_id: Option<i64> = conn.query_row("SELECT face_cluster_id FROM face_detections WHERE id = ?1", [detection_id], |row| row.get(0)).unwrap();
+        assert_eq!(cluster_id, None, "a review-queued detection must not jump straight into the named cluster");
+    }
+
+    #[test]
+    fn join_cluster_attaches_the_detection_to_the_unnamed_cluster() {
+        let conn = migrated_conn();
+        let model_id = lenslocker_catalog::find_or_create_model(&conn, "sface", "v1", 4, "Apache-2.0").unwrap();
+        let anchor = insert_test_detection(&conn, model_id);
+        let cluster_id = lenslocker_catalog::create_cluster_with_member(&conn, anchor).unwrap();
+
+        let detection_id = insert_test_detection(&conn, model_id);
+        apply_face_match_decision(&conn, detection_id, crate::faces::FaceMatchDecision::JoinCluster { cluster_id }).unwrap();
+
+        let stored: i64 = conn.query_row("SELECT face_cluster_id FROM face_detections WHERE id = ?1", [detection_id], |row| row.get(0)).unwrap();
+        assert_eq!(stored, cluster_id);
+    }
+
+    #[test]
+    fn new_cluster_creates_and_attaches_a_fresh_unnamed_cluster() {
+        let conn = migrated_conn();
+        let model_id = lenslocker_catalog::find_or_create_model(&conn, "sface", "v1", 4, "Apache-2.0").unwrap();
+        let detection_id = insert_test_detection(&conn, model_id);
+
+        apply_face_match_decision(&conn, detection_id, crate::faces::FaceMatchDecision::NewCluster).unwrap();
+
+        let cluster_id: Option<i64> = conn.query_row("SELECT face_cluster_id FROM face_detections WHERE id = ?1", [detection_id], |row| row.get(0)).unwrap();
+        let cluster_id = cluster_id.expect("NewCluster must attach the detection to a freshly created cluster");
+        let person_id: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [cluster_id], |row| row.get(0)).unwrap();
+        assert_eq!(person_id, None, "a freshly created cluster must be unnamed");
+    }
 }

@@ -36,8 +36,7 @@ fn insert_test_image(conn: &Connection, stored_path: &std::path::Path) -> i64 {
 }
 
 fn thresholds() -> FaceThresholds {
-    // Matches migration 0003's real defaults.
-    FaceThresholds { cluster_threshold: 0.30, review_threshold: 0.363, auto_attribute_threshold: 0.50 }
+    FaceThresholds::schema_defaults()
 }
 
 #[test]

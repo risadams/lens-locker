@@ -165,7 +165,7 @@ pub fn detect_faces(session: &mut Session, image: &DynamicImage, score_threshold
     let outputs = session.run_with_options(inputs!["input" => input], &run_options)?;
 
     let mut candidates = Vec::new();
-    for (stage, &stride) in STRIDES.iter().enumerate() {
+    for &stride in &STRIDES {
         let cols = (DETECT_INPUT_SIZE as i64) / stride;
         let rows = cols;
 
@@ -173,7 +173,6 @@ pub fn detect_faces(session: &mut Session, image: &DynamicImage, score_threshold
         let (_s, obj) = outputs.get(format!("obj_{stride}")).ok_or_else(|| missing_output(stride, "obj"))?.try_extract_tensor::<f32>()?;
         let (_s, bbox) = outputs.get(format!("bbox_{stride}")).ok_or_else(|| missing_output(stride, "bbox"))?.try_extract_tensor::<f32>()?;
         let (_s, kps) = outputs.get(format!("kps_{stride}")).ok_or_else(|| missing_output(stride, "kps"))?.try_extract_tensor::<f32>()?;
-        let _ = stage;
 
         for r in 0..rows {
             for c in 0..cols {
@@ -228,13 +227,21 @@ fn missing_output(stride: i64, kind: &str) -> MlError {
     MlError::Ort(ort::Error::new(format!("YuNet session did not return {kind}_{stride}")))
 }
 
-/// Crops `bbox` out of `image` with a 20% margin on each side (clamped to
-/// image bounds) and resizes to SFace's fixed `112x112` input — a
-/// simplified stand-in for real keypoint-based alignment (module doc).
+/// A margin fraction with no sourced justification — an illustrative
+/// placeholder (this module's simplified crop-not-align approach has no
+/// upstream reference value to match, unlike the OpenCV-sourced detection
+/// constants above), flagged the same way `ML-SPEC.md`'s unresearched
+/// threshold defaults are, not presented as a calibrated number.
+const CROP_MARGIN_FRACTION: f32 = 0.2;
+
+/// Crops `bbox` out of `image` with a [`CROP_MARGIN_FRACTION`] margin on
+/// each side (clamped to image bounds) and resizes to SFace's fixed
+/// `112x112` input — a simplified stand-in for real keypoint-based
+/// alignment (module doc).
 pub fn crop_face_for_embedding(image: &DynamicImage, bbox: &FaceBox) -> DynamicImage {
     let (img_w, img_h) = image.dimensions();
-    let margin_x = bbox.width * 0.2;
-    let margin_y = bbox.height * 0.2;
+    let margin_x = bbox.width * CROP_MARGIN_FRACTION;
+    let margin_y = bbox.height * CROP_MARGIN_FRACTION;
 
     let x0 = (bbox.x - margin_x).max(0.0) as u32;
     let y0 = (bbox.y - margin_y).max(0.0) as u32;
@@ -304,6 +311,17 @@ pub struct FaceThresholds {
     pub auto_attribute_threshold: f32,
 }
 
+impl FaceThresholds {
+    /// The real default values from
+    /// `crates/catalog/migrations/0003_ml_extensions.sql` — kept here too
+    /// (not just in that migration) so tests don't each hand-copy the
+    /// three numbers and risk silently drifting from the schema's own
+    /// defaults.
+    pub fn schema_defaults() -> Self {
+        Self { cluster_threshold: 0.30, review_threshold: 0.363, auto_attribute_threshold: 0.50 }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum FaceMatchDecision {
     /// High-confidence match against a named person — attach silently,
@@ -368,8 +386,7 @@ mod tests {
     use super::*;
 
     fn thresholds() -> FaceThresholds {
-        // Matches migration 0003's real defaults.
-        FaceThresholds { cluster_threshold: 0.30, review_threshold: 0.363, auto_attribute_threshold: 0.50 }
+        FaceThresholds::schema_defaults()
     }
 
     fn unit_vector(index: usize, dim: usize) -> Vec<f32> {
@@ -438,6 +455,20 @@ mod tests {
         let members = vec![member(1, 100, Some(7), &named)];
         let decision = match_face(&probe, &members, &thresholds());
         assert_eq!(decision, FaceMatchDecision::NewCluster);
+    }
+
+    #[test]
+    fn match_face_prefers_an_unnamed_cluster_over_a_named_ones_below_review_similarity() {
+        // A named cluster below the review floor AND a good unnamed
+        // cluster both present at once — makes the "never silently join
+        // the named cluster below threshold" guarantee visible via a
+        // concrete case, not just structurally true by construction.
+        let dim = 4;
+        let named_below_review = unit_vector(1, dim); // orthogonal to the probe below
+        let members = vec![member(1, 100, Some(7), &named_below_review), member(2, 200, None, &unit_vector(0, dim))];
+
+        let decision = match_face(&unit_vector(0, dim), &members, &thresholds());
+        assert_eq!(decision, FaceMatchDecision::JoinCluster { cluster_id: 200 });
     }
 
     #[test]
