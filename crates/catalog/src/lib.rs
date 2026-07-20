@@ -10,6 +10,9 @@ fn migrations() -> Migrations<'static> {
         // Milestone 5 — see migrations/0002_standard_fts.sql's own comment
         // for why images_fts is redefined here rather than in schema.sql.
         M::up(include_str!("../migrations/0002_standard_fts.sql")),
+        // ML-SPEC.md Milestone ML-1 — see migrations/0003_ml_extensions.sql's
+        // own header comment; DDL sourced from workplan/prototypes/035-ml-schema.md.
+        M::up(include_str!("../migrations/0003_ml_extensions.sql")),
     ])
 }
 
@@ -615,13 +618,73 @@ mod tests {
             "thumbnails",
             "models",
             "embeddings",
-            "tag_scores",
+            "rejected_tags",
+            "persons",
+            "face_clusters",
+            "face_detections",
+            "face_match_review_queue",
+            "saved_albums",
         ] {
             assert!(
                 table_exists(table),
                 "expected table `{table}` to exist after migration"
             );
         }
+
+        // tag_scores is superseded by image_tags.confidence — dropped by
+        // migration 0003 (workplan/prototypes/035-ml-schema.md [CALL] 1).
+        assert!(
+            !table_exists("tag_scores"),
+            "expected tag_scores to be dropped by migration 0003"
+        );
+    }
+
+    #[test]
+    fn image_tags_carry_provenance_columns_with_sane_defaults() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        super::add_tag(&conn, image_id, "beach").unwrap();
+
+        let (source, confidence, review_state): (String, Option<f64>, Option<String>) = conn
+            .query_row(
+                "SELECT it.source, it.confidence, it.review_state
+                 FROM image_tags it JOIN tags t ON t.id = it.tag_id
+                 WHERE it.image_id = ?1 AND t.name = 'beach'",
+                [image_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        assert_eq!(source, "manual");
+        assert_eq!(confidence, None);
+        assert_eq!(review_state, None);
+
+        let result = conn.execute(
+            "UPDATE image_tags SET source = 'bogus'
+             WHERE image_id = ?1 AND tag_id = (SELECT id FROM tags WHERE name = 'beach')",
+            [image_id],
+        );
+        assert!(result.is_err(), "expected the source CHECK constraint to reject an unknown value");
+    }
+
+    #[test]
+    fn app_settings_carries_face_thresholds_in_required_order() {
+        let conn = migrated_conn();
+        let (cluster, review, auto_attribute): (f64, f64, f64) = conn
+            .query_row(
+                "SELECT face_cluster_threshold, face_review_threshold, face_auto_attribute_threshold
+                 FROM app_settings WHERE id = 1",
+                [],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+
+        // workplan/prototypes/035-ml-schema.md: cluster <= review <= auto-attribute is a
+        // hard ordering requirement (028), independent of the two
+        // placeholder values ever being recalibrated.
+        assert!(cluster <= review);
+        assert!(review <= auto_attribute);
+        assert_eq!(review, 0.363, "face_review_threshold is SFace's own sourced LFW verification threshold");
     }
 
     #[test]

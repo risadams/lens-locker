@@ -9,6 +9,7 @@ members = [
     "crates/convert",
     "crates/xmp",
     "crates/import",
+    "crates/ml",
     "src-tauri",
 ]
 

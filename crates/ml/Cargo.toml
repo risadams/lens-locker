@@ -1,0 +1,24 @@
+[package]
+name = "lenslocker-ml"
+version.workspace = true
+edition.workspace = true
+publish.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+# default-features = false, and no `download-binaries`/`fetch-models`:
+# both would pull in the optional `ureq` dependency, which `deny.toml`
+# bans outright. The bundled DirectML `onnxruntime.dll` is a Milestone
+# ML-1 installer asset (ML-SPEC.md §10), never fetched at build or run
+# time — `load-dynamic` loads it via `libloading` at process start
+# instead (see src/lib.rs's `init`).
+# Exact-pinned (unlike this workspace's other deps): `2.0` is still a
+# release candidate, so a bare "2.0.0-rc.12" would let a semver-compatible
+# but behaviorally-unvetted rc land silently on the next `cargo update`.
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "ndarray", "load-dynamic", "directml", "api-24"] }
+thiserror = "2.0.18"
+
+[dev-dependencies]
+tempfile = "3.27.0"

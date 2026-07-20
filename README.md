@@ -85,6 +85,11 @@ as a regression catcher (`src-tauri/windows/hooks.nsh`) — real network access
 is already impossible per the layers above, this just catches an accidental
 dependency creeping back in later.
 
+Since Milestone ML-1 (`workplan/ML-SPEC.md`), this also bundles
+`src-tauri/models/` as installer resources — a real build needs the ONNX
+Runtime DirectML dylib and the three model files dropped in there first;
+see [`MODELS.md`](MODELS.md).
+
 ### Other checks CI runs
 
 ```powershell
@@ -104,10 +109,13 @@ crates/
   raw-worker/   isolated subprocess for RAW file handling
   xmp/          XMP sidecar read/write, tag sync
   import/       pipeline orchestration: journal, dedupe, quarantine, rebuild
+  ml/           ort/DirectML runtime scaffolding (workplan/ML-SPEC.md Milestone ML-1)
 src-tauri/      Tauri v2 app shell — commands binding the crates to the UI
+                models/ holds the bundled ONNX Runtime + model files — see MODELS.md
 ui/             frontend: plain HTML/CSS/JS, no framework or build step
 workplan/       planning artifacts — SPEC.md is the locked technical spec;
-                MAP.md/tickets/ hold the full decision trail
+                MAP.md/tickets/ hold the full decision trail; ML-SPEC.md is the
+                separate ML effort's spec
 docs/           operational runbooks (e.g. the WFP network-audit procedure)
 ```
 

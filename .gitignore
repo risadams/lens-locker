@@ -10,6 +10,13 @@ node_modules/
 /gen/schemas
 src-tauri/target/
 
+# ML runtime/model binaries (workplan/ML-SPEC.md §10) — manual drop-in,
+# never fetched automatically, easily multiple GB (SigLIP so400m's external-
+# data weights alone); see MODELS.md. Everything under src-tauri/models/
+# except this repo's own README is one of these drop-ins.
+src-tauri/models/*
+!src-tauri/models/README.md
+
 # Editor / OS noise
 .vscode/*
 !.vscode/extensions.json
