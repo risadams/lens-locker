@@ -118,13 +118,29 @@ pub fn init(dylib_path: &Path) -> Result<()> {
 /// wrapper implements. [`init`] must have already been called with a real
 /// dylib path.
 pub fn load_session(model_path: &Path) -> Result<Session> {
-    // `with_execution_providers` returns `ort::Error<SessionBuilder>` (it
-    // hands the builder back on failure so callers can recover); flatten
-    // to the plain `ort::Error` (`R = ()`) `MlError::Ort` wraps, via the
-    // `code`/`message` accessors that are generic over `R`.
+    // `with_execution_providers`/`with_memory_pattern` return
+    // `ort::Error<SessionBuilder>` (they hand the builder back on failure
+    // so callers can recover); flatten to the plain `ort::Error` (`R = ()`)
+    // `MlError::Ort` wraps, via the `code`/`message` accessors that are
+    // generic over `R`.
+    let flatten = |e: ort::Error<ort::session::builder::SessionBuilder>| ort::Error::new_with_code(e.code(), e.message().to_string());
+
+    // Memory-pattern optimization must be off for the DirectML EP — its
+    // own docs require this (onnxruntime.ai/docs/execution-providers/
+    // DirectML-ExecutionProvider.html: "execution_mode must be set to
+    // ORT_SEQUENTIAL, and enable_mem_pattern must be false"; execution mode
+    // is already sequential by `ort`'s own default). Set explicitly here
+    // for the record even though ONNX Runtime turns out to force this off
+    // itself the moment a DML EP is registered regardless (logged as
+    // `inference_session.cc: Having memory pattern enabled is not
+    // supported while using the DML Execution Provider... disabling it`)
+    // — so this did **not** turn out to be the fix for the real,
+    // still-open multi-session crash documented on this module's test.
     let mut builder = Session::builder()?
         .with_execution_providers([DirectML::default().build()])
-        .map_err(|e| ort::Error::new_with_code(e.code(), e.message().to_string()))?;
+        .map_err(flatten)?
+        .with_memory_pattern(false)
+        .map_err(flatten)?;
     Ok(builder.commit_from_file(model_path)?)
 }
 
