@@ -475,6 +475,42 @@ fn reject_auto_tag(state: tauri::State<Mutex<LibraryState>>, image_id: i64, tag:
     })
 }
 
+/// Applies `tag` to every id in `image_ids` — the grid's bulk-correction
+/// entry point (ML-SPEC.md §5's "reuses one shared multi-select
+/// primitive"). One connection lock for the whole batch, not `image_ids.len()`
+/// separate commands/round-trips. No explicit SQL transaction wrapping the
+/// loop — this codebase has none anywhere (import's own crash-safety is
+/// idempotent-retry, not transactional atomicity; see CLAUDE.md/`crates/import`),
+/// so this matches that: stops at the first error, already-applied ids in
+/// the batch stay applied (each `add_tag` call is already its own
+/// idempotent, committed operation) — a caller can safely retry the same
+/// selection, since re-applying an already-tagged image is a no-op.
+#[tauri::command]
+fn bulk_add_tag(state: tauri::State<Mutex<LibraryState>>, image_ids: Vec<i64>, tag: String) -> CmdResult<()> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        for image_id in image_ids {
+            lenslocker_catalog::add_tag(&conn, image_id, &tag)?;
+            lenslocker_xmp::sync_sidecar(&conn, image_id)?;
+        }
+        Ok(())
+    })
+}
+
+/// Removes `tag` from every id in `image_ids` — [`bulk_add_tag`]'s
+/// counterpart, same partial-application-on-error contract.
+#[tauri::command]
+fn bulk_remove_tag(state: tauri::State<Mutex<LibraryState>>, image_ids: Vec<i64>, tag: String) -> CmdResult<()> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        for image_id in image_ids {
+            lenslocker_catalog::remove_tag(&conn, image_id, &tag)?;
+            lenslocker_xmp::sync_sidecar(&conn, image_id)?;
+        }
+        Ok(())
+    })
+}
+
 #[derive(Debug, Serialize)]
 struct TagCountDto {
     name: String,
@@ -1166,6 +1202,8 @@ pub fn run() {
             remove_tag,
             confirm_auto_tag,
             reject_auto_tag,
+            bulk_add_tag,
+            bulk_remove_tag,
             list_tags,
             list_sources,
             list_review_queue,
@@ -1351,5 +1389,73 @@ mod tests {
     fn auto_tags_at_or_above_the_display_threshold_are_visible() {
         assert!(tag_is_visible_by_default(&tag("auto", Some(0.5)), 0.5));
         assert!(tag_is_visible_by_default(&tag("auto", Some(0.9)), 0.5));
+    }
+
+    /// `bulk_add_tag`/`bulk_remove_tag` (Milestone ML-4 Slice B) are thin
+    /// loops over `lenslocker_catalog::add_tag`/`remove_tag` with no
+    /// `#[tauri::command]`-specific logic of their own — this repo has no
+    /// established pattern for constructing a real `tauri::State` outside
+    /// a running app (grepped: no other test does), so rather than force
+    /// that scaffolding for two trivial loops, this exercises the exact
+    /// real behavior those loops depend on directly against a real
+    /// library/connection: an id that doesn't exist trips the `images`
+    /// foreign-key constraint (`migrate`'s own doc comment: FK enforcement
+    /// is on for every connection), and ids processed *before* the
+    /// failure stay tagged — matching the "no transactions anywhere in
+    /// this codebase, partial application on error" contract documented
+    /// on `bulk_add_tag` itself.
+    #[test]
+    fn bulk_add_tag_loop_stops_on_a_bad_id_but_leaves_earlier_ids_tagged() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_state = create_library_at(&dir.path().join("vault"), true).unwrap();
+        let conn = app_state.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO images (
+                library_id, original_hash, stored_hash, stored_path,
+                original_format, stored_format, file_size_bytes
+            ) VALUES (?1, x'01', x'01', 'a', 'jpeg', 'jpeg', 0)",
+            rusqlite::params![app_state.library_id],
+        )
+        .unwrap();
+        let good_id = conn.last_insert_rowid();
+        let bad_id = good_id + 999; // no such image
+
+        let mut result = Ok(());
+        for image_id in [good_id, bad_id] {
+            result = lenslocker_catalog::add_tag(&conn, image_id, "beach");
+            if result.is_err() {
+                break;
+            }
+        }
+
+        assert!(result.is_err(), "a nonexistent image id must trip the images FK constraint");
+        assert_eq!(
+            lenslocker_catalog::tags_for_image(&conn, good_id).unwrap(),
+            vec!["beach".to_string()],
+            "the id processed before the failing one must stay tagged, not be rolled back"
+        );
+    }
+
+    #[test]
+    fn bulk_add_tag_loop_is_idempotent_across_a_retry_of_the_same_selection() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_state = create_library_at(&dir.path().join("vault"), true).unwrap();
+        let conn = app_state.conn.lock().unwrap();
+
+        conn.execute(
+            "INSERT INTO images (
+                library_id, original_hash, stored_hash, stored_path,
+                original_format, stored_format, file_size_bytes
+            ) VALUES (?1, x'02', x'02', 'a', 'jpeg', 'jpeg', 0)",
+            rusqlite::params![app_state.library_id],
+        )
+        .unwrap();
+        let image_id = conn.last_insert_rowid();
+
+        lenslocker_catalog::add_tag(&conn, image_id, "beach").unwrap();
+        lenslocker_catalog::add_tag(&conn, image_id, "beach").unwrap(); // retry, e.g. after a bad_id further down the same selection failed
+
+        assert_eq!(lenslocker_catalog::tags_for_image(&conn, image_id).unwrap(), vec!["beach".to_string()]);
     }
 }

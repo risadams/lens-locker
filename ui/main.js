@@ -98,6 +98,22 @@ let pendingPages = new Set();  // page-start offsets currently in flight
 let requestToken = 0;          // bumped on every filter/sort/search change to invalidate stale responses
 let columns = 1;
 
+// ── Grid multi-select (ML-SPEC.md §5) ────────────────────────────────────
+// A generic primitive, not narrowly scoped to tags — §5: "reuses one
+// shared multi-select primitive that §6's face-cluster splitting also
+// needs... build it generically enough to serve both call sites." §6's
+// face-crop-thumbnail reuse is a later slice; this is the grid half.
+//
+// Interaction design (checkbox-on-hover + shift-range, a bulk bar once
+// 1+ selected) is this build's own judgment call — ML-SPEC.md deliberately
+// specifies *that* a multi-select primitive is needed, not its exact
+// mechanics. Follows the common photo-app convention (Google/Apple
+// Photos): once 1+ items are selected, clicking a thumb's body continues
+// selecting instead of opening the drawer, so a half-selected state can't
+// accidentally be abandoned by a stray click.
+const bulkSelection = new Set(); // image ids, not indices (ids survive re-sorts/scrolls; indices don't)
+let lastClickedIdx = null;       // for shift-click range selection
+
 const gridWrap = document.getElementById('gridWrap');
 const gridSpacer = document.getElementById('gridSpacer');
 const gridWindow = document.getElementById('gridWindow');
@@ -158,10 +174,12 @@ function renderCellHtml(idx) {
     : '';
   const src = assetSrc(item.thumbnailPath);
   const img = src ? `<img src="${src}" loading="lazy" alt="">` : `<div class="fake-img"></div>`;
-  return `<div class="thumb" data-id="${item.id}" data-idx="${idx}">
+  const picked = bulkSelection.has(item.id);
+  return `<div class="thumb${picked ? ' thumb-picked' : ''}" data-id="${item.id}" data-idx="${idx}">
     ${img}
     ${item.verified ? vg(13, 'verified-glyph always') : ''}
     <div class="thumb-select-dot"></div>
+    <div class="thumb-pick" data-pick title="Select">${picked ? checkIcon() : ''}</div>
     <div class="thumb-overlay">
       <div class="thumb-meta"><span class="thumb-date">${fmtDate(item.captureDate)}</span>${item.verified ? vg(12, 'verified-glyph') : ''}</div>
       ${tagsHtml}
@@ -229,8 +247,73 @@ function renderWindow() {
 
 gridWindow.addEventListener('click', (e) => {
   const cell = e.target.closest('.thumb[data-id]');
-  if (cell) openDrawer(Number(cell.dataset.id));
+  if (!cell) return;
+  const id = Number(cell.dataset.id);
+  const idx = Number(cell.dataset.idx);
+
+  if (e.target.closest('[data-pick]')) {
+    e.stopPropagation();
+    if (e.shiftKey && lastClickedIdx !== null) {
+      selectRange(lastClickedIdx, idx);
+    } else {
+      toggleBulkSelection(id);
+    }
+    lastClickedIdx = idx;
+    return;
+  }
+
+  // Once 1+ items are already selected, clicking a thumb's body continues
+  // selecting instead of opening the drawer (module doc comment above
+  // bulkSelection's declaration) — a stray click can't silently abandon a
+  // half-built selection.
+  if (bulkSelection.size > 0) {
+    if (e.shiftKey && lastClickedIdx !== null) {
+      selectRange(lastClickedIdx, idx);
+    } else {
+      toggleBulkSelection(id);
+    }
+    lastClickedIdx = idx;
+    return;
+  }
+
+  openDrawer(id);
 });
+
+function toggleBulkSelection(id) {
+  bulkSelection.has(id) ? bulkSelection.delete(id) : bulkSelection.add(id);
+  updateBulkBar();
+  scheduleRenderWindow();
+}
+
+// Selects every *currently loaded* item between fromIdx and toIdx
+// (inclusive) — a disclosed limitation, not a bug: indices outside what's
+// been scrolled-to/fetched yet (this grid only loads its visible window +
+// buffer, per the file's own top-of-file virtualization note) can't be
+// included in a range that was never fetched.
+function selectRange(fromIdx, toIdx) {
+  const [lo, hi] = fromIdx <= toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+  for (let i = lo; i <= hi; i++) {
+    const item = itemCache.get(i);
+    if (item) bulkSelection.add(item.id);
+  }
+  updateBulkBar();
+  scheduleRenderWindow();
+}
+
+function clearBulkSelection() {
+  bulkSelection.clear();
+  lastClickedIdx = null;
+  updateBulkBar();
+  scheduleRenderWindow();
+}
+
+function updateBulkBar() {
+  const bar = document.getElementById('bulkBar');
+  if (!bar) return;
+  bar.style.display = bulkSelection.size > 0 ? 'flex' : 'none';
+  const countEl = document.getElementById('bulkCount');
+  if (countEl) countEl.textContent = `${bulkSelection.size} selected`;
+}
 
 gridWrap.addEventListener('scroll', scheduleRenderWindow);
 window.addEventListener('resize', () => layout());
@@ -727,6 +810,68 @@ function openImportModal() {
 function closeImportModal() { document.getElementById('importModal').classList.remove('open'); }
 document.getElementById('railImportBtn').addEventListener('click', openImportModal);
 document.getElementById('topbarImportBtn').addEventListener('click', openImportModal);
+
+// ── Bulk tag correction (ML-SPEC.md §5) — the grid multi-select
+// primitive's first real use. Reuses the drawer's own click-to-input tag
+// pattern (renderDrawerTags) for a consistent add-a-tag-name interaction,
+// rather than a native prompt() (which this app's other tag-entry flow
+// never uses either).
+function promptBulkTagName(button, onCommit) {
+  const input = document.createElement('input');
+  input.className = 'tag-input';
+  input.placeholder = 'tag name…';
+  button.replaceWith(input);
+  input.focus();
+  let committed = false;
+  const commit = async () => {
+    if (committed) return;
+    committed = true;
+    const value = input.value.trim();
+    input.replaceWith(button);
+    if (value) await onCommit(value);
+  };
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') commit();
+    if (ev.key === 'Escape') { committed = true; input.replaceWith(button); }
+  });
+  input.addEventListener('blur', commit);
+}
+
+document.getElementById('bulkAddTagBtn').addEventListener('click', (e) => {
+  const ids = [...bulkSelection];
+  promptBulkTagName(e.currentTarget, async (tag) => {
+    try {
+      await invoke('bulk_add_tag', { imageIds: ids, tag });
+    } catch (err) {
+      showToast('Could not add the tag to every selected photo');
+    }
+    for (const id of ids) {
+      const item = [...itemCache.values()].find(it => it.id === id);
+      if (item && !item.tags.includes(tag)) item.tags = [...item.tags, tag].sort();
+    }
+    scheduleRenderWindow();
+    renderTagPop();
+  });
+});
+
+document.getElementById('bulkRemoveTagBtn').addEventListener('click', (e) => {
+  const ids = [...bulkSelection];
+  promptBulkTagName(e.currentTarget, async (tag) => {
+    try {
+      await invoke('bulk_remove_tag', { imageIds: ids, tag });
+    } catch (err) {
+      showToast('Could not remove the tag from every selected photo');
+    }
+    for (const id of ids) {
+      const item = [...itemCache.values()].find(it => it.id === id);
+      if (item) item.tags = item.tags.filter(t => t !== tag);
+    }
+    scheduleRenderWindow();
+    renderTagPop();
+  });
+});
+
+document.getElementById('bulkClearBtn').addEventListener('click', clearBulkSelection);
 
 document.getElementById('importCancelBtn').addEventListener('click', () => {
   if (importRunning) {
