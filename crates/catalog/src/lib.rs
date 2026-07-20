@@ -88,6 +88,127 @@ pub fn tags_for_image(conn: &Connection, image_id: i64) -> rusqlite::Result<Vec<
     stmt.query_map([image_id], |row| row.get(0))?.collect()
 }
 
+// ── ML: auto-tag provenance (ML-SPEC.md §4/§5, Milestone ML-2) ───────────
+
+/// Applies (or refreshes the confidence of) an auto-generated tag on
+/// `image_id`, unless it's been explicitly rejected (`rejected_tags` —
+/// §5's "don't re-suggest this" memory) or a human already applied the
+/// same tag manually. Re-scoring never demotes a manual tag's
+/// provenance: the `ON CONFLICT` update is conditioned on the existing
+/// row still being `source = 'auto'`, so a manual "beach" stays manual
+/// even if the model independently scores "beach" on a later pass.
+pub fn apply_auto_tag(conn: &Connection, image_id: i64, tag_name: &str, confidence: f64) -> rusqlite::Result<()> {
+    let tag_id = find_or_create_tag(conn, tag_name)?;
+
+    let rejected = conn
+        .query_row(
+            "SELECT 1 FROM rejected_tags WHERE image_id = ?1 AND tag_id = ?2",
+            params![image_id, tag_id],
+            |_| Ok(()),
+        )
+        .optional()?
+        .is_some();
+    if rejected {
+        return Ok(());
+    }
+
+    conn.execute(
+        "INSERT INTO image_tags (image_id, tag_id, source, confidence, review_state)
+         VALUES (?1, ?2, 'auto', ?3, 'unreviewed')
+         ON CONFLICT(image_id, tag_id) DO UPDATE SET confidence = excluded.confidence
+         WHERE image_tags.source = 'auto'",
+        params![image_id, tag_id, confidence],
+    )?;
+    sync_fts_row(conn, image_id)?;
+    Ok(())
+}
+
+/// Removes a tag from `image_id` and records the rejection (§5) so
+/// re-scoring never silently reapplies it. Distinct from [`remove_tag`]:
+/// that's the general "delete this tag" a human can also use on a manual
+/// tag they just want gone, without the "don't re-suggest" memory (manual
+/// tags are never auto-re-suggested in the first place).
+pub fn reject_tag(conn: &Connection, image_id: i64, tag_name: &str) -> rusqlite::Result<()> {
+    let tag_id = find_or_create_tag(conn, tag_name)?;
+    conn.execute(
+        "DELETE FROM image_tags WHERE image_id = ?1 AND tag_id = ?2",
+        params![image_id, tag_id],
+    )?;
+    conn.execute(
+        "INSERT OR IGNORE INTO rejected_tags (image_id, tag_id) VALUES (?1, ?2)",
+        params![image_id, tag_id],
+    )?;
+    sync_fts_row(conn, image_id)?;
+    Ok(())
+}
+
+/// Flips an auto-tag's `review_state` to `confirmed` without touching its
+/// `source` — confirming doesn't turn a model-generated tag into a
+/// manually-typed one, keeping provenance honest (§4). A no-op if
+/// `tag_name` isn't currently an auto tag on `image_id`.
+pub fn confirm_auto_tag(conn: &Connection, image_id: i64, tag_name: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE image_tags SET review_state = 'confirmed'
+         WHERE image_id = ?1 AND tag_id = (SELECT id FROM tags WHERE name = ?2) AND source = 'auto'",
+        params![image_id, tag_name],
+    )?;
+    Ok(())
+}
+
+// ── ML: models/embeddings (ML-SPEC.md §2/§11, Milestone ML-1 schema,
+// Milestone ML-2 first real callers) ──────────────────────────────────────
+
+/// Finds or creates the `models` row identifying a specific model
+/// name+version, returning its id. `dimension`/`license_note` only take
+/// effect on first insert — an existing row wins on a repeat call
+/// (matching [`find_or_create_tag`]'s find-first pattern), since changing
+/// either without a version bump would silently corrupt how
+/// already-stored embeddings for that model are interpreted.
+pub fn find_or_create_model(conn: &Connection, name: &str, version: &str, dimension: i64, license_note: &str) -> rusqlite::Result<i64> {
+    if let Some(id) = conn
+        .query_row("SELECT id FROM models WHERE name = ?1 AND version = ?2", params![name, version], |row| row.get(0))
+        .optional()?
+    {
+        return Ok(id);
+    }
+    conn.execute(
+        "INSERT INTO models (name, version, dimension, license_note) VALUES (?1, ?2, ?3, ?4)",
+        params![name, version, dimension, license_note],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+/// Stores (or replaces) `image_id`'s embedding for `model_id`. `vector` is
+/// opaque bytes (little-endian `f32`s, `crates/ml`'s encoding to produce)
+/// — this layer never interprets embedding content, matching this crate's
+/// "pure SQL, no format-specific logic" layering discipline.
+pub fn upsert_embedding(conn: &Connection, image_id: i64, model_id: i64, vector: &[u8], dimension: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO embeddings (image_id, model_id, vector, dimension) VALUES (?1, ?2, ?3, ?4)
+         ON CONFLICT(image_id, model_id) DO UPDATE SET vector = excluded.vector, dimension = excluded.dimension",
+        params![image_id, model_id, vector, dimension],
+    )?;
+    Ok(())
+}
+
+/// Up to `limit` active images that don't yet have a stored embedding for
+/// `model_id` — the background backlog (§9), computed implicitly from
+/// `embeddings`'s absence rather than a separate persisted queue table
+/// (`workplan/prototypes/035-ml-schema.md`: `embeddings`/`models` "need no
+/// schema change at all"). Ordered by id for deterministic, resumable
+/// batching — a canceled/restarted backlog pass just re-runs this query
+/// and picks up where it left off.
+pub fn images_needing_embedding(conn: &Connection, model_id: i64, limit: i64) -> rusqlite::Result<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT i.id FROM images i
+         WHERE i.status = 'active'
+         AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.image_id = i.id AND e.model_id = ?1)
+         ORDER BY i.id
+         LIMIT ?2",
+    )?;
+    stmt.query_map(params![model_id, limit], |row| row.get(0))?.collect()
+}
+
 // ── Full-text search index sync (workplan/SPEC.md §9's "text search" filter,
 // Milestone 5) ───────────────────────────────────────────────────────────
 //
@@ -768,6 +889,169 @@ mod tests {
             tag_count, 1,
             "re-tagging must not create a duplicate tags row"
         );
+    }
+
+    #[test]
+    fn apply_auto_tag_inserts_with_auto_provenance_and_unreviewed_state() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+
+        super::apply_auto_tag(&conn, image_id, "beach", 0.87).unwrap();
+
+        let (source, confidence, review_state): (String, Option<f64>, Option<String>) = conn
+            .query_row(
+                "SELECT it.source, it.confidence, it.review_state
+                 FROM image_tags it JOIN tags t ON t.id = it.tag_id
+                 WHERE it.image_id = ?1 AND t.name = 'beach'",
+                [image_id],
+                |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "auto");
+        assert_eq!(confidence, Some(0.87));
+        assert_eq!(review_state, Some("unreviewed".to_string()));
+    }
+
+    #[test]
+    fn apply_auto_tag_refreshes_confidence_on_a_later_rescore() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+
+        super::apply_auto_tag(&conn, image_id, "beach", 0.60).unwrap();
+        super::apply_auto_tag(&conn, image_id, "beach", 0.92).unwrap();
+
+        let confidence: f64 = conn
+            .query_row(
+                "SELECT it.confidence FROM image_tags it JOIN tags t ON t.id = it.tag_id
+                 WHERE it.image_id = ?1 AND t.name = 'beach'",
+                [image_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(confidence, 0.92);
+    }
+
+    #[test]
+    fn apply_auto_tag_never_demotes_an_existing_manual_tags_provenance() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+
+        super::add_tag(&conn, image_id, "beach").unwrap();
+        super::apply_auto_tag(&conn, image_id, "beach", 0.99).unwrap();
+
+        let (source, confidence): (String, Option<f64>) = conn
+            .query_row(
+                "SELECT it.source, it.confidence FROM image_tags it JOIN tags t ON t.id = it.tag_id
+                 WHERE it.image_id = ?1 AND t.name = 'beach'",
+                [image_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "manual", "a manual tag must not be overwritten by a later auto-score");
+        assert_eq!(confidence, None);
+    }
+
+    #[test]
+    fn reject_tag_removes_it_and_blocks_future_auto_reapplication() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+
+        super::apply_auto_tag(&conn, image_id, "beach", 0.80).unwrap();
+        super::reject_tag(&conn, image_id, "beach").unwrap();
+        assert_eq!(super::tags_for_image(&conn, image_id).unwrap(), Vec::<String>::new());
+
+        // A later re-score must not silently reapply the rejected tag.
+        super::apply_auto_tag(&conn, image_id, "beach", 0.95).unwrap();
+        assert_eq!(super::tags_for_image(&conn, image_id).unwrap(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn reject_tag_never_blocks_a_deliberate_manual_re_add() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+
+        super::apply_auto_tag(&conn, image_id, "beach", 0.80).unwrap();
+        super::reject_tag(&conn, image_id, "beach").unwrap();
+        super::add_tag(&conn, image_id, "beach").unwrap();
+
+        assert_eq!(super::tags_for_image(&conn, image_id).unwrap(), vec!["beach".to_string()]);
+    }
+
+    #[test]
+    fn confirm_auto_tag_flips_review_state_without_changing_source() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+
+        super::apply_auto_tag(&conn, image_id, "beach", 0.55).unwrap();
+        super::confirm_auto_tag(&conn, image_id, "beach").unwrap();
+
+        let (source, review_state): (String, Option<String>) = conn
+            .query_row(
+                "SELECT it.source, it.review_state FROM image_tags it JOIN tags t ON t.id = it.tag_id
+                 WHERE it.image_id = ?1 AND t.name = 'beach'",
+                [image_id],
+                |row| Ok((row.get(0)?, row.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(source, "auto");
+        assert_eq!(review_state, Some("confirmed".to_string()));
+    }
+
+    #[test]
+    fn find_or_create_model_is_idempotent_and_keyed_on_name_and_version() {
+        let conn = migrated_conn();
+        let id_a = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+        let id_b = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+        let id_c = super::find_or_create_model(&conn, "siglip-so400m", "v2", 1152, "Apache-2.0").unwrap();
+        assert_eq!(id_a, id_b);
+        assert_ne!(id_a, id_c);
+    }
+
+    #[test]
+    fn images_needing_embedding_excludes_images_with_an_existing_embedding() {
+        let conn = migrated_conn();
+        let image_with = insert_test_image(&conn);
+        let image_without = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+
+        super::upsert_embedding(&conn, image_with, model_id, &[0u8; 4], 1).unwrap();
+
+        let backlog = super::images_needing_embedding(&conn, model_id, 100).unwrap();
+        assert_eq!(backlog, vec![image_without]);
+    }
+
+    #[test]
+    fn images_needing_embedding_respects_the_limit_and_orders_by_id() {
+        let conn = migrated_conn();
+        let a = insert_test_image(&conn);
+        let b = insert_test_image(&conn);
+        let _c = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+
+        let backlog = super::images_needing_embedding(&conn, model_id, 2).unwrap();
+        assert_eq!(backlog, vec![a, b]);
+    }
+
+    #[test]
+    fn upsert_embedding_replaces_the_vector_on_a_second_call() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "siglip-so400m", "v1", 4, "Apache-2.0").unwrap();
+
+        super::upsert_embedding(&conn, image_id, model_id, &[1, 2, 3, 4], 1).unwrap();
+        super::upsert_embedding(&conn, image_id, model_id, &[9, 9, 9, 9], 1).unwrap();
+
+        let vector: Vec<u8> = conn
+            .query_row(
+                "SELECT vector FROM embeddings WHERE image_id = ?1 AND model_id = ?2",
+                params![image_id, model_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(vector, vec![9, 9, 9, 9]);
+
+        let row_count: i64 = conn.query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0)).unwrap();
+        assert_eq!(row_count, 1, "upsert must replace, not duplicate");
     }
 
     #[test]
