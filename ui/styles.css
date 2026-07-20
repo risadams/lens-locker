@@ -268,6 +268,14 @@ button { font-family: inherit; }
   display: flex; align-items: center; justify-content: center; padding: 0;
 }
 .tag-chip button:hover { color: var(--danger); background: var(--danger-soft); }
+/* Unreviewed auto-tags (ML-SPEC.md §4): "stay visually distinguishable
+   from confirmed/manual ones... no raw percentage" — a dashed border is
+   the whole distinction; confirming removes this class entirely rather
+   than swapping to a second "confirmed-auto" style, since confirming
+   grants full visual parity with a manual tag. */
+.tag-chip-unreviewed { border-style: dashed; border-color: var(--accent-dim); }
+.tag-chip-unreviewed button[data-confirm] { color: var(--accent-dim); }
+.tag-chip-unreviewed button[data-confirm]:hover { color: var(--accent); background: var(--accent-soft); }
 .tag-add, .tag-input {
   background: transparent; border: 1px dashed var(--border);
   color: var(--text-faint); border-radius: 999px; padding: 4px 12px;

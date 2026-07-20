@@ -465,16 +465,35 @@ function thumbnailPathFor(id) {
   return null;
 }
 
+// detail.tags is [{name, source, confidence, reviewState}] — source is
+// 'manual'|'auto', reviewState is 'unreviewed'|'confirmed'|null (null for
+// manual tags). See ImageDetailDto/TagDto (src-tauri/src/lib.rs).
 function renderDrawerTags(detail) {
   const el = document.getElementById('d-tags');
-  el.innerHTML = detail.tags.map(t => `<span class="tag-chip">${escapeHtml(t)}<button data-tag="${escapeHtml(t)}">×</button></span>`).join('')
+  el.innerHTML = detail.tags.map(t => {
+    const unreviewed = t.source === 'auto' && t.reviewState === 'unreviewed';
+    const confirmBtn = unreviewed ? `<button data-confirm="${escapeHtml(t.name)}" title="Confirm">✓</button>` : '';
+    return `<span class="tag-chip${unreviewed ? ' tag-chip-unreviewed' : ''}">${escapeHtml(t.name)}${confirmBtn}<button data-tag="${escapeHtml(t.name)}" data-auto="${t.source === 'auto'}">×</button></span>`;
+  }).join('')
     + `<button class="tag-add" id="tagAddBtn">+ Add tag</button>`;
+
+  el.querySelectorAll('button[data-confirm]').forEach(btn => btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    await invoke('confirm_auto_tag', { imageId: detail.id, tag: btn.dataset.confirm });
+    const t = detail.tags.find(t => t.name === btn.dataset.confirm);
+    if (t) t.reviewState = 'confirmed';
+    renderDrawerTags(detail);
+  }));
   el.querySelectorAll('button[data-tag]').forEach(btn => btn.addEventListener('click', async (e) => {
     e.stopPropagation();
-    await invoke('remove_tag', { imageId: detail.id, tag: btn.dataset.tag });
-    detail.tags = detail.tags.filter(t => t !== btn.dataset.tag);
+    // Rejecting an auto-tag persists the rejection (won't be silently
+    // re-suggested on a later re-score); removing a manual tag has no
+    // such memory to keep (ML-SPEC.md §5).
+    const command = btn.dataset.auto === 'true' ? 'reject_auto_tag' : 'remove_tag';
+    await invoke(command, { imageId: detail.id, tag: btn.dataset.tag });
+    detail.tags = detail.tags.filter(t => t.name !== btn.dataset.tag);
     renderDrawerTags(detail);
-    invalidateItemTags(detail.id, detail.tags);
+    invalidateItemTags(detail.id, detail.tags.map(t => t.name));
     renderTagPop();
   }));
   el.querySelector('#tagAddBtn').addEventListener('click', (e) => {
@@ -487,13 +506,13 @@ function renderDrawerTags(detail) {
     input.focus();
     const commit = async () => {
       const value = input.value.trim();
-      if (value) {
+      if (value && !detail.tags.some(t => t.name === value)) {
         await invoke('add_tag', { imageId: detail.id, tag: value });
-        detail.tags.push(value);
-        detail.tags.sort();
+        detail.tags.push({ name: value, source: 'manual', confidence: null, reviewState: null });
+        detail.tags.sort((a, b) => a.name.localeCompare(b.name));
       }
       renderDrawerTags(detail);
-      invalidateItemTags(detail.id, detail.tags);
+      invalidateItemTags(detail.id, detail.tags.map(t => t.name));
       renderTagPop();
     };
     input.addEventListener('keydown', (ev) => {

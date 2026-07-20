@@ -94,6 +94,36 @@ pub fn tags_for_image(conn: &Connection, image_id: i64) -> rusqlite::Result<Vec<
     stmt.query_map([image_id], |row| row.get(0))?.collect()
 }
 
+/// One `image_tags` row's provenance — `source`, `confidence` (only
+/// meaningful when `source == "auto"`), `review_state` (`None` for manual
+/// tags). Milestone ML-4's review UI needs this; [`tags_for_image`] stays
+/// bare names for the callers that only ever wanted that (the grid, XMP
+/// sidecar sync) — not replaced, so their sort/shape guarantees don't
+/// change under them.
+#[derive(Debug, Clone, PartialEq)]
+pub struct TagWithProvenance {
+    pub name: String,
+    pub source: String,
+    pub confidence: Option<f64>,
+    pub review_state: Option<String>,
+}
+
+/// Same ordering guarantee as [`tags_for_image`] (alphabetical by name),
+/// with each row's full provenance attached.
+pub fn tags_with_provenance_for_image(conn: &Connection, image_id: i64) -> rusqlite::Result<Vec<TagWithProvenance>> {
+    let mut stmt = conn.prepare(
+        "SELECT t.name, it.source, it.confidence, it.review_state
+         FROM tags t
+         JOIN image_tags it ON it.tag_id = t.id
+         WHERE it.image_id = ?1
+         ORDER BY t.name ASC",
+    )?;
+    stmt.query_map([image_id], |row| {
+        Ok(TagWithProvenance { name: row.get(0)?, source: row.get(1)?, confidence: row.get(2)?, review_state: row.get(3)? })
+    })?
+    .collect()
+}
+
 // ── ML: auto-tag provenance (ML-SPEC.md §4/§5, Milestone ML-2) ───────────
 
 /// Applies (or refreshes the confidence of) an auto-generated tag on
@@ -567,7 +597,7 @@ pub struct ImageDetail {
     pub original_hash_hex: String,
     pub file_size_bytes: i64,
     pub stored_path: String,
-    pub tags: Vec<String>,
+    pub tags: Vec<TagWithProvenance>,
     pub first_imported_at: String,
 }
 
@@ -616,7 +646,7 @@ pub fn get_image_detail(conn: &Connection, image_id: i64) -> rusqlite::Result<Op
         .unwrap_or_default();
 
     let original_hash_hex = original_hash.iter().map(|b| format!("{b:02x}")).collect();
-    let tags = tags_for_image(conn, image_id)?;
+    let tags = tags_with_provenance_for_image(conn, image_id)?;
 
     Ok(Some(ImageDetail {
         id: image_id,
@@ -1715,8 +1745,31 @@ mod tests {
         assert_eq!(detail.filename, "photo.jpg");
         assert_eq!(detail.original_format, "jpeg");
         assert_eq!(detail.file_size_bytes, 1234);
-        assert_eq!(detail.tags, vec!["family".to_string()]);
+        assert_eq!(
+            detail.tags,
+            vec![super::TagWithProvenance { name: "family".to_string(), source: "manual".to_string(), confidence: None, review_state: None }]
+        );
         assert_eq!(detail.original_hash_hex.len(), 64);
+    }
+
+    #[test]
+    fn get_image_detail_reports_auto_tag_provenance() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let image_id = insert_full_image(&conn, library_id, 70, "jpeg", "2026-01-01T00:00:00Z", 1234, "D:/src", "photo.jpg");
+        super::apply_auto_tag(&conn, image_id, "beach", 0.77).unwrap();
+
+        let detail = super::get_image_detail(&conn, image_id).unwrap().unwrap();
+
+        assert_eq!(
+            detail.tags,
+            vec![super::TagWithProvenance {
+                name: "beach".to_string(),
+                source: "auto".to_string(),
+                confidence: Some(0.77),
+                review_state: Some("unreviewed".to_string())
+            }]
+        );
     }
 
     #[test]

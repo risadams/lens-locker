@@ -314,6 +314,24 @@ fn list_images(
     })
 }
 
+/// A tag's provenance, wire shape for the drawer's review UI (Milestone
+/// ML-4) — `confidence`/`reviewState` are only meaningful when
+/// `source == "auto"`, both `null` for a manually-typed tag.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TagDto {
+    name: String,
+    source: String,
+    confidence: Option<f64>,
+    review_state: Option<String>,
+}
+
+impl From<lenslocker_catalog::TagWithProvenance> for TagDto {
+    fn from(t: lenslocker_catalog::TagWithProvenance) -> Self {
+        Self { name: t.name, source: t.source, confidence: t.confidence, review_state: t.review_state }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImageDetailDto {
@@ -330,7 +348,7 @@ struct ImageDetailDto {
     original_hash_hex: String,
     file_size_bytes: i64,
     stored_path: String,
-    tags: Vec<String>,
+    tags: Vec<TagDto>,
     first_imported_at: String,
 }
 
@@ -357,7 +375,7 @@ fn get_image_detail(
             original_hash_hex: d.original_hash_hex,
             file_size_bytes: d.file_size_bytes,
             stored_path: d.stored_path,
-            tags: d.tags,
+            tags: d.tags.into_iter().map(TagDto::from).collect(),
             first_imported_at: d.first_imported_at,
         })
     })
@@ -404,6 +422,34 @@ fn remove_tag(
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
         lenslocker_catalog::remove_tag(&conn, image_id, &tag)?;
+        lenslocker_xmp::sync_sidecar(&conn, image_id)?;
+        Ok(())
+    })
+}
+
+/// Flips an auto-tag's `review_state` to `confirmed` (ML-SPEC.md §4/§5) —
+/// grants full visual parity with a manual tag without rewriting its
+/// `source`, so re-scoring later still knows this one came from the model.
+#[tauri::command]
+fn confirm_auto_tag(state: tauri::State<Mutex<LibraryState>>, image_id: i64, tag: String) -> CmdResult<()> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        lenslocker_catalog::confirm_auto_tag(&conn, image_id, &tag)?;
+        lenslocker_xmp::sync_sidecar(&conn, image_id)?;
+        Ok(())
+    })
+}
+
+/// Removes a tag and records the rejection (`rejected_tags`) so it's never
+/// silently re-suggested by a later re-score (ML-SPEC.md §5) — the
+/// auto-tag counterpart to [`remove_tag`], which is the general
+/// "delete this tag" a human can also use on a manual tag without that
+/// "don't re-suggest" memory.
+#[tauri::command]
+fn reject_auto_tag(state: tauri::State<Mutex<LibraryState>>, image_id: i64, tag: String) -> CmdResult<()> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        lenslocker_catalog::reject_tag(&conn, image_id, &tag)?;
         lenslocker_xmp::sync_sidecar(&conn, image_id)?;
         Ok(())
     })
@@ -1098,6 +1144,8 @@ pub fn run() {
             get_full_preview,
             add_tag,
             remove_tag,
+            confirm_auto_tag,
+            reject_auto_tag,
             list_tags,
             list_sources,
             list_review_queue,
