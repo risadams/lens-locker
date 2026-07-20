@@ -215,6 +215,108 @@ pub fn images_needing_embedding(conn: &Connection, model_id: i64, limit: i64) ->
     stmt.query_map(params![model_id, limit], |row| row.get(0))?.collect()
 }
 
+// ── ML: faces (ML-SPEC.md §6/§11, Milestone ML-3) ─────────────────────────
+//
+// Embedding *content* stays opaque bytes at this layer throughout, matching
+// upsert_embedding's own boundary — decoding/comparing/centroid math is
+// crates/ml's job, this crate only stores rows and reports associations.
+
+pub struct NewFaceDetection {
+    pub image_id: i64,
+    pub model_id: i64,
+    pub detection_confidence: f64,
+    pub bbox_x: i64,
+    pub bbox_y: i64,
+    pub bbox_width: i64,
+    pub bbox_height: i64,
+    pub embedding: Vec<u8>,
+    pub dimension: i64,
+}
+
+/// Inserts a new, not-yet-clustered face detection. Returns its id.
+pub fn insert_face_detection(conn: &Connection, detection: &NewFaceDetection) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO face_detections (
+            image_id, model_id, detection_confidence,
+            bbox_x, bbox_y, bbox_width, bbox_height, embedding, dimension
+        ) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
+        params![
+            detection.image_id,
+            detection.model_id,
+            detection.detection_confidence,
+            detection.bbox_x,
+            detection.bbox_y,
+            detection.bbox_width,
+            detection.bbox_height,
+            detection.embedding,
+            detection.dimension
+        ],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub struct ClusterMember {
+    pub face_detection_id: i64,
+    pub cluster_id: i64,
+    pub person_id: Option<i64>,
+    pub embedding: Vec<u8>,
+}
+
+/// Every already-clustered, non-hidden face detection's embedding for
+/// `model_id` — the comparison set for matching a new face against
+/// existing clusters/persons (§6's three-tier split).
+pub fn clustered_face_embeddings(conn: &Connection, model_id: i64) -> rusqlite::Result<Vec<ClusterMember>> {
+    let mut stmt = conn.prepare(
+        "SELECT fd.id, fd.face_cluster_id, fc.person_id, fd.embedding
+         FROM face_detections fd
+         JOIN face_clusters fc ON fc.id = fd.face_cluster_id
+         WHERE fd.model_id = ?1 AND fc.hidden = 0",
+    )?;
+    stmt.query_map([model_id], |row| {
+        Ok(ClusterMember {
+            face_detection_id: row.get(0)?,
+            cluster_id: row.get(1)?,
+            person_id: row.get(2)?,
+            embedding: row.get(3)?,
+        })
+    })?
+    .collect()
+}
+
+/// Creates a new, unnamed cluster and attaches `face_detection_id` to it
+/// as its first member — "grouping raw detections into unnamed,
+/// provisional clusters runs silently" (§6). Returns the new cluster's id.
+pub fn create_cluster_with_member(conn: &Connection, face_detection_id: i64) -> rusqlite::Result<i64> {
+    conn.execute("INSERT INTO face_clusters DEFAULT VALUES", [])?;
+    let cluster_id = conn.last_insert_rowid();
+    attach_face_detection_to_cluster(conn, face_detection_id, cluster_id)?;
+    Ok(cluster_id)
+}
+
+/// Attaches an already-inserted face detection to an existing cluster
+/// (auto-attribute or ordinary clustering — §6) and bumps the cluster's
+/// `updated_at`.
+pub fn attach_face_detection_to_cluster(conn: &Connection, face_detection_id: i64, cluster_id: i64) -> rusqlite::Result<()> {
+    conn.execute("UPDATE face_detections SET face_cluster_id = ?1 WHERE id = ?2", params![cluster_id, face_detection_id])?;
+    conn.execute(
+        "UPDATE face_clusters SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1",
+        params![cluster_id],
+    )?;
+    Ok(())
+}
+
+/// Queues a medium-confidence match against an already-named person for
+/// human review (§6's three-tier split — mirrors `dedupe_review_queue`'s
+/// shape). Returns the new queue row's id.
+pub fn queue_face_match_review(conn: &Connection, face_detection_id: i64, suggested_person_id: i64, similarity_score: f64) -> rusqlite::Result<i64> {
+    conn.execute(
+        "INSERT INTO face_match_review_queue (face_detection_id, suggested_person_id, similarity_score)
+         VALUES (?1, ?2, ?3)",
+        params![face_detection_id, suggested_person_id, similarity_score],
+    )?;
+    Ok(conn.last_insert_rowid())
+}
+
 // ── Full-text search index sync (workplan/SPEC.md §9's "text search" filter,
 // Milestone 5) ───────────────────────────────────────────────────────────
 //
@@ -1074,6 +1176,93 @@ mod tests {
 
         let row_count: i64 = conn.query_row("SELECT COUNT(*) FROM embeddings", [], |row| row.get(0)).unwrap();
         assert_eq!(row_count, 1, "upsert must replace, not duplicate");
+    }
+
+    fn new_face(image_id: i64, model_id: i64, embedding: &[u8]) -> super::NewFaceDetection {
+        super::NewFaceDetection {
+            image_id,
+            model_id,
+            detection_confidence: 0.95,
+            bbox_x: 10,
+            bbox_y: 10,
+            bbox_width: 50,
+            bbox_height: 50,
+            embedding: embedding.to_vec(),
+            dimension: 1,
+        }
+    }
+
+    #[test]
+    fn create_cluster_with_member_makes_an_unnamed_cluster() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+
+        let cluster_id = super::create_cluster_with_member(&conn, detection_id).unwrap();
+
+        let person_id: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [cluster_id], |row| row.get(0)).unwrap();
+        assert_eq!(person_id, None, "a freshly created cluster must be unnamed");
+
+        let stored_cluster_id: Option<i64> =
+            conn.query_row("SELECT face_cluster_id FROM face_detections WHERE id = ?1", [detection_id], |row| row.get(0)).unwrap();
+        assert_eq!(stored_cluster_id, Some(cluster_id));
+    }
+
+    #[test]
+    fn clustered_face_embeddings_excludes_unclustered_and_hidden() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+
+        let clustered = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        super::create_cluster_with_member(&conn, clustered).unwrap();
+
+        let unclustered = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        let _ = unclustered; // deliberately never attached to a cluster
+
+        let in_hidden = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[3])).unwrap();
+        let hidden_cluster_id = super::create_cluster_with_member(&conn, in_hidden).unwrap();
+        conn.execute("UPDATE face_clusters SET hidden = 1 WHERE id = ?1", [hidden_cluster_id]).unwrap();
+
+        let members = super::clustered_face_embeddings(&conn, model_id).unwrap();
+        assert_eq!(members.len(), 1);
+        assert_eq!(members[0].face_detection_id, clustered);
+    }
+
+    #[test]
+    fn attach_face_detection_to_cluster_moves_it_and_touches_updated_at() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let first = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let cluster_a = super::create_cluster_with_member(&conn, first).unwrap();
+        conn.execute("INSERT INTO face_clusters DEFAULT VALUES", []).unwrap();
+        let cluster_b = conn.last_insert_rowid();
+
+        super::attach_face_detection_to_cluster(&conn, first, cluster_b).unwrap();
+
+        let stored_cluster_id: i64 =
+            conn.query_row("SELECT face_cluster_id FROM face_detections WHERE id = ?1", [first], |row| row.get(0)).unwrap();
+        assert_eq!(stored_cluster_id, cluster_b);
+        assert_ne!(cluster_a, cluster_b);
+    }
+
+    #[test]
+    fn queue_face_match_review_inserts_a_pending_row() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        conn.execute("INSERT INTO persons (name) VALUES ('Alex')", []).unwrap();
+        let person_id = conn.last_insert_rowid();
+
+        let queue_id = super::queue_face_match_review(&conn, detection_id, person_id, 0.42).unwrap();
+
+        let (status, similarity): (String, f64) =
+            conn.query_row("SELECT status, similarity_score FROM face_match_review_queue WHERE id = ?1", [queue_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
+        assert_eq!(status, "pending");
+        assert_eq!(similarity, 0.42);
     }
 
     #[test]
