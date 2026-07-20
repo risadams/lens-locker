@@ -14,6 +14,7 @@
 //! `download-binaries` would also pull in `ureq` as an optional
 //! dependency, which `deny.toml` bans outright.
 
+pub mod backlog;
 pub mod labels;
 pub mod placeholder;
 pub mod tagging;
@@ -31,6 +32,14 @@ pub enum MlError {
     Ort(#[from] ort::Error),
     #[error("tokenizer error: {0}")]
     Tokenizer(String),
+    #[error(transparent)]
+    Catalog(#[from] rusqlite::Error),
+    #[error("could not decode {path}: {source}")]
+    Decode {
+        path: PathBuf,
+        #[source]
+        source: lenslocker_decode::ProbeError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, MlError>;

@@ -36,6 +36,18 @@ image = { version = "0.25.10", default-features = false }
 # `hf-hub`/`http` (opt-in only, not default) — those would fetch
 # tokenizers from the network, the one thing this crate must never do.
 tokenizers = { version = "0.23.1", default-features = false, features = ["fancy-regex"] }
+# Milestone ML-2's backlog orchestration (crates/ml/src/backlog.rs) ties
+# model inference to catalog reads/writes and file decode — a deliberate,
+# flagged crate-boundary judgment call (that module's own doc comment):
+# no closed ticket settled where this orchestration should live, and
+# putting it here (rather than a new crate, or lenslocker-import) keeps
+# it next to the tagging-specific pipeline logic it drives.
+lenslocker-catalog = { version = "0.1.0", path = "../catalog" }
+lenslocker-decode = { version = "0.1.0", path = "../decode" }
+rusqlite = { version = "0.40.1", features = ["bundled"] }
 
 [dev-dependencies]
 tempfile = "3.27.0"
+# Only this crate's own tests need to write a real decodable file to disk
+# (the non-test `image` dependency above has no codec features enabled).
+image = { version = "0.25.10", default-features = false, features = ["png"] }

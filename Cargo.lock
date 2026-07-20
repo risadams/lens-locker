@@ -2501,7 +2501,10 @@ name = "lenslocker-ml"
 version = "0.1.0"
 dependencies = [
  "image",
+ "lenslocker-catalog",
+ "lenslocker-decode",
  "ort",
+ "rusqlite",
  "tempfile",
  "thiserror 2.0.18",
  "tokenizers",
