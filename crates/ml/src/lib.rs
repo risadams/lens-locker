@@ -14,6 +14,7 @@
 //! `download-binaries` would also pull in `ureq` as an optional
 //! dependency, which `deny.toml` bans outright.
 
+pub mod labels;
 pub mod placeholder;
 pub mod tagging;
 
