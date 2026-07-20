@@ -15,6 +15,7 @@
 //! dependency, which `deny.toml` bans outright.
 
 pub mod backlog;
+pub mod faces;
 pub mod labels;
 pub mod placeholder;
 pub mod tagging;
