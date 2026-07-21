@@ -52,7 +52,7 @@ fn face_backlog_batch_marks_a_faceless_image_processed_and_is_resumable() {
     let conn = migrated_conn();
     let image_id = insert_test_image(&conn, &image_path);
 
-    let processed = process_face_backlog_batch(&conn, &lenslocker_ml::models_dir(), 10, &thresholds()).expect("the batch should run without error end to end");
+    let processed = process_face_backlog_batch(&conn, &lenslocker_ml::models_dir(), tmp.path(), 10, &thresholds()).expect("the batch should run without error end to end");
     assert_eq!(processed, 1);
 
     // No real face in synthetic noise, but the image must still be marked
@@ -70,6 +70,6 @@ fn face_backlog_batch_marks_a_faceless_image_processed_and_is_resumable() {
 
     // Re-running must be a no-op — resumability (§9), same pattern as
     // Milestone ML-2's tagging backlog.
-    let processed_again = process_face_backlog_batch(&conn, &lenslocker_ml::models_dir(), 10, &thresholds()).unwrap();
+    let processed_again = process_face_backlog_batch(&conn, &lenslocker_ml::models_dir(), tmp.path(), 10, &thresholds()).unwrap();
     assert_eq!(processed_again, 0);
 }

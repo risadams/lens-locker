@@ -528,9 +528,66 @@ async function openDrawer(id) {
   document.getElementById('d-imported').textContent = detail.firstImportedAt ? detail.firstImportedAt.slice(0, 10) : '—';
 
   renderDrawerTags(detail);
+  renderDrawerPeople(detail);
 
   document.getElementById('drawer').classList.add('open');
   document.getElementById('drawerScrim').classList.add('open');
+}
+
+// "People in this photo" (028 decision #5): named faces are individual
+// clickable chips (reusing the tag-chip look — no bounding-box overlay,
+// per 028's own reasoning against one), each jumping to that person's
+// cluster card in the People view. Unnamed/unclustered detections
+// collapse into one "+N unidentified" chip — clicking it names inline
+// (028 decision #3) when there's exactly one unnamed cluster on this
+// image and nothing left unclustered (the only case a target is
+// unambiguous without a per-face-crop picker, which 028 decision #5 rules
+// out via its no-bounding-box-overlay call); otherwise it falls back to
+// the People view, since which of several unnamed clusters the user means
+// genuinely can't be told apart here.
+function renderDrawerPeople(detail) {
+  const el = document.getElementById('d-people');
+  const totalUnnamed = detail.unnamedClustered.reduce((sum, g) => sum + g.count, 0) + detail.unclusteredFaceCount;
+  const soleUnnamedCluster = detail.unclusteredFaceCount === 0 && detail.unnamedClustered.length === 1
+    ? detail.unnamedClustered[0].clusterId
+    : null;
+
+  const chips = detail.namedFaces.map(f =>
+    `<span class="tag-chip" data-jump-cluster="${f.clusterId}" style="cursor:pointer">${escapeHtml(f.personName)}</span>`
+  );
+  if (totalUnnamed > 0) {
+    if (soleUnnamedCluster !== null) {
+      chips.push(`<span class="tag-chip" data-name-unnamed="${soleUnnamedCluster}" style="cursor:pointer">+${totalUnnamed} unidentified</span>`);
+    } else {
+      chips.push(`<span class="tag-chip" data-jump-people style="cursor:pointer">+${totalUnnamed} unidentified</span>`);
+    }
+  }
+  el.innerHTML = chips.join('') || `<span style="color:var(--text-faint);font-size:11.5px">No faces detected</span>`;
+
+  el.querySelectorAll('[data-jump-cluster]').forEach(chip => chip.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const clusterId = Number(chip.dataset.jumpCluster);
+    closeDrawer();
+    jumpToCluster(clusterId);
+  }));
+  el.querySelectorAll('[data-jump-people]').forEach(chip => chip.addEventListener('click', (e) => {
+    e.stopPropagation();
+    closeDrawer();
+    switchView('people');
+  }));
+  const nameUnnamedChip = el.querySelector('[data-name-unnamed]');
+  if (nameUnnamedChip) {
+    nameUnnamedChip.addEventListener('click', (e) => {
+      e.stopPropagation();
+      promptTagNameInput(nameUnnamedChip, async (value) => {
+        try {
+          await invoke('name_face_cluster', { clusterId: Number(nameUnnamedChip.dataset.nameUnnamed), personName: value });
+          showToast(`Named — ${value}`);
+          openDrawer(detail.id);
+        } catch (err) { showToast('Could not name this person'); }
+      }, { placeholder: 'person’s name…', listId: 'personNames' });
+    });
+  }
 }
 
 function thumbnailPathFor(id) {
@@ -594,20 +651,24 @@ function renderDrawerTags(detail) {
   });
 }
 
-// Shared by the drawer's "+ Add tag" flow above and the bulk-bar's "Add
-// tag"/"Remove tag" flows below — all three need the exact same
-// create-input/focus/commit-on-Enter-or-blur/Escape-discards lifecycle;
-// factored out once rather than parallel-implemented per call site.
-// Replaces `triggerEl` with a text input; on Enter or blur with a
-// non-empty trimmed value, restores `triggerEl` and calls
+// Shared by the drawer's "+ Add tag" flow above, the bulk-bar's "Add
+// tag"/"Remove tag" flows, and the People view's naming flow below — all
+// need the exact same create-input/focus/commit-on-Enter-or-blur/Escape-
+// discards lifecycle; factored out once rather than parallel-implemented
+// per call site. Replaces `triggerEl` with a text input; on Enter or blur
+// with a non-empty trimmed value, restores `triggerEl` and calls
 // `onCommit(value)`; on Escape, or an empty Enter/blur, just restores
 // `triggerEl` unchanged (Escape always discards, even if something was
 // typed — a different rule from blur/Enter, which only "cancel" when
-// there was nothing to commit).
-function promptTagNameInput(triggerEl, onCommit) {
+// there was nothing to commit). `listId`, when given, wires the input to
+// a `<datalist>` for native-browser autocomplete (028 decision #3's
+// "autocompletes against already-named people") — no custom dropdown
+// widget, matching the frontend's no-new-primitives-where-avoidable posture.
+function promptTagNameInput(triggerEl, onCommit, { placeholder = 'tag name…', listId = null } = {}) {
   const input = document.createElement('input');
   input.className = 'tag-input';
-  input.placeholder = 'tag name…';
+  input.placeholder = placeholder;
+  if (listId) input.setAttribute('list', listId);
   triggerEl.replaceWith(input);
   input.focus();
   let settled = false;
@@ -935,6 +996,7 @@ document.getElementById('importChooseBtn').addEventListener('click', async () =>
     closeImportModal();
     refreshGrid();
     refreshReviewBadge();
+    refreshPeopleBadge();
   } catch (e) {
     // Backend errors (CmdError) serialize as plain strings — surface the
     // real one (e.g. "an import is already in progress") rather than a
@@ -1013,19 +1075,144 @@ async function renderReviewQueue() {
   }));
 }
 
+// ── People view (ML-SPEC.md §6, ticket 028, Milestone ML-4 Slice C) ────────
+// Known interim gap (raised in Slice C's own code review, kept as-is
+// deliberately): this badge counts pending_face_review_count, but the
+// People view built here has no UI to resolve those entries yet — that's
+// Slice D's job (cluster merge/split + review-queue resolution, landing
+// as one coherent slice rather than half-built early). A nonzero badge
+// is a real dead end until then.
+async function refreshPeopleBadge() {
+  let count = 0;
+  try { count = await invoke('pending_face_review_count'); } catch (e) { console.error(e); }
+  const badge = document.getElementById('peopleBadge');
+  if (count) { badge.style.display = 'flex'; badge.textContent = count; }
+  else badge.style.display = 'none';
+  return count;
+}
+
+// Rebuilds the shared `<datalist>` naming autocomplete draws from — one
+// list refreshed whenever the People view (re)renders, not per-card, since
+// every card's naming input needs the exact same option set.
+function renderPersonDatalist(persons) {
+  let list = document.getElementById('personNames');
+  if (!list) {
+    list = document.createElement('datalist');
+    list.id = 'personNames';
+    document.body.appendChild(list);
+  }
+  list.innerHTML = persons.map(p => `<option value="${escapeHtml(p.name)}"></option>`).join('');
+}
+
+async function renderPeopleView() {
+  await refreshPeopleBadge();
+  let clusters = [], persons = [];
+  try {
+    [clusters, persons] = await Promise.all([
+      invoke('list_face_clusters', { includeHidden: false }),
+      invoke('list_persons'),
+    ]);
+  } catch (e) { showToast('Could not load People'); return; }
+
+  renderPersonDatalist(persons);
+  document.getElementById('peopleCount').textContent = `${clusters.length} group${clusters.length === 1 ? '' : 's'}`;
+
+  const grid = document.getElementById('people-grid');
+  if (!clusters.length) {
+    grid.innerHTML = `<div class="empty-results" style="position:static">No faces grouped yet.</div>`;
+    return;
+  }
+  grid.innerHTML = clusters.map(c => `
+    <div class="people-card" data-cluster-card="${c.id}">
+      <div class="people-card-thumb" data-expand-cluster="${c.id}">${c.representativeCropPath ? `<img src="${assetSrc(c.representativeCropPath)}" alt="">` : ''}</div>
+      <div class="people-card-crops" id="crops-${c.id}" style="display:none"></div>
+      <div class="people-card-body">
+        <div class="people-card-count">${c.photoCount} photo${c.photoCount === 1 ? '' : 's'}</div>
+        ${c.personName
+          ? `<div class="people-card-name">${escapeHtml(c.personName)}</div>`
+          : `<button class="tag-add" data-name-cluster="${c.id}">+ Name this person</button>`}
+        <button class="people-card-hide-btn" data-hide-cluster="${c.id}">Hide</button>
+      </div>
+    </div>
+  `).join('');
+
+  // "click a cluster, see its member thumbnails + photo count" (028
+  // decision #3) — a read-only expand, fetched lazily on first click
+  // rather than upfront for every card. Not the selectable grid Slice D's
+  // split/merge flow needs; this is display only.
+  grid.querySelectorAll('[data-expand-cluster]').forEach(thumb => thumb.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const panel = document.getElementById(`crops-${thumb.dataset.expandCluster}`);
+    const open = panel.style.display !== 'none';
+    if (open) { panel.style.display = 'none'; return; }
+    if (!panel.dataset.loaded) {
+      let crops = [];
+      try { crops = await invoke('list_cluster_face_crops', { clusterId: Number(thumb.dataset.expandCluster) }); } catch (err) { showToast('Could not load this group’s faces'); return; }
+      panel.innerHTML = crops.map(p => `<img src="${assetSrc(p)}" alt="">`).join('') || `<span style="color:var(--text-faint);font-size:11px">No face crops yet</span>`;
+      panel.dataset.loaded = '1';
+    }
+    panel.style.display = 'flex';
+  }));
+
+  grid.querySelectorAll('button[data-name-cluster]').forEach(btn => btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    promptTagNameInput(btn, async (value) => {
+      try {
+        await invoke('name_face_cluster', { clusterId: Number(btn.dataset.nameCluster), personName: value });
+        renderPeopleView();
+      } catch (err) { showToast('Could not name this person'); }
+    }, { placeholder: 'person’s name…', listId: 'personNames' });
+  }));
+  grid.querySelectorAll('button[data-hide-cluster]').forEach(btn => btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    try {
+      await invoke('set_face_cluster_hidden', { clusterId: Number(btn.dataset.hideCluster), hidden: true });
+      showToast('Hidden — hidden groups are never deleted');
+      renderPeopleView();
+    } catch (err) { showToast('Could not hide this group'); }
+  }));
+}
+
 // ── Nav switching ─────────────────────────────────────────────────────────
 let currentView = 'grid';
+
+// The nav rail's own click handler and the drawer's "jump to the People
+// view" chip links (`renderDrawerPeople`) both need this exact
+// switch-tab/toggle-panels/re-render sequence — factored out once rather
+// than the drawer simulating a rail-btn click to reach it.
+function switchView(name) {
+  document.querySelectorAll('.rail-btn[data-view]').forEach(b => b.classList.toggle('active', b.dataset.view === name));
+  currentView = name;
+  document.getElementById('view-grid').style.display = currentView === 'grid' ? 'flex' : 'none';
+  document.getElementById('view-review').style.display = currentView === 'review' ? 'flex' : 'none';
+  document.getElementById('view-people').style.display = currentView === 'people' ? 'flex' : 'none';
+  if (currentView === 'grid') layout();
+  if (currentView === 'review') renderReviewQueue();
+  if (currentView === 'people') renderPeopleView();
+}
+
 document.querySelectorAll('.rail-btn[data-view]').forEach(btn => {
-  btn.addEventListener('click', () => {
-    document.querySelectorAll('.rail-btn[data-view]').forEach(b => b.classList.remove('active'));
-    btn.classList.add('active');
-    currentView = btn.dataset.view;
-    document.getElementById('view-grid').style.display = currentView === 'grid' ? 'flex' : 'none';
-    document.getElementById('view-review').style.display = currentView === 'review' ? 'flex' : 'none';
-    if (currentView === 'grid') layout();
-    if (currentView === 'review') renderReviewQueue();
-  });
+  btn.addEventListener('click', () => switchView(btn.dataset.view));
 });
+
+// Scrolls to and briefly highlights one cluster's card in the People view
+// — the "jump to that person's cluster" half of a drawer chip click (028
+// decision #5). Cards are rendered async by `renderPeopleView`, so this
+// polls briefly for the card to exist rather than assuming it's already
+// in the DOM the instant `switchView` returns.
+async function jumpToCluster(clusterId) {
+  switchView('people');
+  for (let attempt = 0; attempt < 20; attempt++) {
+    const card = document.querySelector(`.people-card[data-cluster-card="${clusterId}"]`);
+    if (card) {
+      card.classList.add('people-card-highlight');
+      setTimeout(() => card.classList.remove('people-card-highlight'), 1600);
+      card.scrollIntoView({ block: 'center' });
+      return;
+    }
+    await new Promise(r => setTimeout(r, 25));
+  }
+}
 document.getElementById('view-grid').style.display = 'flex';
 document.getElementById('view-grid').style.flexDirection = 'column';
 document.getElementById('view-grid').style.flex = '1';
@@ -1038,6 +1225,7 @@ document.getElementById('view-grid').style.minHeight = '0';
 // attribute for initial visibility — set it explicitly at boot, the same
 // way view-grid's state is already established above.
 document.getElementById('view-review').style.display = 'none';
+document.getElementById('view-people').style.display = 'none';
 
 // ── First-run vault setup (Milestone 5.5) ────────────────────────────────
 //
@@ -1206,6 +1394,12 @@ renderSortPop();
 function startMainApp() {
   refresh();
   refreshReviewBadge();
+  refreshPeopleBadge();
+  // Populated here too, not only on first People-view visit — the
+  // drawer's inline-naming chip (`renderDrawerPeople`) needs the
+  // autocomplete datalist to already exist even if the user never opens
+  // the People view first.
+  invoke('list_persons').then(renderPersonDatalist).catch(() => {});
 }
 
 async function boot() {

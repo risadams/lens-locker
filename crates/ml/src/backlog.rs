@@ -155,6 +155,18 @@ struct PendingFaceCrop {
     crop: image::DynamicImage,
 }
 
+/// Where a face detection's crop thumbnail lives on disk, keyed by the
+/// detection's own row id (only known post-insert, unlike the managed
+/// blob/grid-thumbnail stores which key by content hash). Mirrors
+/// `lenslocker_import::LibraryPaths`'s hex-sharded layout shape rather than
+/// depending on that crate for it — `ml` and `import` don't depend on each
+/// other today (`CLAUDE.md`'s one-direction-no-cycles rule), and adding
+/// either edge for a two-line path join isn't worth it.
+fn face_crop_path(library_root: &Path, detection_id: i64) -> PathBuf {
+    let shard = format!("{:02x}", (detection_id.rem_euclid(256)) as u8);
+    library_root.join("thumbnails").join("faces").join(shard).join(format!("{detection_id}.jpg"))
+}
+
 /// Processes up to `batch_size` images from
 /// [`lenslocker_catalog::images_needing_embedding`] (reusing the exact
 /// same backlog mechanism [`TaggingModel::process_backlog_batch`] uses,
@@ -189,7 +201,12 @@ struct PendingFaceCrop {
 /// person across several photos in one import) must still cluster
 /// together, which only works if each face sees the clusters its own
 /// batch-mates already created.
-pub fn process_face_backlog_batch(conn: &Connection, models_dir: &Path, batch_size: i64, thresholds: &crate::faces::FaceThresholds) -> Result<usize> {
+///
+/// Also writes each detection's already-cropped/resized (112x112, SFace's
+/// own input size) embedding crop to `<library_root>/thumbnails/faces/...`
+/// and records the path (ticket 028 decision #4) — a second use of the
+/// same crop already produced for embedding, not a second decode.
+pub fn process_face_backlog_batch(conn: &Connection, models_dir: &Path, library_root: &Path, batch_size: i64, thresholds: &crate::faces::FaceThresholds) -> Result<usize> {
     let model_id = lenslocker_catalog::find_or_create_model(conn, SFACE_MODEL_NAME, SFACE_MODEL_VERSION, crate::faces::EMBED_DIM as i64, SFACE_LICENSE_NOTE)?;
 
     let image_ids = lenslocker_catalog::images_needing_embedding(conn, model_id, batch_size)?;
@@ -238,6 +255,11 @@ pub fn process_face_backlog_batch(conn: &Connection, models_dir: &Path, batch_si
                 dimension: crate::faces::EMBED_DIM as i64,
             };
             let detection_id = lenslocker_catalog::insert_face_detection(conn, &new_detection)?;
+
+            let crop_path = face_crop_path(library_root, detection_id);
+            lenslocker_decode::write_jpeg_thumbnail(&crop.crop, &crop_path, crate::faces::EMBED_INPUT_SIZE)
+                .map_err(|source| crate::MlError::ThumbnailWrite { path: crop_path.clone(), source })?;
+            lenslocker_catalog::set_face_crop_thumbnail_path(conn, detection_id, &crop_path.to_string_lossy())?;
 
             let existing_members = lenslocker_catalog::clustered_face_embeddings(conn, model_id)?;
             let decision = crate::faces::match_face(&embedding, &existing_members, thresholds);

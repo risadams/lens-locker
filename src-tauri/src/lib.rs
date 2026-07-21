@@ -332,6 +332,42 @@ impl From<lenslocker_catalog::TagWithProvenance> for TagDto {
     }
 }
 
+/// A named face chip for the drawer's "People in this photo" list (028
+/// decision #5) — clickable to jump to that person's cluster in the
+/// People view. Unnamed detections don't get individual chips; they
+/// collapse into `ImageDetailDto::unnamed_clustered`/`unclustered_face_count`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct NamedFaceChipDto {
+    cluster_id: i64,
+    person_id: i64,
+    person_name: String,
+}
+
+impl From<lenslocker_catalog::NamedFaceChip> for NamedFaceChipDto {
+    fn from(c: lenslocker_catalog::NamedFaceChip) -> Self {
+        Self { cluster_id: c.cluster_id, person_id: c.person_id, person_name: c.person_name }
+    }
+}
+
+/// One unnamed cluster's detection count on this image — split out from a
+/// bare total (rather than one combined "+N unidentified" number) so the
+/// drawer can offer inline naming when there's exactly one unambiguous
+/// target (028 decision #3) and fall back to the People view only when
+/// genuinely ambiguous.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct UnnamedFaceGroupDto {
+    cluster_id: i64,
+    count: i64,
+}
+
+impl From<lenslocker_catalog::UnnamedFaceGroup> for UnnamedFaceGroupDto {
+    fn from(g: lenslocker_catalog::UnnamedFaceGroup) -> Self {
+        Self { cluster_id: g.cluster_id, count: g.count }
+    }
+}
+
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct ImageDetailDto {
@@ -350,6 +386,9 @@ struct ImageDetailDto {
     stored_path: String,
     tags: Vec<TagDto>,
     first_imported_at: String,
+    named_faces: Vec<NamedFaceChipDto>,
+    unnamed_clustered: Vec<UnnamedFaceGroupDto>,
+    unclustered_face_count: i64,
 }
 
 /// ML-SPEC.md §4's display floor: a manual tag is always visible; an
@@ -381,6 +420,7 @@ fn get_image_detail(
         // decide — get_image_detail keeps returning everything.
         let display_threshold = lenslocker_catalog::get_app_settings(&conn)?.tag_display_threshold;
         let visible_tags = d.tags.into_iter().filter(|t| tag_is_visible_by_default(t, display_threshold)).map(TagDto::from).collect();
+        let people = lenslocker_catalog::people_for_image(&conn, id)?;
         Ok(ImageDetailDto {
             id: d.id,
             filename: d.filename,
@@ -397,6 +437,9 @@ fn get_image_detail(
             stored_path: d.stored_path,
             tags: visible_tags,
             first_imported_at: d.first_imported_at,
+            named_faces: people.named.into_iter().map(Into::into).collect(),
+            unnamed_clustered: people.unnamed_clustered.into_iter().map(Into::into).collect(),
+            unclustered_face_count: people.unclustered_count,
         })
     })
 }
@@ -525,6 +568,102 @@ fn bulk_remove_tag(state: tauri::State<Mutex<LibraryState>>, image_ids: Vec<i64>
             lenslocker_xmp::sync_sidecar(&conn, image_id)?;
         }
         Ok(())
+    })
+}
+
+// ── People view (ML-SPEC.md §6, ticket 028, Milestone ML-4 Slice C) ────────
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FaceClusterDto {
+    id: i64,
+    person_id: Option<i64>,
+    person_name: Option<String>,
+    photo_count: i64,
+    representative_crop_path: Option<String>,
+    hidden: bool,
+}
+
+impl From<lenslocker_catalog::FaceClusterSummary> for FaceClusterDto {
+    fn from(c: lenslocker_catalog::FaceClusterSummary) -> Self {
+        Self {
+            id: c.id,
+            person_id: c.person_id,
+            person_name: c.person_name,
+            photo_count: c.photo_count,
+            representative_crop_path: c.representative_crop_path,
+            hidden: c.hidden,
+        }
+    }
+}
+
+/// Clusters for the People view, sorted by photo count descending (028
+/// decision #3). `include_hidden` is always `false` from the People view
+/// itself — Slice C has no "manage hidden clusters" surface yet.
+#[tauri::command]
+fn list_face_clusters(state: tauri::State<Mutex<LibraryState>>, include_hidden: bool) -> CmdResult<Vec<FaceClusterDto>> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        Ok(lenslocker_catalog::list_face_clusters(&conn, include_hidden)?.into_iter().map(Into::into).collect())
+    })
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PersonDto {
+    id: i64,
+    name: String,
+}
+
+/// Every named person, for the naming input's autocomplete (028 decision
+/// #3 — naming the same person twice must attach to one identity).
+#[tauri::command]
+fn list_persons(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<Vec<PersonDto>> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        Ok(lenslocker_catalog::list_persons(&conn)?.into_iter().map(|p| PersonDto { id: p.id, name: p.name }).collect())
+    })
+}
+
+/// Names (or renames) a cluster — the confirmation gate (028 decision #2).
+#[tauri::command]
+fn name_face_cluster(state: tauri::State<Mutex<LibraryState>>, cluster_id: i64, person_name: String) -> CmdResult<i64> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        Ok(lenslocker_catalog::name_cluster(&conn, cluster_id, &person_name)?)
+    })
+}
+
+/// Reversible Hide/unhide (028 decision #3) — never deletes detections.
+#[tauri::command]
+fn set_face_cluster_hidden(state: tauri::State<Mutex<LibraryState>>, cluster_id: i64, hidden: bool) -> CmdResult<()> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        lenslocker_catalog::set_cluster_hidden(&conn, cluster_id, hidden)?;
+        Ok(())
+    })
+}
+
+/// A cluster's individual member face crops (028 decision #3: "click a
+/// cluster, see its member thumbnails + photo count") — read-only display,
+/// not the selectable grid Slice D's split/merge flow will need.
+#[tauri::command]
+fn list_cluster_face_crops(state: tauri::State<Mutex<LibraryState>>, cluster_id: i64) -> CmdResult<Vec<String>> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        Ok(lenslocker_catalog::face_crops_for_cluster(&conn, cluster_id)?)
+    })
+}
+
+/// The People nav badge count — mirrors [`list_review_queue`]'s
+/// badge-via-length pattern, except face-match review resolution isn't
+/// built until Slice D, so this returns a bare count rather than entries
+/// there's nothing yet to render.
+#[tauri::command]
+fn pending_face_review_count(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<i64> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        Ok(lenslocker_catalog::pending_face_review_count(&conn)?)
     })
 }
 
@@ -1223,6 +1362,12 @@ pub fn run() {
             bulk_remove_tag,
             list_tags,
             list_sources,
+            list_face_clusters,
+            list_persons,
+            name_face_cluster,
+            set_face_cluster_hidden,
+            list_cluster_face_crops,
+            pending_face_review_count,
             list_review_queue,
             resolve_review_pair,
             copy_file_path,

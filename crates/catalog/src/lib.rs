@@ -281,6 +281,20 @@ pub struct NewFaceDetection {
     pub dimension: i64,
 }
 
+/// Records where a face detection's pre-cropped display thumbnail lives on
+/// disk (ticket 028 decision #4: crops are stored, not regenerated on every
+/// render, unlike `get_full_preview`'s deliberately-uncached full images —
+/// the split/merge grid and People view both need many small crops at once,
+/// which is the case that caching exists for). Called once the crop file
+/// has actually been written, since the path is keyed by this row's own id.
+pub fn set_face_crop_thumbnail_path(conn: &Connection, detection_id: i64, path: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE face_detections SET crop_thumbnail_path = ?1 WHERE id = ?2",
+        params![path, detection_id],
+    )?;
+    Ok(())
+}
+
 /// Inserts a new, not-yet-clustered face detection. Returns its id.
 pub fn insert_face_detection(conn: &Connection, detection: &NewFaceDetection) -> rusqlite::Result<i64> {
     conn.execute(
@@ -363,6 +377,199 @@ pub fn queue_face_match_review(conn: &Connection, face_detection_id: i64, sugges
         params![face_detection_id, suggested_person_id, similarity_score],
     )?;
     Ok(conn.last_insert_rowid())
+}
+
+// ── ML: People view (ML-SPEC.md §6, ticket 028, Milestone ML-4 Slice C) ────
+
+pub struct Person {
+    pub id: i64,
+    pub name: String,
+}
+
+/// Every named person, alphabetical — the naming autocomplete's source
+/// list (028 decision #3: naming the same person from two different
+/// clusters must attach to one identity, not silently create duplicates).
+pub fn list_persons(conn: &Connection) -> rusqlite::Result<Vec<Person>> {
+    let mut stmt = conn.prepare("SELECT id, name FROM persons ORDER BY name COLLATE NOCASE")?;
+    stmt.query_map([], |row| Ok(Person { id: row.get(0)?, name: row.get(1)? }))?.collect()
+}
+
+pub struct FaceClusterSummary {
+    pub id: i64,
+    pub person_id: Option<i64>,
+    pub person_name: Option<String>,
+    pub photo_count: i64,
+    pub representative_crop_path: Option<String>,
+    pub hidden: bool,
+}
+
+/// Every face cluster (named or not), sorted by photo count descending —
+/// 028 decision #3's answer to clutter: "real/frequent people surface
+/// first, one-off/junk clusters sink to the bottom" instead of pruning
+/// anything. `include_hidden` is false for the normal People view and true
+/// only for an eventual "manage hidden clusters" surface (not built in
+/// Slice C). `photo_count` counts distinct images, not detections, since
+/// the same person can appear twice in one photo.
+pub fn list_face_clusters(conn: &Connection, include_hidden: bool) -> rusqlite::Result<Vec<FaceClusterSummary>> {
+    let mut stmt = conn.prepare(
+        "SELECT fc.id, fc.person_id, p.name, COUNT(DISTINCT fd.image_id) AS photo_count,
+                (SELECT crop_thumbnail_path FROM face_detections
+                 WHERE face_cluster_id = fc.id AND crop_thumbnail_path IS NOT NULL
+                 ORDER BY detection_confidence DESC LIMIT 1) AS representative_crop_path,
+                fc.hidden
+         FROM face_clusters fc
+         JOIN face_detections fd ON fd.face_cluster_id = fc.id
+         LEFT JOIN persons p ON p.id = fc.person_id
+         WHERE fc.hidden = 0 OR ?1
+         GROUP BY fc.id
+         ORDER BY photo_count DESC, fc.id ASC",
+    )?;
+    stmt.query_map([include_hidden], |row| {
+        Ok(FaceClusterSummary {
+            id: row.get(0)?,
+            person_id: row.get(1)?,
+            person_name: row.get(2)?,
+            photo_count: row.get(3)?,
+            representative_crop_path: row.get(4)?,
+            hidden: row.get::<_, i64>(5)? != 0,
+        })
+    })?
+    .collect()
+}
+
+/// Names a cluster — "the confirmation gate" (028 decision #2) that turns
+/// "some grouped faces" into an actual person. Finds an existing person by
+/// case-insensitive name first (matching `list_persons`'s own `COLLATE
+/// NOCASE` ordering — typing "alice" without picking the autocomplete
+/// suggestion for "Alice" must still attach to one identity, not silently
+/// create a second person) so naming the same person from two different
+/// clusters attaches to one identity (028 decision #3); creates one
+/// otherwise. Returns the person's id.
+pub fn name_cluster(conn: &Connection, cluster_id: i64, person_name: &str) -> rusqlite::Result<i64> {
+    let name = person_name.trim();
+    let existing: Option<i64> = conn
+        .query_row("SELECT id FROM persons WHERE name = ?1 COLLATE NOCASE", params![name], |row| row.get(0))
+        .optional()?;
+    let person_id = match existing {
+        Some(id) => id,
+        None => {
+            conn.execute("INSERT INTO persons (name) VALUES (?1)", params![name])?;
+            conn.last_insert_rowid()
+        }
+    };
+    conn.execute(
+        "UPDATE face_clusters SET person_id = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2",
+        params![person_id, cluster_id],
+    )?;
+    Ok(person_id)
+}
+
+/// Toggles a cluster's reversible "Hide" state (028 decision #3: "moves to
+/// a hidden bucket, never deletes underlying detections/embeddings" —
+/// mirrors quarantine's recoverable-not-gone shape, but with no retention
+/// window, since hidden clusters carry no disk-space pressure to reclaim).
+pub fn set_cluster_hidden(conn: &Connection, cluster_id: i64, hidden: bool) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE face_clusters SET hidden = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2",
+        params![hidden, cluster_id],
+    )?;
+    Ok(())
+}
+
+pub struct NamedFaceChip {
+    pub cluster_id: i64,
+    pub person_id: i64,
+    pub person_name: String,
+}
+
+/// An unnamed cluster's detection count on one image — split out from a
+/// bare total so the drawer can offer inline naming (028 decision #3) in
+/// the common single-stranger case (exactly one unnamed cluster, nothing
+/// left over in `unclustered_count`) while falling back to the People view
+/// when the target is genuinely ambiguous (2+ distinct unnamed clusters in
+/// the same photo) — there's no per-face-crop picker in the drawer to
+/// disambiguate further than that (028 decision #5 rules out a bounding-box
+/// overlay), so ambiguity past that point is Slice D's job, not guessed at
+/// here.
+pub struct UnnamedFaceGroup {
+    pub cluster_id: i64,
+    pub count: i64,
+}
+
+pub struct ImagePeople {
+    pub named: Vec<NamedFaceChip>,
+    pub unnamed_clustered: Vec<UnnamedFaceGroup>,
+    pub unclustered_count: i64,
+}
+
+/// The drawer's "People in this photo" chip list source (028 decision #5):
+/// named faces become individual clickable chips; unnamed/unclustered
+/// detections collapse into one count for a "+N unidentified" chip.
+/// Detections belonging to a hidden cluster are excluded from all three —
+/// a hidden cluster shouldn't resurface anonymously either.
+pub fn people_for_image(conn: &Connection, image_id: i64) -> rusqlite::Result<ImagePeople> {
+    let mut named_stmt = conn.prepare(
+        "SELECT DISTINCT fc.id, p.id, p.name
+         FROM face_detections fd
+         JOIN face_clusters fc ON fc.id = fd.face_cluster_id
+         JOIN persons p ON p.id = fc.person_id
+         WHERE fd.image_id = ?1 AND fc.hidden = 0
+         ORDER BY p.name COLLATE NOCASE",
+    )?;
+    let named = named_stmt
+        .query_map([image_id], |row| {
+            Ok(NamedFaceChip { cluster_id: row.get(0)?, person_id: row.get(1)?, person_name: row.get(2)? })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let mut unnamed_stmt = conn.prepare(
+        "SELECT fc.id, COUNT(*)
+         FROM face_detections fd
+         JOIN face_clusters fc ON fc.id = fd.face_cluster_id
+         WHERE fd.image_id = ?1 AND fc.person_id IS NULL AND fc.hidden = 0
+         GROUP BY fc.id",
+    )?;
+    let unnamed_clustered = unnamed_stmt
+        .query_map([image_id], |row| Ok(UnnamedFaceGroup { cluster_id: row.get(0)?, count: row.get(1)? }))?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+
+    let unclustered_count: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM face_detections WHERE image_id = ?1 AND face_cluster_id IS NULL",
+        [image_id],
+        |row| row.get(0),
+    )?;
+
+    Ok(ImagePeople { named, unnamed_clustered, unclustered_count })
+}
+
+/// A cluster's individual member face crops — 028 decision #3's "click a
+/// cluster, see its member thumbnails + photo count" (distinct from Slice
+/// D's split/merge grid, which needs these crops to be *selectable*; this
+/// is read-only display). Detections with no crop yet (`crop_thumbnail_path`
+/// still `NULL`) are skipped rather than rendered as broken images.
+pub fn face_crops_for_cluster(conn: &Connection, cluster_id: i64) -> rusqlite::Result<Vec<String>> {
+    let mut stmt = conn.prepare(
+        "SELECT crop_thumbnail_path FROM face_detections
+         WHERE face_cluster_id = ?1 AND crop_thumbnail_path IS NOT NULL
+         ORDER BY id",
+    )?;
+    stmt.query_map([cluster_id], |row| row.get(0))?.collect()
+}
+
+/// Pending `face_match_review_queue` count — the People nav badge (028
+/// decision #1: "mirroring the existing dedupe review queue's pattern
+/// exactly"). Resolving these entries is Slice D's job; Slice C only
+/// surfaces the count.
+///
+/// **Known interim gap, flagged not silently shipped**: unlike dedupe's
+/// badge (which always has a matching in-view resolve action), the
+/// People view Slice C ships has no UI to act on what this counts — a
+/// nonzero badge is a real dead end until Slice D's review-queue
+/// resolution lands. Raised in Slice C's own code review and kept as-is
+/// deliberately (chris, 2026-07-20): fixing it now would mean building
+/// part of Slice D early rather than landing it as one coherent slice.
+pub fn pending_face_review_count(conn: &Connection) -> rusqlite::Result<i64> {
+    conn.query_row("SELECT COUNT(*) FROM face_match_review_queue WHERE status = 'pending'", [], |row| row.get(0))
 }
 
 // ── Full-text search index sync (workplan/SPEC.md §9's "text search" filter,
@@ -1326,6 +1533,198 @@ mod tests {
             conn.query_row("SELECT status, similarity_score FROM face_match_review_queue WHERE id = ?1", [queue_id], |row| Ok((row.get(0)?, row.get(1)?))).unwrap();
         assert_eq!(status, "pending");
         assert_eq!(similarity, 0.42);
+    }
+
+    #[test]
+    fn name_cluster_creates_a_new_person_and_assigns_it() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let cluster_id = super::create_cluster_with_member(&conn, detection_id).unwrap();
+
+        let person_id = super::name_cluster(&conn, cluster_id, "  Alice  ").unwrap();
+
+        let name: String = conn.query_row("SELECT name FROM persons WHERE id = ?1", [person_id], |row| row.get(0)).unwrap();
+        assert_eq!(name, "Alice", "name must be trimmed before storing");
+        let stored_person_id: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [cluster_id], |row| row.get(0)).unwrap();
+        assert_eq!(stored_person_id, Some(person_id));
+    }
+
+    #[test]
+    fn name_cluster_reuses_an_existing_person_by_exact_name() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let first_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let cluster_a = super::create_cluster_with_member(&conn, first_detection).unwrap();
+        let second_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        let cluster_b = super::create_cluster_with_member(&conn, second_detection).unwrap();
+
+        let person_a = super::name_cluster(&conn, cluster_a, "Alice").unwrap();
+        let person_b = super::name_cluster(&conn, cluster_b, "Alice").unwrap();
+
+        assert_eq!(person_a, person_b, "naming two different clusters the same name must attach to one identity, not create duplicates");
+        let person_count: i64 = conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0)).unwrap();
+        assert_eq!(person_count, 1);
+    }
+
+    #[test]
+    fn name_cluster_matches_an_existing_person_case_insensitively() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let first_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let cluster_a = super::create_cluster_with_member(&conn, first_detection).unwrap();
+        let second_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        let cluster_b = super::create_cluster_with_member(&conn, second_detection).unwrap();
+
+        let person_a = super::name_cluster(&conn, cluster_a, "Alice").unwrap();
+        let person_b = super::name_cluster(&conn, cluster_b, "alice").unwrap();
+
+        assert_eq!(person_a, person_b, "typing a different case than the autocomplete suggestion must still attach to the same identity");
+        let person_count: i64 = conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0)).unwrap();
+        assert_eq!(person_count, 1);
+    }
+
+    #[test]
+    fn set_cluster_hidden_toggles_and_is_reversible() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let cluster_id = super::create_cluster_with_member(&conn, detection_id).unwrap();
+
+        super::set_cluster_hidden(&conn, cluster_id, true).unwrap();
+        let hidden: i64 = conn.query_row("SELECT hidden FROM face_clusters WHERE id = ?1", [cluster_id], |row| row.get(0)).unwrap();
+        assert_eq!(hidden, 1);
+
+        super::set_cluster_hidden(&conn, cluster_id, false).unwrap();
+        let hidden: i64 = conn.query_row("SELECT hidden FROM face_clusters WHERE id = ?1", [cluster_id], |row| row.get(0)).unwrap();
+        assert_eq!(hidden, 0, "hiding must be reversible — 028 decision #3");
+    }
+
+    #[test]
+    fn list_face_clusters_sorts_by_photo_count_descending_and_excludes_hidden_by_default() {
+        let conn = migrated_conn();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+
+        // Cluster A: two photos.
+        let image_1 = insert_test_image(&conn);
+        let image_2 = insert_test_image(&conn);
+        let det_a1 = super::insert_face_detection(&conn, &new_face(image_1, model_id, &[1])).unwrap();
+        let cluster_a = super::create_cluster_with_member(&conn, det_a1).unwrap();
+        let det_a2 = super::insert_face_detection(&conn, &new_face(image_2, model_id, &[2])).unwrap();
+        super::attach_face_detection_to_cluster(&conn, det_a2, cluster_a).unwrap();
+
+        // Cluster B: one photo.
+        let image_3 = insert_test_image(&conn);
+        let det_b1 = super::insert_face_detection(&conn, &new_face(image_3, model_id, &[3])).unwrap();
+        let cluster_b = super::create_cluster_with_member(&conn, det_b1).unwrap();
+
+        // Cluster C: hidden, must not appear by default.
+        let image_4 = insert_test_image(&conn);
+        let det_c1 = super::insert_face_detection(&conn, &new_face(image_4, model_id, &[4])).unwrap();
+        let cluster_c = super::create_cluster_with_member(&conn, det_c1).unwrap();
+        super::set_cluster_hidden(&conn, cluster_c, true).unwrap();
+
+        let visible = super::list_face_clusters(&conn, false).unwrap();
+        assert_eq!(visible.iter().map(|c| c.id).collect::<Vec<_>>(), vec![cluster_a, cluster_b]);
+        assert_eq!(visible[0].photo_count, 2);
+        assert_eq!(visible[1].photo_count, 1);
+
+        let with_hidden = super::list_face_clusters(&conn, true).unwrap();
+        assert!(with_hidden.iter().any(|c| c.id == cluster_c && c.hidden));
+    }
+
+    #[test]
+    fn people_for_image_splits_named_chips_from_unnamed_clusters_and_unclustered() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+
+        let named_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let named_cluster = super::create_cluster_with_member(&conn, named_detection).unwrap();
+        super::name_cluster(&conn, named_cluster, "Alice").unwrap();
+
+        let unnamed_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        let unnamed_cluster = super::create_cluster_with_member(&conn, unnamed_detection).unwrap();
+
+        let unclustered = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[3])).unwrap();
+        let _ = unclustered; // never clustered at all
+
+        let hidden_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[4])).unwrap();
+        let hidden_cluster = super::create_cluster_with_member(&conn, hidden_detection).unwrap();
+        super::name_cluster(&conn, hidden_cluster, "Bob").unwrap();
+        super::set_cluster_hidden(&conn, hidden_cluster, true).unwrap();
+
+        let people = super::people_for_image(&conn, image_id).unwrap();
+        assert_eq!(people.named.len(), 1);
+        assert_eq!(people.named[0].person_name, "Alice");
+        assert_eq!(people.unnamed_clustered.len(), 1, "the hidden named cluster must not appear here");
+        assert_eq!(people.unnamed_clustered[0].cluster_id, unnamed_cluster);
+        assert_eq!(people.unnamed_clustered[0].count, 1);
+        assert_eq!(people.unclustered_count, 1);
+    }
+
+    #[test]
+    fn face_crops_for_cluster_skips_detections_with_no_crop_yet() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+
+        let first = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let cluster_id = super::create_cluster_with_member(&conn, first).unwrap();
+        super::set_face_crop_thumbnail_path(&conn, first, "thumbnails/faces/00/1.jpg").unwrap();
+
+        let second = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        super::attach_face_detection_to_cluster(&conn, second, cluster_id).unwrap();
+        // second never gets set_face_crop_thumbnail_path — still NULL.
+
+        let crops = super::face_crops_for_cluster(&conn, cluster_id).unwrap();
+        assert_eq!(crops, vec!["thumbnails/faces/00/1.jpg".to_string()]);
+    }
+
+    #[test]
+    fn pending_face_review_count_only_counts_pending() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        conn.execute("INSERT INTO persons (name) VALUES ('Alex')", []).unwrap();
+        let person_id = conn.last_insert_rowid();
+        let pending_id = super::queue_face_match_review(&conn, detection_id, person_id, 0.42).unwrap();
+
+        let resolved_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        let resolved_queue_id = super::queue_face_match_review(&conn, resolved_detection, person_id, 0.5).unwrap();
+        conn.execute("UPDATE face_match_review_queue SET status = 'confirmed' WHERE id = ?1", [resolved_queue_id]).unwrap();
+
+        assert_eq!(super::pending_face_review_count(&conn).unwrap(), 1);
+        let _ = pending_id;
+    }
+
+    #[test]
+    fn list_persons_is_alphabetical() {
+        let conn = migrated_conn();
+        conn.execute("INSERT INTO persons (name) VALUES ('Zed')", []).unwrap();
+        conn.execute("INSERT INTO persons (name) VALUES ('alice')", []).unwrap();
+        conn.execute("INSERT INTO persons (name) VALUES ('Bob')", []).unwrap();
+
+        let names: Vec<String> = super::list_persons(&conn).unwrap().into_iter().map(|p| p.name).collect();
+        assert_eq!(names, vec!["alice".to_string(), "Bob".to_string(), "Zed".to_string()]);
+    }
+
+    #[test]
+    fn set_face_crop_thumbnail_path_updates_the_row() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+
+        super::set_face_crop_thumbnail_path(&conn, detection_id, "thumbnails/faces/00/1.jpg").unwrap();
+
+        let path: Option<String> = conn.query_row("SELECT crop_thumbnail_path FROM face_detections WHERE id = ?1", [detection_id], |row| row.get(0)).unwrap();
+        assert_eq!(path.as_deref(), Some("thumbnails/faces/00/1.jpg"));
     }
 
     #[test]

@@ -41,6 +41,12 @@ pub enum MlError {
         #[source]
         source: lenslocker_decode::ProbeError,
     },
+    #[error("could not write face crop thumbnail to {path}: {source}")]
+    ThumbnailWrite {
+        path: PathBuf,
+        #[source]
+        source: lenslocker_decode::ThumbnailError,
+    },
 }
 
 pub type Result<T> = std::result::Result<T, MlError>;
