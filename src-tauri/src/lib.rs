@@ -665,13 +665,43 @@ fn merge_face_clusters(
 }
 
 /// A cluster's individual member face crops (028 decision #3: "click a
-/// cluster, see its member thumbnails + photo count") — read-only display,
-/// not the selectable grid Slice D's split/merge flow will need.
+/// cluster, see its member thumbnails + photo count") — also Slice D3's
+/// Split selection source, since each crop carries its own `detectionId`.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct FaceCropDto {
+    detection_id: i64,
+    crop_thumbnail_path: String,
+}
+
+impl From<lenslocker_catalog::FaceCrop> for FaceCropDto {
+    fn from(c: lenslocker_catalog::FaceCrop) -> Self {
+        Self { detection_id: c.detection_id, crop_thumbnail_path: c.crop_thumbnail_path }
+    }
+}
+
 #[tauri::command]
-fn list_cluster_face_crops(state: tauri::State<Mutex<LibraryState>>, cluster_id: i64) -> CmdResult<Vec<String>> {
+fn list_cluster_face_crops(state: tauri::State<Mutex<LibraryState>>, cluster_id: i64) -> CmdResult<Vec<FaceCropDto>> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
-        Ok(lenslocker_catalog::face_crops_for_cluster(&conn, cluster_id)?)
+        Ok(lenslocker_catalog::face_crops_for_cluster(&conn, cluster_id)?.into_iter().map(Into::into).collect())
+    })
+}
+
+/// Split (028 decision #4): moves the selected face detections out of
+/// whatever cluster(s) they're in and into one new cluster, optionally
+/// named. See [`lenslocker_catalog::move_detections_to_new_cluster`] for
+/// why "move to an existing person" and "move to a new group" are the
+/// same operation here.
+#[tauri::command]
+fn move_face_detections_to_new_cluster(
+    state: tauri::State<Mutex<LibraryState>>,
+    detection_ids: Vec<i64>,
+    person_name: Option<String>,
+) -> CmdResult<i64> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        Ok(lenslocker_catalog::move_detections_to_new_cluster(&conn, &detection_ids, person_name.as_deref())?)
     })
 }
 
@@ -1446,6 +1476,7 @@ pub fn run() {
             set_face_cluster_hidden,
             merge_face_clusters,
             list_cluster_face_crops,
+            move_face_detections_to_new_cluster,
             pending_face_review_count,
             list_pending_face_matches,
             confirm_face_match,

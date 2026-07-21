@@ -98,12 +98,38 @@ let pendingPages = new Set();  // page-start offsets currently in flight
 let requestToken = 0;          // bumped on every filter/sort/search change to invalidate stale responses
 let columns = 1;
 
-// ── Grid multi-select (ML-SPEC.md §5) ────────────────────────────────────
-// A generic primitive, not narrowly scoped to tags — §5: "reuses one
-// shared multi-select primitive that §6's face-cluster splitting also
-// needs... build it generically enough to serve both call sites." §6's
-// face-crop-thumbnail reuse is a later slice; this is the grid half.
-//
+// ── Multi-select primitive (ML-SPEC.md §5/§6) ────────────────────────────
+// "reuses one shared multi-select primitive that §6's face-cluster
+// splitting also needs... build it generically enough to serve both call
+// sites, not narrowly scoped to faces." One generic Set-backed selection
+// manager, created fresh by each call site (the grid's bulk tag
+// correction below; the People view's per-cluster crop picker for Split).
+// Owns membership tracking and mutation only — not rendering, since the
+// grid (re-renders its whole visible window) and a crop panel (re-renders
+// one detached subtree) sync completely different DOM shapes; each call
+// site supplies its own `onChange` to do that.
+function createMultiSelect(onChange) {
+  const selection = new Set();
+  const notify = () => onChange?.();
+  return {
+    selection,
+    has: (id) => selection.has(id),
+    get size() { return selection.size; },
+    toggle(id) {
+      selection.has(id) ? selection.delete(id) : selection.add(id);
+      notify();
+    },
+    addRange(ids) {
+      ids.forEach(id => selection.add(id));
+      notify();
+    },
+    clear() {
+      selection.clear();
+      notify();
+    },
+  };
+}
+
 // Interaction design (checkbox-on-hover + shift-range, a bulk bar once
 // 1+ selected) is this build's own judgment call — ML-SPEC.md deliberately
 // specifies *that* a multi-select primitive is needed, not its exact
@@ -111,7 +137,7 @@ let columns = 1;
 // Photos): once 1+ items are selected, clicking a thumb's body continues
 // selecting instead of opening the drawer, so a half-selected state can't
 // accidentally be abandoned by a stray click.
-const bulkSelection = new Set(); // image ids, not indices (ids survive re-sorts/scrolls; indices don't)
+const bulkSelect = createMultiSelect(() => { updateBulkBar(); scheduleRenderWindow(); }); // image ids, not indices (ids survive re-sorts/scrolls; indices don't)
 let lastClickedIdx = null;       // for shift-click range selection
 
 const gridWrap = document.getElementById('gridWrap');
@@ -174,7 +200,7 @@ function renderCellHtml(idx) {
     : '';
   const src = assetSrc(item.thumbnailPath);
   const img = src ? `<img src="${src}" loading="lazy" alt="">` : `<div class="fake-img"></div>`;
-  const picked = bulkSelection.has(item.id);
+  const picked = bulkSelect.has(item.id);
   return `<div class="thumb${picked ? ' thumb-picked' : ''}" data-id="${item.id}" data-idx="${idx}">
     ${img}
     ${item.verified ? vg(13, 'verified-glyph always') : ''}
@@ -255,15 +281,15 @@ gridWindow.addEventListener('click', (e) => {
   // The checkbox always selects; the thumb's body only selects once 1+
   // items are already selected — "once selection is active, clicking a
   // thumb's body continues selecting instead of opening the drawer"
-  // (module doc comment above bulkSelection's declaration) — a stray
+  // (module doc comment above bulkSelect's declaration) — a stray
   // click can't silently abandon a half-built selection. Otherwise, a
   // body click opens the drawer as it always has.
-  if (onPickTarget || bulkSelection.size > 0) {
+  if (onPickTarget || bulkSelect.size > 0) {
     if (onPickTarget) e.stopPropagation();
     if (e.shiftKey && lastClickedIdx !== null) {
       selectRange(lastClickedIdx, idx);
     } else {
-      toggleBulkSelection(id);
+      bulkSelect.toggle(id);
     }
     lastClickedIdx = idx;
     return;
@@ -272,12 +298,6 @@ gridWindow.addEventListener('click', (e) => {
   openDrawer(id);
 });
 
-function toggleBulkSelection(id) {
-  bulkSelection.has(id) ? bulkSelection.delete(id) : bulkSelection.add(id);
-  updateBulkBar();
-  scheduleRenderWindow();
-}
-
 // Selects every *currently loaded* item between fromIdx and toIdx
 // (inclusive) — a disclosed limitation, not a bug: indices outside what's
 // been scrolled-to/fetched yet (this grid only loads its visible window +
@@ -285,27 +305,25 @@ function toggleBulkSelection(id) {
 // included in a range that was never fetched.
 function selectRange(fromIdx, toIdx) {
   const [lo, hi] = fromIdx <= toIdx ? [fromIdx, toIdx] : [toIdx, fromIdx];
+  const ids = [];
   for (let i = lo; i <= hi; i++) {
     const item = itemCache.get(i);
-    if (item) bulkSelection.add(item.id);
+    if (item) ids.push(item.id);
   }
-  updateBulkBar();
-  scheduleRenderWindow();
+  bulkSelect.addRange(ids);
 }
 
 function clearBulkSelection() {
-  bulkSelection.clear();
+  bulkSelect.clear();
   lastClickedIdx = null;
-  updateBulkBar();
-  scheduleRenderWindow();
 }
 
 function updateBulkBar() {
   const bar = document.getElementById('bulkBar');
   if (!bar) return;
-  bar.style.display = bulkSelection.size > 0 ? 'flex' : 'none';
+  bar.style.display = bulkSelect.size > 0 ? 'flex' : 'none';
   const countEl = document.getElementById('bulkCount');
-  if (countEl) countEl.textContent = `${bulkSelection.size} selected`;
+  if (countEl) countEl.textContent = `${bulkSelect.size} selected`;
 }
 
 gridWrap.addEventListener('scroll', scheduleRenderWindow);
@@ -897,7 +915,7 @@ document.getElementById('topbarImportBtn').addEventListener('click', openImportM
 // tag entry either).
 
 document.getElementById('bulkAddTagBtn').addEventListener('click', (e) => {
-  const ids = [...bulkSelection];
+  const ids = [...bulkSelect.selection];
   promptTagNameInput(e.currentTarget, async (tag) => {
     try {
       await invoke('bulk_add_tag', { imageIds: ids, tag });
@@ -921,7 +939,7 @@ document.getElementById('bulkAddTagBtn').addEventListener('click', (e) => {
 });
 
 document.getElementById('bulkRemoveTagBtn').addEventListener('click', (e) => {
-  const ids = [...bulkSelection];
+  const ids = [...bulkSelect.selection];
   promptTagNameInput(e.currentTarget, async (tag) => {
     try {
       await invoke('bulk_remove_tag', { imageIds: ids, tag });
@@ -1136,6 +1154,11 @@ async function renderPeopleNeedsReview() {
 }
 
 async function renderPeopleView() {
+  // Every crop-expand panel collapses back to closed on a fresh render
+  // below (grid.innerHTML is rebuilt from scratch) — any split selection
+  // would otherwise linger referencing a panel that no longer knows it
+  // was ever expanded.
+  splitSelections.clear();
   await refreshPeopleBadge();
   await renderPeopleNeedsReview();
   let clusters = [], persons = [];
@@ -1162,6 +1185,7 @@ async function renderPeopleView() {
         <div class="people-card-pick" data-pick-cluster="${c.id}" title="Select to merge">${mergeSelection.has(c.id) ? checkIcon() : ''}</div>
       </div>
       <div class="people-card-crops" id="crops-${c.id}" style="display:none"></div>
+      <div class="people-card-split-bar" id="split-${c.id}" style="display:none"></div>
       <div class="people-card-body">
         <div class="people-card-count">${c.photoCount} photo${c.photoCount === 1 ? '' : 's'}</div>
         ${c.personName
@@ -1173,23 +1197,26 @@ async function renderPeopleView() {
   `).join('');
 
   // "click a cluster, see its member thumbnails + photo count" (028
-  // decision #3) — a read-only expand, fetched lazily on first click
-  // rather than upfront for every card. Distinct from the merge checkbox
-  // below (which operates on whole cluster cards) and from Slice D3's
-  // still-unbuilt primitive (selecting individual face crops *within* one
-  // cluster, for Split) — three different selection granularities that
-  // only look similar at a glance.
+  // decision #3), and — since Slice D3 — the same crops are Split's
+  // selection surface ("show every member face thumbnail... let the user
+  // multi-select a subset"). Distinct from the merge checkbox above
+  // (which operates on whole cluster cards): two different selection
+  // granularities that only look similar at a glance. Crops are fetched
+  // lazily on first expand and cached on the panel's dataset, since
+  // toggling a selection re-renders the panel without a re-fetch.
   grid.querySelectorAll('[data-expand-cluster]').forEach(thumb => thumb.addEventListener('click', async (e) => {
     e.stopPropagation();
-    const panel = document.getElementById(`crops-${thumb.dataset.expandCluster}`);
+    const clusterId = Number(thumb.dataset.expandCluster);
+    const panel = document.getElementById(`crops-${clusterId}`);
     const open = panel.style.display !== 'none';
     if (open) { panel.style.display = 'none'; return; }
     if (!panel.dataset.loaded) {
       let crops = [];
-      try { crops = await invoke('list_cluster_face_crops', { clusterId: Number(thumb.dataset.expandCluster) }); } catch (err) { showToast('Could not load this group’s faces'); return; }
-      panel.innerHTML = crops.map(p => `<img src="${assetSrc(p)}" alt="">`).join('') || `<span style="color:var(--text-faint);font-size:11px">No face crops yet</span>`;
+      try { crops = await invoke('list_cluster_face_crops', { clusterId }); } catch (err) { showToast('Could not load this group’s faces'); return; }
+      panel.dataset.crops = JSON.stringify(crops);
       panel.dataset.loaded = '1';
     }
+    renderCropsPanel(clusterId);
     panel.style.display = 'flex';
   }));
 
@@ -1221,6 +1248,79 @@ async function renderPeopleView() {
       renderPeopleView();
     } catch (err) { showToast('Could not hide this group'); }
   }));
+}
+
+// ── Cluster split (028 decision #4, Milestone ML-4 Slice D3) ───────────────
+// One `createMultiSelect` instance per open cluster panel, not one shared
+// instance — more than one crop-expand panel can be open at once (each
+// People-view card expands independently), unlike the grid's single
+// `bulkSelect`. Both still go through the same shared primitive above.
+const splitSelections = new Map();
+
+function getSplitSelect(clusterId) {
+  if (!splitSelections.has(clusterId)) {
+    splitSelections.set(clusterId, createMultiSelect(() => renderCropsPanel(clusterId)));
+  }
+  return splitSelections.get(clusterId);
+}
+
+// Renders one cluster's expanded crop grid from its cached `list_cluster_face_crops`
+// response (`panel.dataset.crops`) — re-run on every selection toggle (via
+// the multi-select's `onChange`), not just on first expand, since there's
+// no fetch involved past that point.
+function renderCropsPanel(clusterId) {
+  const panel = document.getElementById(`crops-${clusterId}`);
+  const crops = JSON.parse(panel.dataset.crops || '[]');
+  const select = getSplitSelect(clusterId);
+
+  panel.innerHTML = crops.length
+    ? crops.map(crop => `
+        <div class="face-crop-pick${select.has(crop.detectionId) ? ' face-crop-pick-selected' : ''}" data-crop-detection="${crop.detectionId}">
+          <img src="${assetSrc(crop.cropThumbnailPath)}" alt="">
+        </div>`).join('')
+    : `<span style="color:var(--text-faint);font-size:11px">No face crops yet</span>`;
+
+  panel.querySelectorAll('[data-crop-detection]').forEach(el => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    select.toggle(Number(el.dataset.cropDetection));
+  }));
+
+  renderSplitBar(clusterId);
+}
+
+// "move them to a new or existing cluster/person" (028 decision #4) — two
+// buttons rather than one prompt that treats an empty name as "new group",
+// since the shared `promptTagNameInput` helper already treats an empty
+// commit as cancel everywhere else; reusing it here with a different
+// meaning for "empty" would be a silent, easy-to-miss exception to that
+// rule.
+function renderSplitBar(clusterId) {
+  const bar = document.getElementById(`split-${clusterId}`);
+  const select = getSplitSelect(clusterId);
+  if (select.size === 0) { bar.style.display = 'none'; bar.innerHTML = ''; return; }
+
+  bar.style.display = 'flex';
+  bar.innerHTML = `
+    <span>${select.size} face${select.size === 1 ? '' : 's'} selected</span>
+    <button class="btn" data-move-new="${clusterId}">Move to new group</button>
+    <button class="btn" data-move-named="${clusterId}">Move to named person…</button>
+  `;
+
+  const moveSelected = async (personName) => {
+    try {
+      await invoke('move_face_detections_to_new_cluster', { detectionIds: [...select.selection], personName });
+      showToast(personName ? `Moved to ${personName}` : 'Moved to a new group');
+      // No explicit splitSelections.delete(clusterId) here — renderPeopleView()
+      // below unconditionally clears the whole Map itself (every crop panel
+      // collapses on its full re-render anyway).
+      renderPeopleView();
+    } catch (err) { showToast('Could not move these faces'); }
+  };
+
+  bar.querySelector('[data-move-new]').addEventListener('click', () => moveSelected(null));
+  bar.querySelector('[data-move-named]').addEventListener('click', (e) => {
+    promptTagNameInput(e.currentTarget, (value) => moveSelected(value), { placeholder: 'person’s name…', listId: 'personNames' });
+  });
 }
 
 // ── Cluster merge (028 decision #4, Milestone ML-4 Slice D2) ───────────────

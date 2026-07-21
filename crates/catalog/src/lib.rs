@@ -522,6 +522,65 @@ pub fn merge_clusters(conn: &Connection, keeper_cluster_id: i64, loser_cluster_i
     Ok(())
 }
 
+/// Moves `detection_ids` out of whatever cluster(s) they're currently in
+/// and into one brand-new cluster (028 decision #4's Split: "show every
+/// member face thumbnail... let the user multi-select a subset, move them
+/// to a new or existing cluster/person"). `person_name`, when given, is
+/// resolved via [`find_or_create_person`] and set on the new cluster — the
+/// same "always a *fresh* cluster for a specific person, never guess which
+/// existing one" reasoning [`confirm_face_match`] already uses, so moving
+/// a subset "to an existing person" and moving it "to a new group" are the
+/// same operation here, just with or without a name. Any source cluster
+/// left with zero detections after the move is deleted (mirrors
+/// [`merge_clusters`]'s loser cleanup) — every other source cluster is
+/// left alone; its `photo_count` etc. simply reflects fewer members next
+/// time it's queried, nothing there needs updating directly. Requires
+/// `detection_ids` non-empty (the caller — the People view's split
+/// selection — never enables the move action with nothing selected).
+/// Returns the new cluster's id.
+pub fn move_detections_to_new_cluster(conn: &Connection, detection_ids: &[i64], person_name: Option<&str>) -> rusqlite::Result<i64> {
+    let placeholders = vec!["?"; detection_ids.len()].join(",");
+
+    let source_cluster_ids: Vec<i64> = {
+        let mut stmt = conn.prepare(&format!(
+            "SELECT DISTINCT face_cluster_id FROM face_detections WHERE id IN ({placeholders}) AND face_cluster_id IS NOT NULL"
+        ))?;
+        stmt.query_map(rusqlite::params_from_iter(detection_ids), |row| row.get(0))?.collect::<rusqlite::Result<_>>()?
+    };
+
+    conn.execute("INSERT INTO face_clusters DEFAULT VALUES", [])?;
+    let new_cluster_id = conn.last_insert_rowid();
+
+    let mut update_params: Vec<i64> = Vec::with_capacity(detection_ids.len() + 1);
+    update_params.push(new_cluster_id);
+    update_params.extend_from_slice(detection_ids);
+    conn.execute(
+        &format!("UPDATE face_detections SET face_cluster_id = ? WHERE id IN ({placeholders})"),
+        rusqlite::params_from_iter(update_params.iter()),
+    )?;
+
+    if let Some(name) = person_name {
+        let person_id = find_or_create_person(conn, name)?;
+        conn.execute(
+            "UPDATE face_clusters SET person_id = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2",
+            params![person_id, new_cluster_id],
+        )?;
+    }
+
+    for source_cluster_id in source_cluster_ids {
+        let remaining: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM face_detections WHERE face_cluster_id = ?1",
+            [source_cluster_id],
+            |row| row.get(0),
+        )?;
+        if remaining == 0 {
+            conn.execute("DELETE FROM face_clusters WHERE id = ?1", [source_cluster_id])?;
+        }
+    }
+
+    Ok(new_cluster_id)
+}
+
 pub struct NamedFaceChip {
     pub cluster_id: i64,
     pub person_id: i64,
@@ -588,18 +647,30 @@ pub fn people_for_image(conn: &Connection, image_id: i64) -> rusqlite::Result<Im
     Ok(ImagePeople { named, unnamed_clustered, unclustered_count })
 }
 
+pub struct FaceCrop {
+    pub detection_id: i64,
+    pub crop_thumbnail_path: String,
+}
+
 /// A cluster's individual member face crops — 028 decision #3's "click a
-/// cluster, see its member thumbnails + photo count" (distinct from Slice
-/// D's split/merge grid, which needs these crops to be *selectable*; this
-/// is read-only display). Detections with no crop yet (`crop_thumbnail_path`
-/// still `NULL`) are skipped rather than rendered as broken images.
-pub fn face_crops_for_cluster(conn: &Connection, cluster_id: i64) -> rusqlite::Result<Vec<String>> {
+/// cluster, see its member thumbnails + photo count", and (Slice D3) the
+/// same crops made *selectable* for Split ("show every member face
+/// thumbnail... let the user multi-select a subset"). Carries each crop's
+/// `detection_id` (not just the display path) so a selection can be
+/// traced back to a real `face_detections` row and moved. Detections with
+/// no crop yet (`crop_thumbnail_path` still `NULL`) are skipped rather
+/// than rendered as broken images — meaning such a detection also can't
+/// be selected for Split from this view, a real (small) gap flagged
+/// rather than worked around, since nothing else in the UI offers a
+/// crop-less selection target either.
+pub fn face_crops_for_cluster(conn: &Connection, cluster_id: i64) -> rusqlite::Result<Vec<FaceCrop>> {
     let mut stmt = conn.prepare(
-        "SELECT crop_thumbnail_path FROM face_detections
+        "SELECT id, crop_thumbnail_path FROM face_detections
          WHERE face_cluster_id = ?1 AND crop_thumbnail_path IS NOT NULL
          ORDER BY id",
     )?;
-    stmt.query_map([cluster_id], |row| row.get(0))?.collect()
+    stmt.query_map([cluster_id], |row| Ok(FaceCrop { detection_id: row.get(0)?, crop_thumbnail_path: row.get(1)? }))?
+        .collect()
 }
 
 /// Pending `face_match_review_queue` count — the People nav badge (028
@@ -1820,6 +1891,92 @@ mod tests {
     }
 
     #[test]
+    fn move_detections_to_new_cluster_reassigns_only_the_selected_detections() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let stays = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let source_cluster_id = super::create_cluster_with_member(&conn, stays).unwrap();
+        let moves = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        super::attach_face_detection_to_cluster(&conn, moves, source_cluster_id).unwrap();
+
+        let new_cluster_id = super::move_detections_to_new_cluster(&conn, &[moves], None).unwrap();
+
+        let moved_cluster: Option<i64> = conn.query_row("SELECT face_cluster_id FROM face_detections WHERE id = ?1", [moves], |row| row.get(0)).unwrap();
+        assert_eq!(moved_cluster, Some(new_cluster_id));
+        let stayed_cluster: Option<i64> = conn.query_row("SELECT face_cluster_id FROM face_detections WHERE id = ?1", [stays], |row| row.get(0)).unwrap();
+        assert_eq!(stayed_cluster, Some(source_cluster_id), "a detection not selected for the split must stay put");
+    }
+
+    #[test]
+    fn move_detections_to_new_cluster_deletes_a_source_left_with_zero_detections() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let only_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let source_cluster_id = super::create_cluster_with_member(&conn, only_detection).unwrap();
+
+        super::move_detections_to_new_cluster(&conn, &[only_detection], None).unwrap();
+
+        let source_still_exists: i64 = conn.query_row("SELECT COUNT(*) FROM face_clusters WHERE id = ?1", [source_cluster_id], |row| row.get(0)).unwrap();
+        assert_eq!(source_still_exists, 0, "emptying the source cluster must delete it, mirroring merge_clusters's loser cleanup");
+    }
+
+    #[test]
+    fn move_detections_to_new_cluster_leaves_a_non_empty_source_alone() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let stays = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let source_cluster_id = super::create_cluster_with_member(&conn, stays).unwrap();
+        let moves = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        super::attach_face_detection_to_cluster(&conn, moves, source_cluster_id).unwrap();
+
+        super::move_detections_to_new_cluster(&conn, &[moves], None).unwrap();
+
+        let source_still_exists: i64 = conn.query_row("SELECT COUNT(*) FROM face_clusters WHERE id = ?1", [source_cluster_id], |row| row.get(0)).unwrap();
+        assert_eq!(source_still_exists, 1, "a source cluster with a remaining member must not be deleted");
+    }
+
+    #[test]
+    fn move_detections_to_new_cluster_with_a_person_name_resolves_and_sets_it() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        super::create_cluster_with_member(&conn, detection_id).unwrap();
+        conn.execute("INSERT INTO persons (name) VALUES ('Alice')", []).unwrap();
+        let alice_id = conn.last_insert_rowid();
+
+        let new_cluster_id = super::move_detections_to_new_cluster(&conn, &[detection_id], Some("Alice")).unwrap();
+
+        let stored_person_id: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [new_cluster_id], |row| row.get(0)).unwrap();
+        assert_eq!(stored_person_id, Some(alice_id), "must reuse the existing Alice, not create a duplicate");
+    }
+
+    #[test]
+    fn move_detections_to_new_cluster_can_move_several_detections_at_once() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let a = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let cluster_id = super::create_cluster_with_member(&conn, a).unwrap();
+        let b = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        super::attach_face_detection_to_cluster(&conn, b, cluster_id).unwrap();
+        let c = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[3])).unwrap();
+        super::attach_face_detection_to_cluster(&conn, c, cluster_id).unwrap();
+
+        let new_cluster_id = super::move_detections_to_new_cluster(&conn, &[a, b], None).unwrap();
+
+        for detection_id in [a, b] {
+            let stored_cluster: Option<i64> = conn.query_row("SELECT face_cluster_id FROM face_detections WHERE id = ?1", [detection_id], |row| row.get(0)).unwrap();
+            assert_eq!(stored_cluster, Some(new_cluster_id));
+        }
+        let c_cluster: Option<i64> = conn.query_row("SELECT face_cluster_id FROM face_detections WHERE id = ?1", [c], |row| row.get(0)).unwrap();
+        assert_eq!(c_cluster, Some(cluster_id), "the un-selected detection stays on the original cluster, which survives since it's not empty");
+    }
+
+    #[test]
     fn list_face_clusters_sorts_by_photo_count_descending_and_excludes_hidden_by_default() {
         let conn = migrated_conn();
         let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
@@ -1897,7 +2054,9 @@ mod tests {
         // second never gets set_face_crop_thumbnail_path — still NULL.
 
         let crops = super::face_crops_for_cluster(&conn, cluster_id).unwrap();
-        assert_eq!(crops, vec!["thumbnails/faces/00/1.jpg".to_string()]);
+        assert_eq!(crops.len(), 1);
+        assert_eq!(crops[0].detection_id, first);
+        assert_eq!(crops[0].crop_thumbnail_path, "thumbnails/faces/00/1.jpg");
     }
 
     #[test]

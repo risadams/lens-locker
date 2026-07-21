@@ -392,6 +392,16 @@ button { font-family: inherit; }
   max-height: 160px; overflow-y: auto;
 }
 .people-card-crops img { width: 36px; height: 36px; object-fit: cover; border-radius: 3px; }
+/* Split's per-crop selection (028 decision #4, Milestone ML-4 Slice D3) —
+   the same crops Slice C already displayed read-only, now individually
+   toggleable. */
+.face-crop-pick { cursor: pointer; border-radius: 3px; padding: 2px; }
+.face-crop-pick.face-crop-pick-selected { outline: 2px solid var(--accent); outline-offset: -2px; background: var(--accent-soft); }
+.people-card-split-bar {
+  align-items: center; gap: 8px; padding: 8px 10px;
+  background: var(--surface-raised); border-top: 1px solid var(--border-soft);
+  font-size: 11.5px; color: var(--text-muted);
+}
 .people-card-body { padding: 9px 10px; }
 
 /* Merge confirmation's name-conflict picker (028 decision #4: "present
