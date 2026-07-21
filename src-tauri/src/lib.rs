@@ -200,6 +200,8 @@ enum CmdError {
     ImageNotAnalyzedYet(i64),
     #[error(transparent)]
     Ml(#[from] lenslocker_ml::MlError),
+    #[error("could not resolve the running executable's directory")]
+    ExeDirUnresolvable,
 }
 
 // Tauri commands need their error type to serialize across the IPC bridge;
@@ -1937,6 +1939,31 @@ fn accept_model_upgrade(state: tauri::State<Mutex<LibraryState>>, notice_id: i64
     })
 }
 
+/// The About screen's version line — the crate's own `Cargo.toml` version
+/// (kept in lockstep with `tauri.conf.json`'s `version` field by Tauri's
+/// own build, not duplicated here), read at compile time rather than via
+/// a new runtime dependency for something this static.
+#[tauri::command]
+fn get_app_version() -> String {
+    env!("CARGO_PKG_VERSION").to_string()
+}
+
+/// Where the bundled `LICENSES.txt` lives (ticket 032 decision #3: "ships
+/// as a static LICENSES file in the install directory") — the same
+/// exe-relative directory `lenslocker_ml::models_dir` resolves `models/`
+/// against (both fed by `tauri.conf.json`'s `bundle.resources` map, the
+/// same NSIS resource-bundling convention). Unlike `models_dir` (which
+/// falls back to a relative `PathBuf` rather than failing, since dev/test
+/// runs override it via `LENSLOCKER_MODELS_DIR`), this command has no such
+/// override and genuinely can't proceed without a real exe path, so it
+/// reports that as an error instead of guessing a path.
+#[tauri::command]
+fn get_licenses_file_path() -> CmdResult<String> {
+    let exe = std::env::current_exe()?;
+    let dir = exe.parent().ok_or(CmdError::ExeDirUnresolvable)?;
+    Ok(dir.join("LICENSES.txt").to_string_lossy().into_owned())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1963,6 +1990,8 @@ pub fn run() {
             get_analysis_status,
             set_analysis_paused,
             accept_model_upgrade,
+            get_app_version,
+            get_licenses_file_path,
             pick_library_folder,
             inspect_library_folder,
             create_library,

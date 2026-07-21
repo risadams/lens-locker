@@ -1897,6 +1897,34 @@ document.getElementById('settingsSaveBtn').addEventListener('click', async () =>
   }
 });
 
+// ── About (ML-SPEC.md §10, ticket 032 decision #3, Milestone ML-6) ─────────
+// Static content — model licenses are hardcoded here (they only change on
+// a deliberate model swap, same cadence as MODELS.md itself), not fetched
+// from the backend. The full third-party dependency list lives in
+// LICENSES.txt (too large for a modal — 500+ crates) rather than inline;
+// "Show licenses file" uses revealItemInDir (already covered by the
+// opener plugin's default permission grant) instead of openPath (would
+// need a new, unscoped "open any path" permission grant for one button).
+const { revealItemInDir } = window.__TAURI__.opener;
+
+function openAboutModal() {
+  document.getElementById('aboutModal').classList.add('open');
+  invoke('get_app_version').then(v => {
+    document.getElementById('aboutVersion').textContent = v;
+  }).catch(() => {});
+}
+function closeAboutModal() { document.getElementById('aboutModal').classList.remove('open'); }
+document.getElementById('railAboutBtn').addEventListener('click', openAboutModal);
+document.getElementById('aboutCloseBtn').addEventListener('click', closeAboutModal);
+document.getElementById('aboutShowLicensesBtn').addEventListener('click', async () => {
+  try {
+    const path = await invoke('get_licenses_file_path');
+    await revealItemInDir(path);
+  } catch (e) {
+    showToast('Could not show the licenses file');
+  }
+});
+
 // ── Boot ───────────────────────────────────────────────────────────────
 // `check_library_status` decides between the first-run screen (true first
 // run, or a previously-configured library whose path is no longer

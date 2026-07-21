@@ -98,6 +98,9 @@
       <button class="rail-btn" title="Settings" id="railSettingsBtn">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="3"/><path d="M19.4 15a1.65 1.65 0 00.33 1.82l.06.06a2 2 0 11-2.83 2.83l-.06-.06a1.65 1.65 0 00-1.82-.33 1.65 1.65 0 00-1 1.51V21a2 2 0 01-4 0v-.09A1.65 1.65 0 009 19.4a1.65 1.65 0 00-1.82.33l-.06.06a2 2 0 11-2.83-2.83l.06-.06A1.65 1.65 0 004.6 15a1.65 1.65 0 00-1.51-1H3a2 2 0 010-4h.09A1.65 1.65 0 004.6 9a1.65 1.65 0 00-.33-1.82l-.06-.06a2 2 0 112.83-2.83l.06.06A1.65 1.65 0 009 4.6a1.65 1.65 0 001-1.51V3a2 2 0 014 0v.09A1.65 1.65 0 0015 4.6a1.65 1.65 0 001.82-.33l.06-.06a2 2 0 112.83 2.83l-.06.06A1.65 1.65 0 0019.4 9a1.65 1.65 0 001.51 1H21a2 2 0 010 4h-.09a1.65 1.65 0 00-1.51 1z"/></svg>
       </button>
+      <button class="rail-btn" title="About" id="railAboutBtn">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="12" r="10"/><path d="M12 16v-4.5M12 8h.01" stroke-linecap="round"/></svg>
+      </button>
     </div>
 
     <div class="main">
@@ -274,6 +277,31 @@
       <div class="modal-footer">
         <button class="btn" id="settingsCancelBtn">Cancel</button>
         <button class="btn btn-primary" id="settingsSaveBtn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-scrim" id="aboutModal">
+    <div class="modal">
+      <h3>About LensLocker</h3>
+      <p>LensLocker <span id="aboutVersion"></span> — personal, 100% offline photo manager. Never sends data over the network.</p>
+
+      <div class="firstrun-option" style="border-top: none; padding-top: 0;">
+        <div>
+          <div class="firstrun-option-label">Bundled ML models</div>
+          <div class="firstrun-option-sub">
+            YuNet (face detection) — MIT, OpenCV Zoo<br>
+            SFace (face embedding) — Apache-2.0, OpenCV Zoo<br>
+            SigLIP so400m (tagging &amp; similarity) — Apache-2.0, Google<br>
+            ONNX Runtime — MIT, Microsoft
+          </div>
+        </div>
+      </div>
+      <p style="font-size:12px; color:var(--text-muted)">Every third-party component and its exact license is listed in LICENSES.txt, installed alongside LensLocker.</p>
+
+      <div class="modal-footer">
+        <button class="btn" id="aboutShowLicensesBtn">Show licenses file</button>
+        <button class="btn btn-primary" id="aboutCloseBtn">Close</button>
       </div>
     </div>
   </div>
