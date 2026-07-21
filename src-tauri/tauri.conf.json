@@ -35,7 +35,10 @@
       "icons/icon.ico"
     ],
     "resources": {
-      "models/*": "models/",
+      "models/onnxruntime.dll": "models/onnxruntime.dll",
+      "models/face_detection_yunet/*": "models/face_detection_yunet/",
+      "models/face_recognition_sface/*": "models/face_recognition_sface/",
+      "models/siglip-so400m-onnx/*": "models/siglip-so400m-onnx/",
       "../LICENSES.txt": "LICENSES.txt"
     },
     "windows": {

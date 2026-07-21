@@ -20,3 +20,17 @@ a real export in under the exact path below needs no code change):
 `*.onnx`/`*.dll` in this directory are gitignored (repo-bloat judgment
 call, flagged rather than assumed — revisit if the project later wants a
 fully self-contained checkout instead).
+
+**Whatever `onnxruntime.dll` is extracted from may also contain
+`onnxruntime.lib`, `onnxruntime_providers_cuda.dll`,
+`onnxruntime_providers_tensorrt.dll`, `onnxruntime_providers_shared.dll`,
+and their `.lib` counterparts (~240MB together, confirmed) — fine to leave
+sitting in this directory for local dev, but `tauri.conf.json`'s
+`bundle.resources` deliberately lists `onnxruntime.dll` by exact name
+rather than globbing the whole directory, so none of these ship in the
+installer.** This app only ever registers the DirectML or CPU execution
+provider (never CUDA/TensorRT), confirmed by running the real SigLIP/
+SFace/YuNet sessions with only `onnxruntime.dll` present (MODELS.md §1).
+If you add a genuinely new required file here, add it to
+`tauri.conf.json`'s resource list explicitly too — an unlisted file simply
+won't ship, silently.

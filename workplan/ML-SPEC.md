@@ -299,15 +299,39 @@ extraction step, since zero-network-ever means the models must be present
 before any run regardless. A model-version-bumping app update just
 overwrites the old `.onnx` files via the normal update mechanism.
 
-**Installer size — policy committed, real total deliberately unconfirmed
-rather than fabricated.** Confirmed: the face pair is ~37MB. Unconfirmed,
-flagged for verification before this number is load-bearing anywhere:
-the DirectML-specific `onnxruntime.dll` size (only the ~12MB CPU-only
-build is confirmed) and SigLIP `so400m`'s real on-disk ONNX size. If the
-real total proves uncomfortably large, int8-quantizing the tagging model
-is the first lever, before reopening the checkpoint choice. Soft ceiling
-(a judgment call, not research): "a few hundred MB to low single-digit GB"
-reads as acceptable for a personal desktop app with AI features.
+**Installer size — the per-file weights are now confirmed (Milestone ML-6's
+ship-gate verification pass, against the real bundled files); the final
+NSIS installer's own total is still deliberately unconfirmed rather than
+fabricated, since building it wasn't attempted this pass.** Confirmed:
+the face pair (YuNet+SFace) is ~37MB, `onnxruntime.dll` (DirectML build)
+is ~15.1MB, and SigLIP `so400m`'s real on-disk export is ~3.3GB
+(`model.onnx_data`) + ~1.1MB (`model.onnx`) — see `MODELS.md` §1/§4 for
+the full detail. Sum of bundled model weight *plus* the ONNX Runtime
+engine itself: ~3.35GB (the engine is a small fraction of that — the
+weights, overwhelmingly SigLIP, dominate), comfortably inside this
+section's own "a few hundred MB to low single-digit GB" ceiling without
+needing int8 quantization. Also confirmed and fixed this pass:
+the directory `onnxruntime.dll` ships from may include unused
+CUDA/TensorRT provider DLLs and `.lib` files (~240MB) that this
+DirectML/CPU-only app never loads — `tauri.conf.json`'s `bundle.resources`
+now lists exactly the files needed rather than globbing the whole
+directory, so these never reach the installer. The NSIS-compressed final
+installer size (compression typically shrinks large binary payloads
+somewhat, so the real number is not simply the ~3.35GB sum above) remains
+unconfirmed — a real `cargo tauri build --bundles nsis` run, not attempted
+this pass, is the concrete follow-up if that number ever becomes
+load-bearing. If it does prove uncomfortably large, int8-quantizing the
+tagging model is the first lever, before reopening the checkpoint choice.
+
+**`cargo deny check` re-run with the full ML dependency tree in place
+(§8.2's automated offline-enforcement backstop)**: clean — `advisories
+ok, bans ok, licenses ok, sources ok`, same as every prior milestone's
+gate. The **WFP runtime network audit** (`docs/wfp-audit-runbook.md`,
+§8's layer 3) remains exactly as blocked as the runbook itself already
+documents from the original milestone build — this pass re-confirmed the
+same lack of Administrator/elevated access (`auditpol`/`whoami /groups`),
+not a new finding, and took no action there; it's still the ready-to-run
+artifact for whoever finishes it from an elevated session.
 
 **License text is static app content** (a `LICENSES` file + a new
 About/Licenses UI screen — none exists today), **not database schema** —

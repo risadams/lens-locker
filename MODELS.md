@@ -22,8 +22,31 @@ The DirectML execution provider needs the DirectML-flavored build of
 - Alternatively, the `Microsoft.ML.OnnxRuntime.DirectML` NuGet package
   contains the same DLL under `runtimes/win-x64/native/`.
 
-`workplan/ML-SPEC.md` §10 flags this DLL's real size as unconfirmed pending
-this exact download — record it once known.
+**Confirmed real size** (Milestone ML-6's ship-gate verification pass,
+against the real bundled file, superseding `workplan/ML-SPEC.md` §10's
+earlier "unconfirmed" flag): `onnxruntime.dll` itself is ~15.1MB.
+
+**Only `onnxruntime.dll` is needed at runtime — do not bundle its sibling
+provider DLLs/`.lib` files.** Depending on where this DLL is sourced from
+(a full GPU-support package, not just the DirectML-only zip), the same
+directory may also contain `onnxruntime.lib`,
+`onnxruntime_providers_cuda.dll` (confirmed ~239MB — by far the largest
+single file after the SigLIP export), `onnxruntime_providers_tensorrt.dll`,
+`onnxruntime_providers_shared.dll`, and their `.lib` counterparts. None of
+these are used: this app registers only the DirectML execution provider
+(`crates/ml/src/lib.rs`'s `load_session`) or plain CPU (`load_session_cpu`)
+— never CUDA/TensorRT — and `.lib` files are link-time-only artifacts,
+irrelevant to `ort`'s dynamic-load-at-runtime model entirely. Confirmed
+empirically, not assumed: with every provider/`.lib` file temporarily
+moved out of `models/`, `LENSLOCKER_MODELS_DIR` pointed at the real
+bundled files, and only `onnxruntime.dll` left in place,
+`cargo test -p lenslocker-ml --test siglip_vision --test yunet_real_model
+--test sface_real_model -- --ignored --test-threads=1` still passed all
+three (real DirectML SigLIP embedding, real YuNet detection, real SFace
+embedding) — not just a plausibility argument. `tauri.conf.json`'s
+`bundle.resources` map lists `onnxruntime.dll` explicitly rather than
+globbing the whole directory, specifically to keep these ~240MB of unused
+files out of the shipped installer.
 
 ## 2. YuNet (face detection) — `face_detection_yunet/face_detection_yunet_2023mar.onnx`
 
@@ -76,7 +99,12 @@ SigLIP2 or a different checkpoint without re-confirming that field.
 ["SiglipModel"]` in the export's `config.json`) exposing both the vision
 and text towers in one graph, plus a sibling `model.onnx_data` file
 holding the external weights (ONNX's standard external-data convention for
-models too large to fit initializers inline — this one is several GB).
+models too large to fit initializers inline — confirmed real size
+(Milestone ML-6's ship-gate verification pass, superseding
+`workplan/ML-SPEC.md` §10's earlier "unconfirmed" flag): `model.onnx_data`
+is ~3.3GB, `model.onnx` itself a further ~1.1MB — by far the largest
+single component of the bundled model set; the YuNet+SFace face pair
+together is ~37MB by comparison).
 Both files must sit together in `siglip-so400m-onnx/`; `model.onnx`'s
 internal reference to `model.onnx_data` is a relative filename, so ONNX
 Runtime resolves it automatically as long as they're co-located — no
