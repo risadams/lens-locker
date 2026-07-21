@@ -122,6 +122,31 @@ impl Drop for ImportGuard<'_> {
     }
 }
 
+/// ML-SPEC.md §9/ticket 030's background-analysis lock — same shape as
+/// [`ImportLock`] (atomic flags, no `Mutex<()>`), but a distinct instance:
+/// "import and analysis can legitimately run concurrently" (030 decision
+/// #3), so sharing one lock would block one for no reason. Simpler than
+/// `ImportLock` in one way: there's exactly one analysis loop for the
+/// process's whole lifetime (spawned once at startup, never user-
+/// triggered), so there's no "second concurrent start" to guard against
+/// with a `try_acquire`-and-reject pattern — `running` here is purely
+/// informational (is a batch actively processing right now, for the
+/// ambient badge), and `paused` is the only thing a user action changes.
+#[derive(Default)]
+struct AnalysisLock {
+    running: std::sync::atomic::AtomicBool,
+    paused: std::sync::atomic::AtomicBool,
+}
+
+impl AnalysisLock {
+    fn is_paused(&self) -> bool {
+        self.paused.load(std::sync::atomic::Ordering::SeqCst)
+    }
+    fn set_running(&self, running: bool) {
+        self.running.store(running, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Whether a live library is available yet. Replaces the Milestone 5
 /// assumption that `AppState` always exists — a true first run, or a
 /// previously-configured library whose path is no longer reachable (e.g. an
@@ -1612,6 +1637,238 @@ fn create_hardened_main_window(app: &tauri::App) -> tauri::Result<()> {
     Ok(())
 }
 
+// ── Background analysis (ML-SPEC.md §9, ticket 030, Milestone ML-6) ────────
+//
+// The first place ML-2's tagging backlog and ML-3's face backlog actually
+// run automatically in the live app — everywhere before this milestone,
+// running them required a manual test harness or `LENSLOCKER_MODELS_DIR`-
+// driven integration test.
+
+/// How many images each backlog processes per loop iteration — small on
+/// purpose ("per-image or small batches, never across the whole pass",
+/// 030 decision #2), not benchmarked against real hardware (§9's own
+/// flagged GPU-contention caveat: "needs real empirical testing once
+/// built, not assumed away"). Tagging can run smaller batches than face
+/// detection since its `TaggingModel` session is loaded once and reused
+/// (see [`spawn_analysis_loop`]), while face detection's YuNet/SFace
+/// sessions are reloaded from disk every call regardless of batch size —
+/// a larger batch amortizes that reload cost.
+const ANALYSIS_TAGGING_BATCH_SIZE: i64 = 3;
+const ANALYSIS_FACE_BATCH_SIZE: i64 = 5;
+
+/// Sleep between iterations — short after real work (more is probably
+/// waiting), long when both backlogs were empty (no point polling
+/// aggressively with nothing to do). Also unbenchmarked placeholders, same
+/// caveat as the batch sizes above.
+const ANALYSIS_ACTIVE_SLEEP_MS: u64 = 200;
+const ANALYSIS_IDLE_SLEEP_SECS: u64 = 5;
+/// Backoff after a real failure (e.g. model files missing/corrupt) —
+/// long enough not to spam retries or the console, short enough to
+/// recover automatically once the underlying problem is fixed (e.g. the
+/// installer's model files becoming readable) without requiring a
+/// restart.
+const ANALYSIS_ERROR_BACKOFF_SECS: u64 = 300;
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisProgressPayload {
+    tagging_remaining: i64,
+    faces_remaining: i64,
+}
+
+/// How long to sleep before the next iteration — factored out of the loop
+/// itself so this real decision is unit-testable without a live thread.
+fn analysis_sleep_duration(tagging_processed: usize, faces_processed: usize) -> std::time::Duration {
+    if tagging_processed == 0 && faces_processed == 0 {
+        std::time::Duration::from_secs(ANALYSIS_IDLE_SLEEP_SECS)
+    } else {
+        std::time::Duration::from_millis(ANALYSIS_ACTIVE_SLEEP_MS)
+    }
+}
+
+/// `lenslocker_catalog::FaceThresholdSettings` (plain data, no `ml`
+/// dependency) → `lenslocker_ml::faces::FaceThresholds` (what
+/// `process_face_backlog_batch` actually takes) — factored out so the
+/// f64-to-f32 conversion is unit-testable on its own.
+fn to_ml_face_thresholds(settings: lenslocker_catalog::FaceThresholdSettings) -> lenslocker_ml::faces::FaceThresholds {
+    lenslocker_ml::faces::FaceThresholds {
+        cluster_threshold: settings.cluster_threshold as f32,
+        review_threshold: settings.review_threshold as f32,
+        auto_attribute_threshold: settings.auto_attribute_threshold as f32,
+    }
+}
+
+/// One iteration's real work: one small tagging batch, then one small
+/// face batch, both against the same already-locked `conn`. Factored out
+/// of [`spawn_analysis_loop`] so the actual backlog-processing call shape
+/// is separated from the loop/thread/sleep plumbing around it — the
+/// underlying `process_backlog_batch`/`process_face_backlog_batch`
+/// functions already carry their own real (if `#[ignore]`d, real-model)
+/// tests in `crates/ml`; this is orchestration, not new logic to
+/// re-verify here.
+fn run_one_analysis_iteration(
+    conn: &Connection,
+    tagging_model: &mut lenslocker_ml::backlog::TaggingModel,
+    vec_mirror: &lenslocker_catalog::VecMirror,
+    models_dir: &Path,
+    library_root: &Path,
+) -> CmdResult<(usize, usize)> {
+    let tag_storage_threshold = lenslocker_catalog::get_app_settings(conn)?.tag_storage_threshold;
+    let tagging_processed = tagging_model.process_backlog_batch(conn, vec_mirror, ANALYSIS_TAGGING_BATCH_SIZE, tag_storage_threshold)?;
+
+    let face_thresholds = to_ml_face_thresholds(lenslocker_catalog::get_face_thresholds(conn)?);
+    let faces_processed =
+        lenslocker_ml::backlog::process_face_backlog_batch(conn, models_dir, library_root, ANALYSIS_FACE_BATCH_SIZE, &face_thresholds)?;
+
+    Ok((tagging_processed, faces_processed))
+}
+
+/// Starts the one-per-process background analysis loop on a dedicated OS
+/// thread — deliberately `std::thread::spawn`, not `tauri::async_runtime::
+/// spawn_blocking`: this thread runs for the app's entire lifetime, and
+/// Tokio's blocking pool is shared with every other blocking command
+/// (`import_directory`, `get_full_preview`, `find_similar_images`,
+/// `search_by_text`) — permanently occupying one of its threads would
+/// quietly shrink that pool's real capacity for the process's whole life.
+/// A dedicated thread has no such side effect on anything else.
+///
+/// The `TaggingModel` session (DirectML) is loaded exactly once here and
+/// kept alive for the thread's lifetime — `load_session`'s own doc
+/// comment establishes that a second DirectML session in this process
+/// crashes it, so this must never reload per batch the way YuNet/SFace
+/// (CPU-only, no such limit) already safely do. It's dropped and reloaded
+/// only if the ready library actually changes underneath it (the user
+/// switched vaults), since a `model_id` resolved against one catalog
+/// isn't valid against another.
+fn spawn_analysis_loop(app: tauri::AppHandle) {
+    std::thread::spawn(move || {
+        let mut tagging_model: Option<lenslocker_ml::backlog::TaggingModel> = None;
+        let mut vec_mirror: Option<lenslocker_catalog::VecMirror> = None;
+        let mut loaded_for_library_id: Option<i64> = None;
+
+        loop {
+            let lock = app.state::<AnalysisLock>();
+            if lock.is_paused() {
+                std::thread::sleep(std::time::Duration::from_secs(ANALYSIS_IDLE_SLEEP_SECS));
+                continue;
+            }
+
+            let models_dir = lenslocker_ml::models_dir();
+            let result: CmdResult<(usize, usize)> = with_ready(&app.state::<Mutex<LibraryState>>(), |app_state| {
+                let conn = app_state.conn.lock().unwrap();
+
+                if loaded_for_library_id != Some(app_state.library_id) {
+                    tagging_model = None;
+                    vec_mirror = None;
+                    loaded_for_library_id = Some(app_state.library_id);
+                }
+
+                if tagging_model.is_none() {
+                    let model = lenslocker_ml::backlog::TaggingModel::load(&conn, &models_dir)?;
+                    let mirror = lenslocker_catalog::VecMirror::build(&conn, model.model_id(), lenslocker_ml::tagging::EMBEDDING_DIM)?;
+                    tagging_model = Some(model);
+                    vec_mirror = Some(mirror);
+                }
+
+                run_one_analysis_iteration(
+                    &conn,
+                    tagging_model.as_mut().unwrap(),
+                    vec_mirror.as_ref().unwrap(),
+                    &models_dir,
+                    app_state.paths.root(),
+                )
+            });
+
+            match result {
+                Ok((tagging_processed, faces_processed)) => {
+                    lock.set_running(tagging_processed > 0 || faces_processed > 0);
+                    emit_analysis_progress(&app);
+                    std::thread::sleep(analysis_sleep_duration(tagging_processed, faces_processed));
+                }
+                Err(CmdError::LibraryNotConfigured) => {
+                    // No live library yet (first run, or an unreachable
+                    // configured one) — nothing to analyze; check back
+                    // later rather than treating this as a real failure.
+                    lock.set_running(false);
+                    std::thread::sleep(std::time::Duration::from_secs(ANALYSIS_IDLE_SLEEP_SECS));
+                }
+                Err(err) => {
+                    // A real failure (e.g. a corrupt image, a decode
+                    // hiccup) — never let the loop die, since that would
+                    // silently stop all future analysis for the rest of
+                    // the process's life with no way to recover short of
+                    // restarting the app. Deliberately do NOT drop
+                    // `tagging_model`/`vec_mirror` here: per
+                    // `lenslocker_ml::load_session`'s doc comment, at most
+                    // one DirectML session ever succeeds per process —
+                    // dropping a loaded model so the next iteration
+                    // reloads it is exactly the sequential
+                    // load→drop→load-again case that crashes with
+                    // STATUS_ACCESS_VIOLATION. A failure unrelated to
+                    // tagging (e.g. a face-backlog-only error) must not
+                    // trigger a tagging-model reload. Just back off so a
+                    // persistent problem doesn't spin/spam the console.
+                    eprintln!("[analysis] iteration failed, will retry: {err}");
+                    lock.set_running(false);
+                    std::thread::sleep(std::time::Duration::from_secs(ANALYSIS_ERROR_BACKOFF_SECS));
+                }
+            }
+        }
+    });
+}
+
+/// Both backlogs' remaining sizes — shared by [`emit_analysis_progress`]
+/// (pushed after every loop iteration) and [`get_analysis_status`] (pulled
+/// once at boot, mirroring how the People/review-queue badges each have
+/// their own explicit boot-time refresh rather than waiting for a push).
+fn analysis_remaining_counts(conn: &Connection) -> CmdResult<(i64, i64)> {
+    let tagging_remaining = lenslocker_catalog::count_images_needing_embedding(conn, lenslocker_ml::similarity::resolve_siglip_model_id(conn)?)?;
+    let faces_remaining = lenslocker_catalog::count_images_needing_embedding(conn, lenslocker_ml::backlog::resolve_sface_model_id(conn)?)?;
+    Ok((tagging_remaining, faces_remaining))
+}
+
+/// Queries both backlogs' remaining sizes and emits `analysis-progress` —
+/// called after every iteration (including idle ones, so the frontend
+/// badge reliably reaches 0/hides once a backlog actually empties out).
+fn emit_analysis_progress(app: &tauri::AppHandle) {
+    let Ok((tagging_remaining, faces_remaining)) =
+        with_ready(&app.state::<Mutex<LibraryState>>(), |app_state| analysis_remaining_counts(&app_state.conn.lock().unwrap()))
+    else {
+        return;
+    };
+    let _ = app.emit("analysis-progress", AnalysisProgressPayload { tagging_remaining, faces_remaining });
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct AnalysisStatusDto {
+    tagging_remaining: i64,
+    faces_remaining: i64,
+    paused: bool,
+}
+
+/// Boot-time pull for the ambient badge, mirroring `list_review_queue`/
+/// `list_persons`'s own role for the review-queue/People badges — the
+/// push-only `analysis-progress` event would otherwise leave the badge
+/// blank for up to `ANALYSIS_IDLE_SLEEP_SECS` after the app opens.
+#[tauri::command]
+fn get_analysis_status(state: tauri::State<Mutex<LibraryState>>, lock: tauri::State<AnalysisLock>) -> CmdResult<AnalysisStatusDto> {
+    with_ready(&state, |app_state| {
+        let (tagging_remaining, faces_remaining) = analysis_remaining_counts(&app_state.conn.lock().unwrap())?;
+        Ok(AnalysisStatusDto { tagging_remaining, faces_remaining, paused: lock.is_paused() })
+    })
+}
+
+/// The ambient badge's pause/resume control (§9: "an unobtrusive status
+/// indicator... with cancel/pause, never demanding attention") — unlike
+/// `cancel_import`, this doesn't stop anything mid-flight; the loop keeps
+/// running and simply skips real work on every iteration while paused, so
+/// resuming needs no extra bookkeeping to pick back up correctly.
+#[tauri::command]
+fn set_analysis_paused(lock: tauri::State<AnalysisLock>, paused: bool) {
+    lock.paused.store(paused, std::sync::atomic::Ordering::SeqCst);
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -1622,6 +1879,12 @@ pub fn run() {
             let library_state = load_initial_library_state(&app_handle);
             app.manage(Mutex::new(library_state));
             app.manage(ImportLock::default());
+            app.manage(AnalysisLock::default());
+            // Started once, unconditionally — the loop itself checks for a
+            // ready library on every iteration and idles otherwise (see
+            // its own doc comment), so it's safe to start before first-run
+            // setup has even happened yet.
+            spawn_analysis_loop(app_handle);
             #[cfg(windows)]
             create_hardened_main_window(app)?;
             Ok(())
@@ -1629,6 +1892,8 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             check_library_status,
             cancel_import,
+            get_analysis_status,
+            set_analysis_paused,
             pick_library_folder,
             inspect_library_folder,
             create_library,
@@ -1675,6 +1940,33 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn analysis_sleep_duration_is_short_after_real_work() {
+        assert_eq!(analysis_sleep_duration(1, 0), std::time::Duration::from_millis(ANALYSIS_ACTIVE_SLEEP_MS));
+        assert_eq!(analysis_sleep_duration(0, 1), std::time::Duration::from_millis(ANALYSIS_ACTIVE_SLEEP_MS));
+        assert_eq!(analysis_sleep_duration(2, 3), std::time::Duration::from_millis(ANALYSIS_ACTIVE_SLEEP_MS));
+    }
+
+    #[test]
+    fn analysis_sleep_duration_is_long_when_both_backlogs_were_empty() {
+        assert_eq!(analysis_sleep_duration(0, 0), std::time::Duration::from_secs(ANALYSIS_IDLE_SLEEP_SECS));
+    }
+
+    #[test]
+    fn to_ml_face_thresholds_carries_every_field_through_the_f64_to_f32_conversion() {
+        let settings = lenslocker_catalog::FaceThresholdSettings {
+            cluster_threshold: 0.31,
+            review_threshold: 0.40,
+            auto_attribute_threshold: 0.55,
+        };
+
+        let thresholds = to_ml_face_thresholds(settings);
+
+        assert!((thresholds.cluster_threshold - 0.31).abs() < 1e-6);
+        assert!((thresholds.review_threshold - 0.40).abs() < 1e-6);
+        assert!((thresholds.auto_attribute_threshold - 0.55).abs() < 1e-6);
+    }
 
     #[test]
     fn create_library_at_produces_a_working_catalog_and_libraries_row_with_the_right_conversion_flag()

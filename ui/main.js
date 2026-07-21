@@ -1905,10 +1905,65 @@ document.getElementById('settingsSaveBtn').addEventListener('click', async () =>
 // catalog — list_images/list_review_queue/etc. would otherwise error.
 renderSortPop();
 
+// ── Background analysis ambient badge (ML-SPEC.md §9, ticket 030,
+// Milestone ML-6) ───────────────────────────────────────────────────────
+// Never a modal — "background maintenance the user didn't explicitly
+// start" (§9) — a rail badge + a small popover with pause/resume, same
+// shape as the People/review-queue badges but with two update sources:
+// pulled once at boot (`get_analysis_status`, same reason the other
+// badges have their own boot-time refresh — the push-only event would
+// otherwise leave it blank for up to the loop's idle-sleep interval) and
+// pushed live via the `analysis-progress` event the whole time the app
+// runs, regardless of which view is open.
+let analysisPaused = false;
+
+function renderAnalysisPop(taggingRemaining, facesRemaining) {
+  const pop = document.getElementById('analysisPop');
+  const total = taggingRemaining + facesRemaining;
+  pop.innerHTML = `
+    <div style="padding:6px 8px; font-size:11.5px; color:var(--text-muted); line-height:1.6">
+      ${total === 0 ? 'Everything is analyzed.' : `Tagging: ${taggingRemaining} left<br>Faces: ${facesRemaining} left`}
+    </div>
+    <div class="popover-divider"></div>
+    <button class="popover-link" id="analysisPauseBtn" style="width:100%; text-align:left; padding:6px 8px">${analysisPaused ? 'Resume' : 'Pause'} analysis</button>
+  `;
+  document.getElementById('analysisPauseBtn').addEventListener('click', async (e) => {
+    e.stopPropagation();
+    analysisPaused = !analysisPaused;
+    try { await invoke('set_analysis_paused', { paused: analysisPaused }); } catch (err) { console.error(err); }
+    renderAnalysisPop(taggingRemaining, facesRemaining);
+  });
+}
+
+function updateAnalysisBadge(taggingRemaining, facesRemaining) {
+  const badge = document.getElementById('analysisBadge');
+  const total = taggingRemaining + facesRemaining;
+  if (total > 0) { badge.style.display = 'flex'; badge.textContent = total > 999 ? '999+' : String(total); }
+  else badge.style.display = 'none';
+  renderAnalysisPop(taggingRemaining, facesRemaining);
+}
+
+async function refreshAnalysisBadge() {
+  let status;
+  try { status = await invoke('get_analysis_status'); } catch (e) { return; }
+  analysisPaused = status.paused;
+  updateAnalysisBadge(status.taggingRemaining, status.facesRemaining);
+}
+
+document.getElementById('analysisBtn').addEventListener('click', (e) => togglePop('analysisPop', e));
+
+// Fire-and-forget: this listener lives for the whole app session, so
+// there's no matching unlisten call the way import's own progress
+// listener has (that one is scoped to a single import run).
+listen('analysis-progress', (event) => {
+  updateAnalysisBadge(event.payload.taggingRemaining, event.payload.facesRemaining);
+});
+
 function startMainApp() {
   refresh();
   refreshReviewBadge();
   refreshPeopleBadge();
+  refreshAnalysisBadge();
   // Populated here too, not only on first People-view visit — the
   // drawer's inline-naming chip (`renderDrawerPeople`) needs the
   // autocomplete datalist to already exist even if the user never opens

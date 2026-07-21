@@ -126,6 +126,17 @@ const SFACE_MODEL_NAME: &str = "sface-2021dec";
 const SFACE_MODEL_VERSION: &str = "v1";
 const SFACE_LICENSE_NOTE: &str = "Apache-2.0 (OpenCV Zoo face_recognition_sface — MODELS.md §3)";
 
+/// Finds (or creates) the `models` row identifying SFace — the same
+/// `model_id` [`process_face_backlog_batch`] resolves internally, exposed
+/// separately so a caller (Milestone ML-6's background loop, reporting
+/// "how many faces left") can query the backlog's remaining size without
+/// running a batch. Mirrors [`crate::similarity::resolve_siglip_model_id`]'s
+/// same reasoning for the same reason: a lazily-created row with zero
+/// embeddings is a harmless "not analyzed yet" state, not an error.
+pub fn resolve_sface_model_id(conn: &Connection) -> rusqlite::Result<i64> {
+    lenslocker_catalog::find_or_create_model(conn, SFACE_MODEL_NAME, SFACE_MODEL_VERSION, crate::faces::EMBED_DIM as i64, SFACE_LICENSE_NOTE)
+}
+
 /// Score/NMS thresholds for [`crate::faces::detect_faces`] — OpenCV's own
 /// published `FaceDetectorYN` defaults (`crate::faces`'s module doc), not
 /// re-derived here.
@@ -190,8 +201,17 @@ fn face_crop_path(library_root: &Path, detection_id: i64) -> PathBuf {
 /// own input size) embedding crop to `<library_root>/thumbnails/faces/...`
 /// and records the path (ticket 028 decision #4) — a second use of the
 /// same crop already produced for embedding, not a second decode.
+///
+/// Pass 2 processes images one at a time (not a flat pass over every crop
+/// in the batch): each image's own detections are written, then its
+/// `embeddings` completion marker is written immediately, before moving to
+/// the next image. This bounds the crash-safety window to at most one
+/// image's own multi-face state — a kill after an image's marker is
+/// written can never re-select and reprocess it, since
+/// [`lenslocker_catalog::images_needing_embedding`] only selects images
+/// missing that marker.
 pub fn process_face_backlog_batch(conn: &Connection, models_dir: &Path, library_root: &Path, batch_size: i64, thresholds: &crate::faces::FaceThresholds) -> Result<usize> {
-    let model_id = lenslocker_catalog::find_or_create_model(conn, SFACE_MODEL_NAME, SFACE_MODEL_VERSION, crate::faces::EMBED_DIM as i64, SFACE_LICENSE_NOTE)?;
+    let model_id = resolve_sface_model_id(conn)?;
 
     let image_ids = lenslocker_catalog::images_needing_embedding(conn, model_id, batch_size)?;
     if image_ids.is_empty() {
@@ -222,41 +242,55 @@ pub fn process_face_backlog_batch(conn: &Connection, models_dir: &Path, library_
         let sface_path = models_dir.join(ModelKind::Sface.relative_path());
         let mut sface_session = crate::load_session_cpu(&sface_path)?;
 
-        let mut per_image_embeddings: std::collections::HashMap<i64, Vec<Vec<f32>>> = std::collections::HashMap::new();
-
+        // Group by image (not a flat crop loop) so each image's "done"
+        // marker can be written immediately after ALL of that image's own
+        // detections are durably committed, rather than in one final pass
+        // over the whole batch. Writing markers in a separate later loop
+        // meant a kill anywhere in the batch left every already-processed
+        // image with real face_detections rows but no marker — it would
+        // be re-selected by images_needing_embedding and reprocessed from
+        // scratch, producing duplicate detections/cluster memberships.
+        // Grouping per image shrinks that window from "whole batch" to
+        // "at most one image's own multi-face state."
+        let mut crops_by_image: std::collections::HashMap<i64, Vec<&PendingFaceCrop>> = std::collections::HashMap::new();
         for crop in &pending_crops {
-            let embedding = crate::faces::embed_face(&mut sface_session, &crop.crop)?;
-
-            let new_detection = lenslocker_catalog::NewFaceDetection {
-                image_id: crop.image_id,
-                model_id,
-                detection_confidence: crop.detection_confidence as f64,
-                bbox_x: crop.bbox.x as i64,
-                bbox_y: crop.bbox.y as i64,
-                bbox_width: crop.bbox.width as i64,
-                bbox_height: crop.bbox.height as i64,
-                embedding: crate::encode_embedding(&embedding),
-                dimension: crate::faces::EMBED_DIM as i64,
-            };
-            let detection_id = lenslocker_catalog::insert_face_detection(conn, &new_detection)?;
-
-            let crop_path = face_crop_path(library_root, detection_id);
-            lenslocker_decode::write_jpeg_thumbnail(&crop.crop, &crop_path, crate::faces::EMBED_INPUT_SIZE)
-                .map_err(|source| crate::MlError::ThumbnailWrite { path: crop_path.clone(), source })?;
-            lenslocker_catalog::set_face_crop_thumbnail_path(conn, detection_id, &crop_path.to_string_lossy())?;
-
-            let existing_members = lenslocker_catalog::clustered_face_embeddings(conn, model_id)?;
-            let decision = crate::faces::match_face(&embedding, &existing_members, thresholds);
-            apply_face_match_decision(conn, detection_id, decision)?;
-
-            per_image_embeddings.entry(crop.image_id).or_default().push(embedding);
+            crops_by_image.entry(crop.image_id).or_default().push(crop);
         }
 
         for &image_id in &image_ids {
-            let marker = match per_image_embeddings.get(&image_id) {
-                Some(embeddings) => crate::faces::centroid(embeddings),
-                None => vec![0f32; crate::faces::EMBED_DIM],
-            };
+            let mut image_embeddings: Vec<Vec<f32>> = Vec::new();
+
+            if let Some(crops) = crops_by_image.get(&image_id) {
+                for crop in crops {
+                    let embedding = crate::faces::embed_face(&mut sface_session, &crop.crop)?;
+
+                    let new_detection = lenslocker_catalog::NewFaceDetection {
+                        image_id: crop.image_id,
+                        model_id,
+                        detection_confidence: crop.detection_confidence as f64,
+                        bbox_x: crop.bbox.x as i64,
+                        bbox_y: crop.bbox.y as i64,
+                        bbox_width: crop.bbox.width as i64,
+                        bbox_height: crop.bbox.height as i64,
+                        embedding: crate::encode_embedding(&embedding),
+                        dimension: crate::faces::EMBED_DIM as i64,
+                    };
+                    let detection_id = lenslocker_catalog::insert_face_detection(conn, &new_detection)?;
+
+                    let crop_path = face_crop_path(library_root, detection_id);
+                    lenslocker_decode::write_jpeg_thumbnail(&crop.crop, &crop_path, crate::faces::EMBED_INPUT_SIZE)
+                        .map_err(|source| crate::MlError::ThumbnailWrite { path: crop_path.clone(), source })?;
+                    lenslocker_catalog::set_face_crop_thumbnail_path(conn, detection_id, &crop_path.to_string_lossy())?;
+
+                    let existing_members = lenslocker_catalog::clustered_face_embeddings(conn, model_id)?;
+                    let decision = crate::faces::match_face(&embedding, &existing_members, thresholds);
+                    apply_face_match_decision(conn, detection_id, decision)?;
+
+                    image_embeddings.push(embedding);
+                }
+            }
+
+            let marker = if image_embeddings.is_empty() { vec![0f32; crate::faces::EMBED_DIM] } else { crate::faces::centroid(&image_embeddings) };
             lenslocker_catalog::upsert_embedding(conn, image_id, model_id, &crate::encode_embedding(&marker), crate::faces::EMBED_DIM as i64)?;
         }
     }

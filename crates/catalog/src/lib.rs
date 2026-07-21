@@ -279,6 +279,19 @@ pub fn images_needing_embedding(conn: &Connection, model_id: i64, limit: i64) ->
     stmt.query_map(params![model_id, limit], |row| row.get(0))?.collect()
 }
 
+/// Same backlog [`images_needing_embedding`] paginates through, as a bare
+/// count — Milestone ML-6's `analysis-progress` event needs "how many are
+/// left" without actually fetching a page of ids.
+pub fn count_images_needing_embedding(conn: &Connection, model_id: i64) -> rusqlite::Result<i64> {
+    conn.query_row(
+        "SELECT COUNT(*) FROM images i
+         WHERE i.status = 'active'
+         AND NOT EXISTS (SELECT 1 FROM embeddings e WHERE e.image_id = i.id AND e.model_id = ?1)",
+        [model_id],
+        |row| row.get(0),
+    )
+}
+
 // ── ML: faces (ML-SPEC.md §6/§11, Milestone ML-3) ─────────────────────────
 //
 // Embedding *content* stays opaque bytes at this layer throughout, matching
@@ -1406,6 +1419,35 @@ pub fn update_app_settings(conn: &Connection, settings: AppSettings) -> rusqlite
     Ok(())
 }
 
+/// §6/§11's three tunable face-matching thresholds, plain data (not
+/// `lenslocker_ml::faces::FaceThresholds` itself — this crate has no `ml`
+/// dependency, and shouldn't gain one just to hand back three floats;
+/// converting to that type is the caller's job). These columns have
+/// existed in `app_settings` since migration 0003 but — found while
+/// planning Milestone ML-6's background loop — nothing in production code
+/// actually read them before now; only `FaceThresholds::schema_defaults()`'s
+/// hardcoded copy of the same numbers was ever used anywhere.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct FaceThresholdSettings {
+    pub cluster_threshold: f64,
+    pub review_threshold: f64,
+    pub auto_attribute_threshold: f64,
+}
+
+pub fn get_face_thresholds(conn: &Connection) -> rusqlite::Result<FaceThresholdSettings> {
+    conn.query_row(
+        "SELECT face_cluster_threshold, face_review_threshold, face_auto_attribute_threshold FROM app_settings WHERE id = 1",
+        [],
+        |row| {
+            Ok(FaceThresholdSettings {
+                cluster_threshold: row.get(0)?,
+                review_threshold: row.get(1)?,
+                auto_attribute_threshold: row.get(2)?,
+            })
+        },
+    )
+}
+
 // ── Review queue (workplan/SPEC.md §6, Milestone 5) ─────────────────────
 //
 // Milestone 3 built detection (`dedupe_review_queue` rows); resolution
@@ -1559,6 +1601,23 @@ mod tests {
             [image_id],
         );
         assert!(result.is_err(), "expected the source CHECK constraint to reject an unknown value");
+    }
+
+    #[test]
+    fn get_face_thresholds_reads_the_real_app_settings_columns() {
+        let conn = migrated_conn();
+        conn.execute(
+            "UPDATE app_settings SET face_cluster_threshold = 0.31, face_review_threshold = 0.40, face_auto_attribute_threshold = 0.55 WHERE id = 1",
+            [],
+        )
+        .unwrap();
+
+        let thresholds = super::get_face_thresholds(&conn).unwrap();
+
+        assert_eq!(
+            thresholds,
+            super::FaceThresholdSettings { cluster_threshold: 0.31, review_threshold: 0.40, auto_attribute_threshold: 0.55 }
+        );
     }
 
     #[test]
@@ -1818,6 +1877,18 @@ mod tests {
 
         let backlog = super::images_needing_embedding(&conn, model_id, 2).unwrap();
         assert_eq!(backlog, vec![a, b]);
+    }
+
+    #[test]
+    fn count_images_needing_embedding_matches_the_paginated_backlogs_own_size() {
+        let conn = migrated_conn();
+        let with_embedding = insert_test_image(&conn);
+        let _without_a = insert_test_image(&conn);
+        let _without_b = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+        super::upsert_embedding(&conn, with_embedding, model_id, &[0u8; 4], 1).unwrap();
+
+        assert_eq!(super::count_images_needing_embedding(&conn, model_id).unwrap(), 2);
     }
 
     #[test]
