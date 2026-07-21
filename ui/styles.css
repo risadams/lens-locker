@@ -345,7 +345,21 @@ button { font-family: inherit; }
 }
 .review-actions .btn { flex: 1; justify-content: center; }
 
-/* People view (ML-SPEC.md §6, ticket 028, Milestone ML-4 Slice C) */
+/* People view (ML-SPEC.md §6, ticket 028, Milestone ML-4 Slice C/D1) */
+.face-match-card {
+  display: flex; align-items: center; gap: 12px;
+  border: 1px solid var(--border); border-radius: 6px; padding: 10px 12px;
+  margin-bottom: 10px; background: var(--surface);
+}
+.face-match-thumb {
+  width: 52px; height: 52px; border-radius: 5px; overflow: hidden; flex-shrink: 0; background: var(--surface-raised);
+}
+.face-match-thumb img { width: 100%; height: 100%; object-fit: cover; display: block; }
+.face-match-question { flex: 1; font-size: 12.5px; }
+.face-match-question b { font-weight: 600; }
+.face-match-similarity { color: var(--text-faint); font-family: var(--mono); font-size: 11px; margin-top: 2px; }
+.face-match-actions { display: flex; gap: 8px; flex-shrink: 0; }
+
 .people-grid {
   display: grid; grid-template-columns: repeat(auto-fill, minmax(148px, 1fr)); gap: 14px;
 }

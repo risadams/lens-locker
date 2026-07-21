@@ -656,14 +656,72 @@ fn list_cluster_face_crops(state: tauri::State<Mutex<LibraryState>>, cluster_id:
 }
 
 /// The People nav badge count — mirrors [`list_review_queue`]'s
-/// badge-via-length pattern, except face-match review resolution isn't
-/// built until Slice D, so this returns a bare count rather than entries
-/// there's nothing yet to render.
+/// badge-via-length pattern. [`list_pending_face_matches`] is what it
+/// leads to (Milestone ML-4 Slice D1).
 #[tauri::command]
 fn pending_face_review_count(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<i64> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
         Ok(lenslocker_catalog::pending_face_review_count(&conn)?)
+    })
+}
+
+/// A pending §6-tier-2 match, wire shape for the People view's "Needs
+/// review" section (Milestone ML-4 Slice D1) — mirrors [`ReviewQueueEntryDto`]'s
+/// role for dedupe.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct PendingFaceMatchDto {
+    queue_id: i64,
+    face_detection_id: i64,
+    image_id: i64,
+    crop_thumbnail_path: Option<String>,
+    suggested_person_id: i64,
+    suggested_person_name: String,
+    similarity_score: f64,
+}
+
+impl From<lenslocker_catalog::PendingFaceMatch> for PendingFaceMatchDto {
+    fn from(m: lenslocker_catalog::PendingFaceMatch) -> Self {
+        Self {
+            queue_id: m.queue_id,
+            face_detection_id: m.face_detection_id,
+            image_id: m.image_id,
+            crop_thumbnail_path: m.crop_thumbnail_path,
+            suggested_person_id: m.suggested_person_id,
+            suggested_person_name: m.suggested_person_name,
+            similarity_score: m.similarity_score,
+        }
+    }
+}
+
+#[tauri::command]
+fn list_pending_face_matches(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<Vec<PendingFaceMatchDto>> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        Ok(lenslocker_catalog::list_pending_face_matches(&conn)?.into_iter().map(Into::into).collect())
+    })
+}
+
+/// "Yes, this is also {suggested person}" — see
+/// [`lenslocker_catalog::confirm_face_match`] for why this always creates
+/// a fresh cluster rather than attaching to an existing one.
+#[tauri::command]
+fn confirm_face_match(state: tauri::State<Mutex<LibraryState>>, queue_id: i64) -> CmdResult<i64> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        Ok(lenslocker_catalog::confirm_face_match(&conn, queue_id)?)
+    })
+}
+
+/// "No, not the same person" — falls back to an ordinary unnamed cluster;
+/// see [`lenslocker_catalog::dismiss_face_match`] for why this doesn't
+/// re-run real clustering.
+#[tauri::command]
+fn dismiss_face_match(state: tauri::State<Mutex<LibraryState>>, queue_id: i64) -> CmdResult<i64> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        Ok(lenslocker_catalog::dismiss_face_match(&conn, queue_id)?)
     })
 }
 
@@ -1368,6 +1426,9 @@ pub fn run() {
             set_face_cluster_hidden,
             list_cluster_face_crops,
             pending_face_review_count,
+            list_pending_face_matches,
+            confirm_face_match,
+            dismiss_face_match,
             list_review_queue,
             resolve_review_pair,
             copy_file_path,

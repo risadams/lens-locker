@@ -558,18 +558,100 @@ pub fn face_crops_for_cluster(conn: &Connection, cluster_id: i64) -> rusqlite::R
 
 /// Pending `face_match_review_queue` count — the People nav badge (028
 /// decision #1: "mirroring the existing dedupe review queue's pattern
-/// exactly"). Resolving these entries is Slice D's job; Slice C only
-/// surfaces the count.
-///
-/// **Known interim gap, flagged not silently shipped**: unlike dedupe's
-/// badge (which always has a matching in-view resolve action), the
-/// People view Slice C ships has no UI to act on what this counts — a
-/// nonzero badge is a real dead end until Slice D's review-queue
-/// resolution lands. Raised in Slice C's own code review and kept as-is
-/// deliberately (chris, 2026-07-20): fixing it now would mean building
-/// part of Slice D early rather than landing it as one coherent slice.
+/// exactly"). [`list_pending_face_matches`] (Milestone ML-4 Slice D1) is
+/// what the badge now leads to.
 pub fn pending_face_review_count(conn: &Connection) -> rusqlite::Result<i64> {
     conn.query_row("SELECT COUNT(*) FROM face_match_review_queue WHERE status = 'pending'", [], |row| row.get(0))
+}
+
+pub struct PendingFaceMatch {
+    pub queue_id: i64,
+    pub face_detection_id: i64,
+    pub image_id: i64,
+    pub crop_thumbnail_path: Option<String>,
+    pub suggested_person_id: i64,
+    pub suggested_person_name: String,
+    pub similarity_score: f64,
+}
+
+/// Every pending §6-tier-2 match — the medium-confidence "is this also
+/// Alice?" human-review queue (028 decision #2), oldest first (FIFO,
+/// matching dedupe's own `list_review_queue` ordering).
+pub fn list_pending_face_matches(conn: &Connection) -> rusqlite::Result<Vec<PendingFaceMatch>> {
+    let mut stmt = conn.prepare(
+        "SELECT q.id, fd.id, fd.image_id, fd.crop_thumbnail_path, p.id, p.name, q.similarity_score
+         FROM face_match_review_queue q
+         JOIN face_detections fd ON fd.id = q.face_detection_id
+         JOIN persons p ON p.id = q.suggested_person_id
+         WHERE q.status = 'pending'
+         ORDER BY q.created_at",
+    )?;
+    stmt.query_map([], |row| {
+        Ok(PendingFaceMatch {
+            queue_id: row.get(0)?,
+            face_detection_id: row.get(1)?,
+            image_id: row.get(2)?,
+            crop_thumbnail_path: row.get(3)?,
+            suggested_person_id: row.get(4)?,
+            suggested_person_name: row.get(5)?,
+            similarity_score: row.get(6)?,
+        })
+    })?
+    .collect()
+}
+
+/// Confirms a pending match ("yes, this is also {suggested person}") —
+/// creates a **new** cluster for the detection with `person_id` set
+/// directly, rather than attaching into one of that person's existing
+/// clusters: `face_match_review_queue` only ever recorded a
+/// `suggested_person_id`, never which specific cluster the medium-
+/// confidence comparison matched against (`crate::faces::FaceMatchDecision::ReviewQueue`
+/// carries no cluster id), so there's no data-honest existing cluster to
+/// pick. A person ending up with 2+ clusters this way is expected, not a
+/// bug — Slice D2's cluster Merge is what consolidates them. Returns the
+/// new cluster's id.
+pub fn confirm_face_match(conn: &Connection, queue_id: i64) -> rusqlite::Result<i64> {
+    let (face_detection_id, suggested_person_id): (i64, i64) = conn.query_row(
+        "SELECT face_detection_id, suggested_person_id FROM face_match_review_queue WHERE id = ?1",
+        [queue_id],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    let cluster_id = create_cluster_with_member(conn, face_detection_id)?;
+    conn.execute(
+        "UPDATE face_clusters SET person_id = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2",
+        params![suggested_person_id, cluster_id],
+    )?;
+    mark_face_match_resolved(conn, queue_id, "confirmed")?;
+    Ok(cluster_id)
+}
+
+/// Dismisses a pending match ("no, not the same person") — falls back to
+/// an ordinary new unnamed cluster for the detection (§6's "no plausible
+/// match" tier), the same outcome any face with nothing to compare against
+/// gets. **Deliberately not** a re-run of real embedding comparison
+/// against the remaining unnamed clusters: that needs `crate::faces::match_face`,
+/// which lives in `lenslocker-ml` — a dependency `src-tauri` doesn't have
+/// and Milestone ML-6 (the real background-pipeline wiring) is what's
+/// meant to add, not this slice. Returns the new cluster's id.
+pub fn dismiss_face_match(conn: &Connection, queue_id: i64) -> rusqlite::Result<i64> {
+    let face_detection_id: i64 = conn.query_row(
+        "SELECT face_detection_id FROM face_match_review_queue WHERE id = ?1",
+        [queue_id],
+        |row| row.get(0),
+    )?;
+    let cluster_id = create_cluster_with_member(conn, face_detection_id)?;
+    mark_face_match_resolved(conn, queue_id, "dismissed")?;
+    Ok(cluster_id)
+}
+
+/// Shared by [`confirm_face_match`]/[`dismiss_face_match`] — both end by
+/// marking the queue row resolved, differing only in the terminal status.
+fn mark_face_match_resolved(conn: &Connection, queue_id: i64, status: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE face_match_review_queue SET status = ?1, resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2",
+        params![status, queue_id],
+    )?;
+    Ok(())
 }
 
 // ── Full-text search index sync (workplan/SPEC.md §9's "text search" filter,
@@ -1701,6 +1783,72 @@ mod tests {
 
         assert_eq!(super::pending_face_review_count(&conn).unwrap(), 1);
         let _ = pending_id;
+    }
+
+    #[test]
+    fn list_pending_face_matches_reports_only_pending_with_person_and_crop() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        super::set_face_crop_thumbnail_path(&conn, detection_id, "thumbnails/faces/00/1.jpg").unwrap();
+        conn.execute("INSERT INTO persons (name) VALUES ('Alex')", []).unwrap();
+        let person_id = conn.last_insert_rowid();
+        let queue_id = super::queue_face_match_review(&conn, detection_id, person_id, 0.42).unwrap();
+
+        let other_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        let other_queue_id = super::queue_face_match_review(&conn, other_detection, person_id, 0.5).unwrap();
+        conn.execute("UPDATE face_match_review_queue SET status = 'confirmed' WHERE id = ?1", [other_queue_id]).unwrap();
+
+        let entries = super::list_pending_face_matches(&conn).unwrap();
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].queue_id, queue_id);
+        assert_eq!(entries[0].face_detection_id, detection_id);
+        assert_eq!(entries[0].image_id, image_id);
+        assert_eq!(entries[0].crop_thumbnail_path.as_deref(), Some("thumbnails/faces/00/1.jpg"));
+        assert_eq!(entries[0].suggested_person_id, person_id);
+        assert_eq!(entries[0].suggested_person_name, "Alex");
+        assert_eq!(entries[0].similarity_score, 0.42);
+    }
+
+    #[test]
+    fn confirm_face_match_creates_a_new_cluster_for_the_suggested_person_and_resolves_the_queue() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        conn.execute("INSERT INTO persons (name) VALUES ('Alex')", []).unwrap();
+        let person_id = conn.last_insert_rowid();
+        let queue_id = super::queue_face_match_review(&conn, detection_id, person_id, 0.42).unwrap();
+
+        let cluster_id = super::confirm_face_match(&conn, queue_id).unwrap();
+
+        let stored_person_id: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [cluster_id], |row| row.get(0)).unwrap();
+        assert_eq!(stored_person_id, Some(person_id));
+        let stored_cluster_id: Option<i64> = conn.query_row("SELECT face_cluster_id FROM face_detections WHERE id = ?1", [detection_id], |row| row.get(0)).unwrap();
+        assert_eq!(stored_cluster_id, Some(cluster_id));
+        let status: String = conn.query_row("SELECT status FROM face_match_review_queue WHERE id = ?1", [queue_id], |row| row.get(0)).unwrap();
+        assert_eq!(status, "confirmed");
+        assert!(super::list_pending_face_matches(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn dismiss_face_match_creates_an_unnamed_cluster_and_resolves_the_queue() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        conn.execute("INSERT INTO persons (name) VALUES ('Alex')", []).unwrap();
+        let person_id = conn.last_insert_rowid();
+        let queue_id = super::queue_face_match_review(&conn, detection_id, person_id, 0.42).unwrap();
+
+        let cluster_id = super::dismiss_face_match(&conn, queue_id).unwrap();
+
+        let stored_person_id: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [cluster_id], |row| row.get(0)).unwrap();
+        assert_eq!(stored_person_id, None, "a dismissed match must not be attributed to the suggested person");
+        let status: String = conn.query_row("SELECT status FROM face_match_review_queue WHERE id = ?1", [queue_id], |row| row.get(0)).unwrap();
+        assert_eq!(status, "dismissed");
+        assert!(super::list_pending_face_matches(&conn).unwrap().is_empty());
     }
 
     #[test]

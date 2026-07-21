@@ -1075,13 +1075,7 @@ async function renderReviewQueue() {
   }));
 }
 
-// ── People view (ML-SPEC.md §6, ticket 028, Milestone ML-4 Slice C) ────────
-// Known interim gap (raised in Slice C's own code review, kept as-is
-// deliberately): this badge counts pending_face_review_count, but the
-// People view built here has no UI to resolve those entries yet — that's
-// Slice D's job (cluster merge/split + review-queue resolution, landing
-// as one coherent slice rather than half-built early). A nonzero badge
-// is a real dead end until then.
+// ── People view (ML-SPEC.md §6, ticket 028, Milestone ML-4 Slice C/D1) ─────
 async function refreshPeopleBadge() {
   let count = 0;
   try { count = await invoke('pending_face_review_count'); } catch (e) { console.error(e); }
@@ -1104,8 +1098,46 @@ function renderPersonDatalist(persons) {
   list.innerHTML = persons.map(p => `<option value="${escapeHtml(p.name)}"></option>`).join('');
 }
 
+// The §6-tier-2 "is this also Alice?" queue (028 decision #2, Slice D1) —
+// a compact single-photo card per entry, distinct from dedupe's
+// side-by-side comparison shape (that's Merge's shape, Slice D2): there's
+// only one candidate photo and one yes/no question here, not two images
+// to pick a keeper between.
+async function renderPeopleNeedsReview() {
+  let entries = [];
+  try { entries = await invoke('list_pending_face_matches'); } catch (e) { console.error(e); }
+  const el = document.getElementById('people-needs-review');
+  el.innerHTML = entries.map(m => `
+    <div class="face-match-card">
+      <div class="face-match-thumb">${m.cropThumbnailPath ? `<img src="${assetSrc(m.cropThumbnailPath)}" alt="">` : ''}</div>
+      <div>
+        <div class="face-match-question">Is this also <b>${escapeHtml(m.suggestedPersonName)}</b>?</div>
+        <div class="face-match-similarity">${Math.round(m.similarityScore * 100)}% similar</div>
+      </div>
+      <div class="face-match-actions">
+        <button class="btn" data-dismiss-match="${m.queueId}">No</button>
+        <button class="btn btn-primary" data-confirm-match="${m.queueId}">Yes</button>
+      </div>
+    </div>
+  `).join('');
+
+  el.querySelectorAll('[data-confirm-match]').forEach(btn => btn.addEventListener('click', async () => {
+    try {
+      await invoke('confirm_face_match', { queueId: Number(btn.dataset.confirmMatch) });
+      renderPeopleView();
+    } catch (err) { showToast('Could not confirm this match'); }
+  }));
+  el.querySelectorAll('[data-dismiss-match]').forEach(btn => btn.addEventListener('click', async () => {
+    try {
+      await invoke('dismiss_face_match', { queueId: Number(btn.dataset.dismissMatch) });
+      renderPeopleView();
+    } catch (err) { showToast('Could not dismiss this match'); }
+  }));
+}
+
 async function renderPeopleView() {
   await refreshPeopleBadge();
+  await renderPeopleNeedsReview();
   let clusters = [], persons = [];
   try {
     [clusters, persons] = await Promise.all([
