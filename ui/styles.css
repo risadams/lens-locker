@@ -414,12 +414,26 @@ button { font-family: inherit; }
 }
 .merge-name-option.checked { border-color: var(--accent); color: var(--accent); background: var(--accent-soft); }
 .people-card-count { font-family: var(--mono); font-size: 10.5px; color: var(--text-faint); margin-bottom: 6px; }
-.people-card-name { font-size: 12.5px; font-weight: 500; }
+.people-card-name {
+  font-size: 12.5px; font-weight: 500; font-family: inherit; color: inherit;
+  background: none; border: none; padding: 0; text-align: left; cursor: pointer;
+}
+.people-card-name:hover { color: var(--accent); }
+.people-card-actions { display: flex; gap: 10px; margin-top: 6px; }
 .people-card-hide-btn {
   background: transparent; border: none; color: var(--text-faint); cursor: pointer;
-  font-size: 10.5px; padding: 0; margin-top: 6px;
+  font-size: 10.5px; padding: 0;
 }
 .people-card-hide-btn:hover { color: var(--danger); }
+
+.people-unreviewed { margin-top: 22px; border-top: 1px solid var(--border); padding-top: 16px; }
+.people-unreviewed-summary {
+  cursor: pointer; color: var(--text-faint); font-size: 11.5px;
+  font-family: var(--mono); user-select: none; margin-bottom: 12px;
+}
+.people-unreviewed-summary:hover { color: var(--text-muted); }
+.people-unreviewed[open] .people-unreviewed-summary { margin-bottom: 12px; }
+.people-unreviewed .review-intro { margin-top: 10px; }
 
 /* Empty / import */
 .modal-scrim {
@@ -464,6 +478,13 @@ button { font-family: inherit; }
 .popover-item.checked .box svg { width: 9px; height: 9px; color: var(--on-accent); }
 .popover-item .label { flex: 1; }
 .popover-item .n { font-family: var(--mono); font-size: 10px; color: var(--text-faint); }
+.popover-rename {
+  background: none; border: none; color: var(--text-faint); cursor: pointer;
+  font-size: 11px; padding: 0 4px; opacity: 0; line-height: 1;
+}
+.popover-item:hover .popover-rename { opacity: 1; }
+.popover-rename:hover { color: var(--accent); }
+.popover-delete:hover { color: var(--danger); }
 .popover-divider { height: 1px; background: var(--border); margin: 5px 2px; }
 .popover-foot { display: flex; justify-content: space-between; padding: 6px 8px 2px; }
 .popover-link { font-size: 11px; color: var(--text-faint); background: none; border: none; cursor: pointer; padding: 0; }

@@ -486,7 +486,13 @@ async function renderTagPop() {
   try { tags = await invoke('list_tags'); } catch (e) { console.error(e); }
   pop.innerHTML = tags.map(t => {
     const on = state.tags.has(t.name);
-    return `<div class="popover-item ${on ? 'checked' : ''}" data-tag="${escapeHtml(t.name)}"><span class="box">${on ? checkIcon() : ''}</span><span class="label">${escapeHtml(t.name)}</span><span class="n">${t.count}</span></div>`;
+    return `<div class="popover-item ${on ? 'checked' : ''}" data-tag="${escapeHtml(t.name)}">
+      <span class="box">${on ? checkIcon() : ''}</span>
+      <span class="label">${escapeHtml(t.name)}</span>
+      <button class="popover-rename" data-rename-tag="${escapeHtml(t.name)}" title="Fix this tag's name">✎</button>
+      <button class="popover-rename popover-delete" data-delete-tag="${escapeHtml(t.name)}" title="Delete this tag entirely">🗑</button>
+      <span class="n">${t.count}</span>
+    </div>`;
   }).join('');
   pop.querySelectorAll('[data-tag]').forEach(el => el.addEventListener('click', (e) => {
     e.stopPropagation();
@@ -494,6 +500,50 @@ async function renderTagPop() {
     state.tags.has(t) ? state.tags.delete(t) : state.tags.add(t);
     refresh();
   }));
+
+  // Fixes an invalidly-tagged name globally, not just on one photo —
+  // renames the tag row itself, so every image already carrying it picks
+  // up the correction (or merges into an existing tag of the corrected
+  // name, if one exists — lenslocker_catalog::rename_tag's own doc
+  // comment). `stopPropagation` keeps this from also toggling the filter
+  // checkbox the parent `.popover-item` div listens for.
+  pop.querySelectorAll('[data-rename-tag]').forEach(btn => btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const oldName = btn.dataset.renameTag;
+    promptTagNameInput(btn, async (newName) => {
+      if (newName === oldName) return;
+      try {
+        await commitTagRename(oldName, newName);
+      } catch (err) { showToast('Could not rename this tag'); }
+    }, { placeholder: 'new tag name…', value: oldName });
+  }));
+
+  // A tag that shouldn't exist at all, not a misspelling of a real one —
+  // rename_tag has no merge target for "just get rid of it".
+  pop.querySelectorAll('[data-delete-tag]').forEach(btn => btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    const name = btn.dataset.deleteTag;
+    try {
+      await invoke('delete_tag', { name });
+      state.tags.delete(name);
+      showToast(`Deleted tag "${name}"`);
+      renderTagPop();
+      refresh();
+    } catch (err) { showToast('Could not delete this tag'); }
+  }));
+}
+
+// Factored out of renderTagPop's click handler so the active-filter Set
+// (keyed by tag name, not id — state.tags has no other identifier to key
+// on) stays consistent with whatever the tag is called after the rename;
+// otherwise a currently-filtered tag would silently stop matching anything
+// the moment it's renamed out from under the filter.
+async function commitTagRename(oldName, newName) {
+  await invoke('rename_tag', { old: oldName, new: newName });
+  if (state.tags.has(oldName)) { state.tags.delete(oldName); state.tags.add(newName); }
+  showToast(`Renamed to "${newName}"`);
+  renderTagPop();
+  refresh();
 }
 
 // The Person facet (ticket 031, Milestone ML-5) — mirrors renderTagPop
@@ -795,13 +845,15 @@ function renderDrawerTags(detail) {
 // a `<datalist>` for native-browser autocomplete (028 decision #3's
 // "autocompletes against already-named people") — no custom dropdown
 // widget, matching the frontend's no-new-primitives-where-avoidable posture.
-function promptTagNameInput(triggerEl, onCommit, { placeholder = 'tag name…', listId = null } = {}) {
+function promptTagNameInput(triggerEl, onCommit, { placeholder = 'tag name…', listId = null, value = '' } = {}) {
   const input = document.createElement('input');
   input.className = 'tag-input';
   input.placeholder = placeholder;
   if (listId) input.setAttribute('list', listId);
+  if (value) input.value = value;
   triggerEl.replaceWith(input);
   input.focus();
+  if (value) input.select();
   let settled = false;
   const restore = () => { if (input.isConnected) input.replaceWith(triggerEl); };
   const commit = async () => {
@@ -1364,29 +1416,15 @@ async function renderPeopleNeedsReview() {
   }));
 }
 
-async function renderPeopleView() {
-  // Every crop-expand panel collapses back to closed on a fresh render
-  // below (grid.innerHTML is rebuilt from scratch) — any split selection
-  // would otherwise linger referencing a panel that no longer knows it
-  // was ever expanded.
-  splitSelections.clear();
-  await refreshPeopleBadge();
-  await renderPeopleNeedsReview();
-  let clusters = [], persons = [];
-  try {
-    [clusters, persons] = await Promise.all([
-      invoke('list_face_clusters', { includeHidden: false }),
-      invoke('list_persons'),
-    ]);
-  } catch (e) { showToast('Could not load People'); return; }
-
-  renderPersonDatalist(persons);
-  document.getElementById('peopleCount').textContent = `${clusters.length} group${clusters.length === 1 ? '' : 's'}`;
-  peopleClustersCache = clusters;
-
-  const grid = document.getElementById('people-grid');
+// Renders one cluster grid (either the main, named-people grid or the
+// collapsed "Unreviewed groups" grid — same card shape, same wiring)
+// into `grid` and wires up its cards' expand/pick/name/hide interactions.
+// Factored out of `renderPeopleView` so unnamed clusters can live in a
+// separate, collapsed section (not mixed into the main People grid by
+// default) without duplicating this template + event-wiring logic.
+function renderClusterCards(grid, clusters) {
   if (!clusters.length) {
-    grid.innerHTML = `<div class="empty-results" style="position:static">No faces grouped yet.</div>`;
+    grid.innerHTML = '';
     return;
   }
   grid.innerHTML = clusters.map(c => `
@@ -1400,9 +1438,12 @@ async function renderPeopleView() {
       <div class="people-card-body">
         <div class="people-card-count">${c.photoCount} photo${c.photoCount === 1 ? '' : 's'}</div>
         ${c.personName
-          ? `<div class="people-card-name">${escapeHtml(c.personName)}</div>`
+          ? `<button class="people-card-name" data-rename-person="${c.personId}" title="Fix this person's name">${escapeHtml(c.personName)}</button>`
           : `<button class="tag-add" data-name-cluster="${c.id}">+ Name this person</button>`}
-        <button class="people-card-hide-btn" data-hide-cluster="${c.id}">Hide</button>
+        <div class="people-card-actions">
+          ${c.personName ? `<button class="people-card-hide-btn" data-clear-cluster-name="${c.id}">Clear name</button>` : ''}
+          <button class="people-card-hide-btn" data-hide-cluster="${c.id}">Hide</button>
+        </div>
       </div>
     </div>
   `).join('');
@@ -1445,6 +1486,36 @@ async function renderPeopleView() {
       } catch (err) { showToast('Could not name this person'); }
     }, { placeholder: 'person’s name…', listId: 'personNames' });
   }));
+  // Fixes an invalidly-tagged person name — unlike data-name-cluster
+  // above (which attaches *this one cluster* to whichever person the
+  // typed name resolves to), this renames the person entity itself via
+  // rename_person, so every cluster already attached to them picks up the
+  // correction at once, not just the card being edited.
+  grid.querySelectorAll('button[data-rename-person]').forEach(btn => btn.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const personId = Number(btn.dataset.renamePerson);
+    const currentName = btn.textContent;
+    promptTagNameInput(btn, async (newName) => {
+      if (newName === currentName) return;
+      try {
+        await invoke('rename_person', { personId, newName });
+        showToast(`Renamed to "${newName}"`);
+        renderPeopleView();
+      } catch (err) { showToast('Could not rename this person'); }
+    }, { placeholder: 'person’s name…', listId: 'personNames', value: currentName });
+  }));
+  // For a cluster attributed to a person entirely by mistake (not a typo
+  // — that's data-rename-person above): reverts just this card back to
+  // unidentified. Distinct from Hide, which keeps the name but stops
+  // showing the card at all.
+  grid.querySelectorAll('button[data-clear-cluster-name]').forEach(btn => btn.addEventListener('click', async (e) => {
+    e.stopPropagation();
+    try {
+      await invoke('clear_face_cluster_name', { clusterId: Number(btn.dataset.clearClusterName) });
+      showToast('Name cleared');
+      renderPeopleView();
+    } catch (err) { showToast('Could not clear this name'); }
+  }));
   grid.querySelectorAll('button[data-hide-cluster]').forEach(btn => btn.addEventListener('click', async (e) => {
     e.stopPropagation();
     try {
@@ -1459,6 +1530,49 @@ async function renderPeopleView() {
       renderPeopleView();
     } catch (err) { showToast('Could not hide this group'); }
   }));
+}
+
+async function renderPeopleView() {
+  // Every crop-expand panel collapses back to closed on a fresh render
+  // below (grid.innerHTML is rebuilt from scratch) — any split selection
+  // would otherwise linger referencing a panel that no longer knows it
+  // was ever expanded.
+  splitSelections.clear();
+  await refreshPeopleBadge();
+  await renderPeopleNeedsReview();
+  let clusters = [], persons = [];
+  try {
+    [clusters, persons] = await Promise.all([
+      invoke('list_face_clusters', { includeHidden: false }),
+      invoke('list_persons'),
+    ]);
+  } catch (e) { showToast('Could not load People'); return; }
+
+  renderPersonDatalist(persons);
+  peopleClustersCache = clusters;
+
+  // Unnamed clusters are backend bookkeeping, not "people" a user would
+  // recognize — mixing them into the main grid (especially before the
+  // face-alignment fix, when nearly every unnamed face collapsed into one
+  // giant cluster) buried real named people in noise. They still need a
+  // way to be named for the first time (the "Is this also X" review queue
+  // only ever suggests matches against people who are *already* named), so
+  // they move to a collapsed section instead of disappearing outright.
+  const named = clusters.filter(c => c.personName);
+  const unnamed = clusters.filter(c => !c.personName);
+
+  document.getElementById('peopleCount').textContent = `${named.length} group${named.length === 1 ? '' : 's'}`;
+  const namedGrid = document.getElementById('people-grid');
+  if (named.length) {
+    renderClusterCards(namedGrid, named);
+  } else {
+    namedGrid.innerHTML = `<div class="empty-results" style="position:static">No named people yet.</div>`;
+  }
+
+  const details = document.getElementById('people-unreviewed-details');
+  document.getElementById('people-unreviewed-count').textContent = unnamed.length;
+  details.style.display = unnamed.length ? '' : 'none';
+  renderClusterCards(document.getElementById('people-unreviewed-grid'), unnamed);
 }
 
 // ── Cluster split (028 decision #4, Milestone ML-4 Slice D3) ───────────────

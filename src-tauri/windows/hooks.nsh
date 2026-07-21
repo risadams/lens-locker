@@ -30,6 +30,15 @@
   ${If} $0 != 0
     DetailPrint "warning: could not add the LensLocker outbound-block firewall rule (netsh exit code $0) — install continues; the app itself has no network-capable code path regardless (workplan/SPEC.md §8.1-3)"
   ${EndIf}
+
+  ; model.onnx_data (~3.3GB) can't ship in this installer at all — a real
+  ; makensis.exe limitation (confirmed 32-bit, no File-embed of a single
+  ; file this large), not a judgment call. See MODELS.md §4 /
+  ; src-tauri/models/README.md for the full explanation. Tagging analysis
+  ; degrades gracefully (backs off, auto-retries) until this is copied in
+  ; by hand — nothing else in the app depends on it — but a silent install
+  ; with no mention of a missing multi-gigabyte file would be a real trap.
+  DetailPrint "NOTE: tagging analysis needs model.onnx_data (~3.3GB) copied by hand into $INSTDIR\models\siglip-so400m-onnx\ — too large for this installer to include (see MODELS.md)"
 !macroend
 
 !macro NSIS_HOOK_POSTUNINSTALL

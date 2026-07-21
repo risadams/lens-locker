@@ -45,10 +45,21 @@ pub struct TaggingModel {
 
 impl TaggingModel {
     /// Loads the real SigLIP session and tokenizer from `models_dir`, and
-    /// embeds every [`STARTER_LABELS`] entry once. `conn` is used only to
-    /// find-or-create the `models` row this session's embeddings will be
-    /// stored against — no backlog work happens here.
-    pub fn load(conn: &Connection, models_dir: &Path) -> Result<Self> {
+    /// embeds every [`STARTER_LABELS`] entry once. Takes `model_id` directly
+    /// (resolved by the caller via [`crate::similarity::resolve_siglip_model_id`])
+    /// rather than a `Connection`, deliberately: this is the slow part of
+    /// startup (DirectML session creation + one text-encoder forward pass
+    /// per starter label — real, minutes-scale wall time on a cold DirectML
+    /// shader cache, not milliseconds), and touches the catalog nowhere
+    /// else. `src-tauri`'s background analysis loop holds the same app-wide
+    /// connection mutex every interactive command (`list_images`,
+    /// `check_library_status`, …) also needs — taking that lock for this
+    /// function's entire duration froze the whole UI on every first launch,
+    /// the same class of contention bug `CLAUDE.md` already documents from
+    /// `import_directory`'s history. Accepting a plain `model_id` lets the
+    /// caller resolve it under a brief lock, drop the lock, then call this
+    /// function with no lock held at all.
+    pub fn load(model_id: i64, models_dir: &Path) -> Result<Self> {
         let model_path = models_dir.join(ModelKind::Siglip.relative_path());
         let mut session = crate::load_session(&model_path)?;
 
@@ -61,8 +72,6 @@ impl TaggingModel {
             let embedding = tagging::text::embed_text(&mut session, &ids)?;
             label_embeddings.push((label.to_string(), embedding));
         }
-
-        let model_id = crate::similarity::resolve_siglip_model_id(conn)?;
 
         Ok(Self { session, label_embeddings, model_id })
     }
@@ -234,7 +243,7 @@ pub fn process_face_backlog_batch(conn: &Connection, models_dir: &Path, library_
 
             let detections = crate::faces::detect_faces(&mut yunet_session, &probe.image, YUNET_SCORE_THRESHOLD, YUNET_NMS_THRESHOLD)?;
             for detection in detections {
-                let crop = crate::faces::crop_face_for_embedding(&probe.image, &detection.bbox);
+                let crop = crate::faces::crop_face_for_embedding(&probe.image, &detection.bbox, &detection.keypoints);
                 pending_crops.push(PendingFaceCrop { image_id, bbox: detection.bbox, detection_confidence: detection.score, crop });
             }
         }

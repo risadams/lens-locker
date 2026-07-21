@@ -23,13 +23,27 @@
 //! worse here than under OpenCV's own reference usage; flagged rather
 //! than silently accepted as equivalent.
 //!
-//! **Face crop uses a simple margin-padded bounding-box crop, not SFace's
-//! "real" 5-point similarity-transform alignment** (the eyes/nose/mouth
-//! keypoints YuNet also outputs would support proper alignment, matching
-//! ArcFace/SFace's own training-time preprocessing). A deliberate scope
-//! simplification, not an oversight — flagged for a future pass if
-//! embedding quality on real photos proves it matters; [`DetectedFace`]
-//! still carries the keypoints so a later alignment step has what it needs.
+//! **Face crop now uses real 5-point similarity-transform alignment**
+//! (scale + rotation + translation, no shear — fit in closed form via
+//! [`SimilarityTransform::fit`], the 2D specialization of Umeyama's method:
+//! a planar similarity transform is exactly a complex multiply-add, so the
+//! least-squares fit reduces to one complex linear regression rather than
+//! a general Procrustes/SVD), matching ArcFace/SFace's own training-time
+//! preprocessing instead of the plain bounding-box crop this module started
+//! with. That earlier crop-not-align approach was flagged from the start as
+//! a likely source of degraded embedding quality (identical-looking
+//! centroids, over-broad review-queue matches) — confirmed empirically
+//! against real photos, not just a theoretical concern, once real usage
+//! showed exactly that failure mode (near-every photo landing in the
+//! review queue, every unnamed cluster collapsing into one blob). The
+//! reference 112×112 destination points below ([`SFACE_ALIGN_TEMPLATE`])
+//! are transcribed from memory of the widely-published ArcFace/InsightFace
+//! `arcface_src` template (the same one OpenCV's own `FaceRecognizerSF::alignCrop`
+//! uses) — **not independently re-verified against OpenCV's C++ source this
+//! session** (unlike the YuNet decode formulas above, which were); flagged
+//! rather than presented as equally sourced. [`crop_face_for_embedding`]
+//! falls back to the old margin-padded box crop if the fitted transform is
+//! degenerate (near-collinear/duplicate keypoints).
 
 use image::{DynamicImage, GenericImageView, imageops::FilterType};
 use ort::inputs;
@@ -228,17 +242,144 @@ fn missing_output(stride: i64, kind: &str) -> MlError {
 }
 
 /// A margin fraction with no sourced justification — an illustrative
-/// placeholder (this module's simplified crop-not-align approach has no
-/// upstream reference value to match, unlike the OpenCV-sourced detection
-/// constants above), flagged the same way `ML-SPEC.md`'s unresearched
+/// placeholder, used only by the [`crop_face_for_embedding`] fallback path
+/// (degenerate keypoints), flagged the same way `ML-SPEC.md`'s unresearched
 /// threshold defaults are, not presented as a calibrated number.
 const CROP_MARGIN_FRACTION: f32 = 0.2;
 
-/// Crops `bbox` out of `image` with a [`CROP_MARGIN_FRACTION`] margin on
-/// each side (clamped to image bounds) and resizes to SFace's fixed
-/// `112x112` input — a simplified stand-in for real keypoint-based
-/// alignment (module doc).
-pub fn crop_face_for_embedding(image: &DynamicImage, bbox: &FaceBox) -> DynamicImage {
+/// The standard published ArcFace/InsightFace 112×112 alignment template
+/// (`arcface_src`, also what OpenCV's `FaceRecognizerSF::alignCrop` uses) —
+/// see this module's doc comment for the "not independently re-verified
+/// this session" flag. Ordered to match [`DetectedFace::keypoints`]'s own
+/// documented order (right eye, left eye, nose tip, right mouth corner,
+/// left mouth corner) — the two OpenCV Zoo models (YuNet detection, SFace
+/// embedding) are designed to interoperate via this exact keypoint order.
+const SFACE_ALIGN_TEMPLATE: [(f32, f32); 5] =
+    [(38.2946, 51.6963), (73.5318, 51.5014), (56.0252, 71.7366), (41.5493, 92.3655), (70.7299, 92.2041)];
+
+/// A planar similarity transform (uniform scale + rotation + translation,
+/// no shear/reflection), represented as a single complex multiply-add
+/// `dst = a*src + b`. A 2D similarity transform *is* exactly a complex
+/// affine map, so the least-squares fit between point correspondences
+/// reduces to one complex linear regression — the 2D specialization of
+/// Umeyama's method, avoiding a general Procrustes/SVD (and the extra
+/// linear-algebra dependency that would otherwise need).
+#[derive(Debug, Clone, Copy)]
+struct SimilarityTransform {
+    a_re: f32,
+    a_im: f32,
+    b_re: f32,
+    b_im: f32,
+}
+
+impl SimilarityTransform {
+    /// Least-squares fit mapping each `src[i]` to `dst[i]`. Returns `None`
+    /// if the fit is degenerate (near-zero spread in `src`, e.g.
+    /// duplicate/collinear-at-a-point keypoints) — the denominator of the
+    /// closed-form solution would blow up.
+    fn fit(src: &[(f32, f32)], dst: &[(f32, f32)]) -> Option<Self> {
+        debug_assert_eq!(src.len(), dst.len());
+        let n = src.len() as f32;
+        let (src_mx, src_my) = src.iter().fold((0.0, 0.0), |(sx, sy), &(x, y)| (sx + x, sy + y));
+        let (dst_mx, dst_my) = dst.iter().fold((0.0, 0.0), |(sx, sy), &(x, y)| (sx + x, sy + y));
+        let (src_mx, src_my) = (src_mx / n, src_my / n);
+        let (dst_mx, dst_my) = (dst_mx / n, dst_my / n);
+
+        // a = sum(conj(p') * q') / sum(|p'|^2), p'/q' centered on their
+        // own means — the complex-linear-regression slope.
+        let mut num_re = 0.0f32;
+        let mut num_im = 0.0f32;
+        let mut den = 0.0f32;
+        for i in 0..src.len() {
+            let px = src[i].0 - src_mx;
+            let py = src[i].1 - src_my;
+            let qx = dst[i].0 - dst_mx;
+            let qy = dst[i].1 - dst_my;
+            num_re += px * qx + py * qy;
+            num_im += px * qy - py * qx;
+            den += px * px + py * py;
+        }
+        if den < 1e-6 {
+            return None;
+        }
+        let (a_re, a_im) = (num_re / den, num_im / den);
+        let b_re = dst_mx - (a_re * src_mx - a_im * src_my);
+        let b_im = dst_my - (a_re * src_my + a_im * src_mx);
+        Some(Self { a_re, a_im, b_re, b_im })
+    }
+
+    fn apply(&self, p: (f32, f32)) -> (f32, f32) {
+        (self.a_re * p.0 - self.a_im * p.1 + self.b_re, self.a_re * p.1 + self.a_im * p.0 + self.b_im)
+    }
+
+    fn invert(&self) -> Self {
+        let denom = self.a_re * self.a_re + self.a_im * self.a_im;
+        let (inv_a_re, inv_a_im) = if denom > 1e-12 { (self.a_re / denom, -self.a_im / denom) } else { (1.0, 0.0) };
+        let inv_b_re = -(inv_a_re * self.b_re - inv_a_im * self.b_im);
+        let inv_b_im = -(inv_a_re * self.b_im + inv_a_im * self.b_re);
+        Self { a_re: inv_a_re, a_im: inv_a_im, b_re: inv_b_re, b_im: inv_b_im }
+    }
+}
+
+/// Bilinear-samples `rgb` at floating-point coordinate `(x, y)`; `None` if
+/// outside the source image's bounds (the caller leaves that output pixel
+/// black, matching [`letterbox_to_square`]'s own black-padding convention).
+fn bilinear_sample(rgb: &image::RgbImage, x: f32, y: f32) -> Option<image::Rgb<u8>> {
+    let (w, h) = (rgb.width(), rgb.height());
+    if x < 0.0 || y < 0.0 || x > (w - 1) as f32 || y > (h - 1) as f32 {
+        return None;
+    }
+    let x0 = x.floor() as u32;
+    let y0 = y.floor() as u32;
+    let x1 = (x0 + 1).min(w - 1);
+    let y1 = (y0 + 1).min(h - 1);
+    let fx = x - x0 as f32;
+    let fy = y - y0 as f32;
+
+    let p00 = rgb.get_pixel(x0, y0).0;
+    let p10 = rgb.get_pixel(x1, y0).0;
+    let p01 = rgb.get_pixel(x0, y1).0;
+    let p11 = rgb.get_pixel(x1, y1).0;
+
+    let mut out = [0u8; 3];
+    for c in 0..3 {
+        let top = p00[c] as f32 * (1.0 - fx) + p10[c] as f32 * fx;
+        let bottom = p01[c] as f32 * (1.0 - fx) + p11[c] as f32 * fx;
+        out[c] = (top * (1.0 - fy) + bottom * fy).round().clamp(0.0, 255.0) as u8;
+    }
+    Some(image::Rgb(out))
+}
+
+/// Warps `image` into a `size`x`size` canvas via `transform`, sampling each
+/// destination pixel through `transform`'s inverse (standard inverse-warp
+/// resampling — forward-warping would leave holes).
+fn warp_similarity(image: &DynamicImage, transform: &SimilarityTransform, size: u32) -> DynamicImage {
+    let inverse = transform.invert();
+    let rgb = image.to_rgb8();
+    let mut out = image::RgbImage::from_pixel(size, size, image::Rgb([0, 0, 0]));
+    for v in 0..size {
+        for u in 0..size {
+            let (sx, sy) = inverse.apply((u as f32, v as f32));
+            if let Some(pixel) = bilinear_sample(&rgb, sx, sy) {
+                out.put_pixel(u, v, pixel);
+            }
+        }
+    }
+    DynamicImage::ImageRgb8(out)
+}
+
+/// Aligns and crops a face out of `image` for SFace embedding: fits a
+/// similarity transform from `keypoints` to [`SFACE_ALIGN_TEMPLATE`] and
+/// warps directly to SFace's fixed `112x112` input (module doc). Falls
+/// back to the old margin-padded bounding-box crop if the fit is
+/// degenerate (near-duplicate/collinear keypoints) rather than failing —
+/// a face this module's own detector already reported it found should
+/// still produce *some* embedding.
+pub fn crop_face_for_embedding(image: &DynamicImage, bbox: &FaceBox, keypoints: &[(f32, f32); 5]) -> DynamicImage {
+    if let Some(transform) = SimilarityTransform::fit(keypoints, &SFACE_ALIGN_TEMPLATE) {
+        return warp_similarity(image, &transform, EMBED_INPUT_SIZE);
+    }
+
     let (img_w, img_h) = image.dimensions();
     let margin_x = bbox.width * CROP_MARGIN_FRACTION;
     let margin_y = bbox.height * CROP_MARGIN_FRACTION;
@@ -548,6 +689,58 @@ mod tests {
         a[0] = 1.0;
         b[1] = 1.0;
         assert!(cosine_similarity(&a, &b).abs() < 1e-6);
+    }
+
+    #[test]
+    fn similarity_transform_fit_recovers_a_known_scale_rotation_translation() {
+        // Ground truth: scale=2, rotate 90 degrees (a = 2*i = (0, 2)), translate by (10, 5).
+        let a_re = 0.0f32;
+        let a_im = 2.0f32;
+        let b_re = 10.0f32;
+        let b_im = 5.0f32;
+        let apply_gt = |p: (f32, f32)| (a_re * p.0 - a_im * p.1 + b_re, a_re * p.1 + a_im * p.0 + b_im);
+
+        let src = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (1.0, 1.0), (2.0, 3.0)];
+        let dst: Vec<(f32, f32)> = src.iter().map(|&p| apply_gt(p)).collect();
+
+        let fitted = SimilarityTransform::fit(&src, &dst).expect("non-degenerate points must fit");
+        for &p in &src {
+            let expected = apply_gt(p);
+            let actual = fitted.apply(p);
+            assert!((actual.0 - expected.0).abs() < 1e-3, "x mismatch: {actual:?} vs {expected:?}");
+            assert!((actual.1 - expected.1).abs() < 1e-3, "y mismatch: {actual:?} vs {expected:?}");
+        }
+    }
+
+    #[test]
+    fn similarity_transform_invert_round_trips() {
+        let src = [(0.0, 0.0), (1.0, 0.0), (0.0, 1.0), (2.0, 2.0), (-1.0, 3.0)];
+        let dst = [(5.0, 5.0), (7.0, 6.0), (6.0, 8.0), (9.0, 10.0), (2.0, 12.0)];
+        let transform = SimilarityTransform::fit(&src, &dst).expect("non-degenerate points must fit");
+        let inverse = transform.invert();
+
+        for &p in &src {
+            let forward = transform.apply(p);
+            let back = inverse.apply(forward);
+            assert!((back.0 - p.0).abs() < 1e-2, "x round-trip mismatch: {back:?} vs {p:?}");
+            assert!((back.1 - p.1).abs() < 1e-2, "y round-trip mismatch: {back:?} vs {p:?}");
+        }
+    }
+
+    #[test]
+    fn similarity_transform_fit_returns_none_for_degenerate_points() {
+        let src = [(1.0, 1.0); 5];
+        let dst = SFACE_ALIGN_TEMPLATE;
+        assert!(SimilarityTransform::fit(&src, &dst).is_none());
+    }
+
+    #[test]
+    fn crop_face_for_embedding_falls_back_to_box_crop_on_degenerate_keypoints() {
+        let image = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(200, 200, image::Rgb([9, 9, 9])));
+        let bbox = FaceBox { x: 50.0, y: 50.0, width: 60.0, height: 60.0 };
+        let degenerate_keypoints = [(70.0, 70.0); 5];
+        let crop = crop_face_for_embedding(&image, &bbox, &degenerate_keypoints);
+        assert_eq!(crop.dimensions(), (EMBED_INPUT_SIZE, EMBED_INPUT_SIZE));
     }
 
     #[test]

@@ -17,6 +17,14 @@ a real export in under the exact path below needs no code change):
 - `siglip-so400m-onnx/model.onnx` + sibling `model.onnx_data` — self-converted
   SigLIP `so400m` (tagging embeddings); both files required together.
 
+**`model.onnx_data` (~3.3GB) does not ship in the NSIS installer** — a real
+`makensis.exe` limitation (confirmed 32-bit; it can't `File`-embed a single
+file this large), not a judgment call. Everything else in this directory
+still ships normally. After installing, copy `model.onnx_data` into
+`<install dir>\models\siglip-so400m-onnx\` by hand — see MODELS.md §4 for
+the full explanation. Tagging analysis just stays backed-off/retrying
+until it's there; nothing else in the app depends on it.
+
 `*.onnx`/`*.dll` in this directory are gitignored (repo-bloat judgment
 call, flagged rather than assumed — revisit if the project later wants a
 fully self-contained checkout instead).

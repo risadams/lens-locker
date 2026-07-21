@@ -87,6 +87,92 @@ pub fn remove_tag(conn: &Connection, image_id: i64, tag_name: &str) -> rusqlite:
     Ok(())
 }
 
+/// Renames a tag globally — every image currently tagged with `old_name`
+/// keeps that tag, now shown/stored as `new_name`. A no-op if `old_name`
+/// doesn't exist (nothing to rename). If `new_name` already exists as a
+/// *different* tag, this merges the two: every `old_name`-tagged image
+/// gets `new_name` too (`INSERT OR IGNORE` against `image_tags`'s
+/// composite primary key skips images that already had both, so no
+/// provenance/confidence data is silently overwritten for those), and the
+/// old tag row is deleted. Resyncs the FTS index for every affected image
+/// — `sync_fts_row` reads current tag state, so it must run after the
+/// rename/merge completes, not before. Returns every affected image's id,
+/// so callers can also resync each one's XMP sidecar (catalog-first,
+/// sidecar-mirrors — this crate has no file I/O of its own to do that
+/// itself, `CLAUDE.md`'s layering rule).
+pub fn rename_tag(conn: &Connection, old_name: &str, new_name: &str) -> rusqlite::Result<Vec<i64>> {
+    let new_name = new_name.trim();
+    let old_id: Option<i64> = conn.query_row("SELECT id FROM tags WHERE name = ?1", params![old_name], |row| row.get(0)).optional()?;
+    let Some(old_id) = old_id else { return Ok(Vec::new()) };
+
+    let existing_new_id: Option<i64> = conn.query_row("SELECT id FROM tags WHERE name = ?1", params![new_name], |row| row.get(0)).optional()?;
+
+    let affected_image_ids: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT image_id FROM image_tags WHERE tag_id = ?1")?;
+        stmt.query_map(params![old_id], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?
+    };
+
+    match existing_new_id {
+        Some(new_id) if new_id != old_id => {
+            conn.execute(
+                "INSERT OR IGNORE INTO image_tags (image_id, tag_id, tagged_at, source, confidence, review_state)
+                 SELECT image_id, ?1, tagged_at, source, confidence, review_state FROM image_tags WHERE tag_id = ?2",
+                params![new_id, old_id],
+            )?;
+            conn.execute("DELETE FROM image_tags WHERE tag_id = ?1", params![old_id])?;
+            // rejected_tags.tag_id REFERENCES tags(id), enforced (migrate's
+            // doc comment) — deleting the old tags row below would violate
+            // that FK if any rejection still points at it. Migrated, not
+            // just dropped: a prior "don't re-suggest this" on the old
+            // name should still suppress the merged-into name too, same
+            // reasoning as image_tags above.
+            conn.execute(
+                "INSERT OR IGNORE INTO rejected_tags (image_id, tag_id, rejected_at)
+                 SELECT image_id, ?1, rejected_at FROM rejected_tags WHERE tag_id = ?2",
+                params![new_id, old_id],
+            )?;
+            conn.execute("DELETE FROM rejected_tags WHERE tag_id = ?1", params![old_id])?;
+            conn.execute("DELETE FROM tags WHERE id = ?1", params![old_id])?;
+        }
+        _ => {
+            conn.execute("UPDATE tags SET name = ?1 WHERE id = ?2", params![new_name, old_id])?;
+        }
+    }
+
+    for &image_id in &affected_image_ids {
+        sync_fts_row(conn, image_id)?;
+    }
+    Ok(affected_image_ids)
+}
+
+/// Deletes a tag entirely — removes it from every image that has it and
+/// drops the `tags` row itself. For a tag that shouldn't exist at all (a
+/// plain mistake — nothing to rename it *to*, unlike [`rename_tag`]'s
+/// "this is the same tag, just spelled wrong" case). A no-op if the tag
+/// doesn't exist. Cleans up `rejected_tags` first — same FK reasoning as
+/// `rename_tag`'s merge path, except there's no merge target to migrate
+/// those rows to, so they're just dropped: the tag they were suppressing
+/// no longer exists to re-suggest. Resyncs the FTS index and returns
+/// every affected image's id (same contract as `rename_tag`).
+pub fn delete_tag(conn: &Connection, name: &str) -> rusqlite::Result<Vec<i64>> {
+    let tag_id: Option<i64> = conn.query_row("SELECT id FROM tags WHERE name = ?1", params![name], |row| row.get(0)).optional()?;
+    let Some(tag_id) = tag_id else { return Ok(Vec::new()) };
+
+    let affected_image_ids: Vec<i64> = {
+        let mut stmt = conn.prepare("SELECT image_id FROM image_tags WHERE tag_id = ?1")?;
+        stmt.query_map(params![tag_id], |row| row.get(0))?.collect::<rusqlite::Result<_>>()?
+    };
+
+    conn.execute("DELETE FROM image_tags WHERE tag_id = ?1", params![tag_id])?;
+    conn.execute("DELETE FROM rejected_tags WHERE tag_id = ?1", params![tag_id])?;
+    conn.execute("DELETE FROM tags WHERE id = ?1", params![tag_id])?;
+
+    for &image_id in &affected_image_ids {
+        sync_fts_row(conn, image_id)?;
+    }
+    Ok(affected_image_ids)
+}
+
 /// The tags currently applied to `image_id`, sorted alphabetically —
 /// deterministic ordering so sidecar output (`lenslocker-xmp`) doesn't
 /// churn on every sync from a nondeterministic row order.
@@ -582,6 +668,62 @@ pub fn name_cluster(conn: &Connection, cluster_id: i64, person_name: &str) -> ru
         params![person_id, cluster_id],
     )?;
     Ok(person_id)
+}
+
+/// Renames a person globally — every cluster attached to them keeps its
+/// membership, now shown under `new_name`; fixes a typo/wrong name without
+/// having to re-name (and thus reassign) every cluster that person owns
+/// one at a time. If `new_name` already belongs to a *different* existing
+/// person (matched the same case-insensitive way [`find_or_create_person`]
+/// matches a typed name to an identity), this merges the two: every
+/// cluster currently attached to `person_id` moves to that existing
+/// person instead, and the now-unreferenced `person_id` row is deleted.
+/// Returns the id the renamed person now lives under (either `person_id`
+/// itself, or the existing person merged into).
+pub fn rename_person(conn: &Connection, person_id: i64, new_name: &str) -> rusqlite::Result<i64> {
+    let new_name = new_name.trim();
+    let existing: Option<i64> =
+        conn.query_row("SELECT id FROM persons WHERE name = ?1 COLLATE NOCASE", params![new_name], |row| row.get(0)).optional()?;
+
+    match existing {
+        Some(target_id) if target_id != person_id => {
+            conn.execute(
+                "UPDATE face_clusters SET person_id = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE person_id = ?2",
+                params![target_id, person_id],
+            )?;
+            conn.execute("DELETE FROM persons WHERE id = ?1", params![person_id])?;
+            Ok(target_id)
+        }
+        _ => {
+            conn.execute("UPDATE persons SET name = ?1 WHERE id = ?2", params![new_name, person_id])?;
+            Ok(person_id)
+        }
+    }
+}
+
+/// Un-names a cluster — reverts it back to unidentified, the direct undo
+/// of [`name_cluster`]. For a cluster attributed to a person entirely by
+/// mistake (not just misspelled — see [`rename_person`] for that): there's
+/// no "clear" version of a typo fix, just going back to no name at all.
+/// If this was the last cluster attached to that person, also deletes the
+/// now-orphaned `persons` row, so [`list_persons`]'s autocomplete doesn't
+/// accumulate dead names nothing points to anymore.
+pub fn clear_cluster_name(conn: &Connection, cluster_id: i64) -> rusqlite::Result<()> {
+    let person_id: Option<i64> =
+        conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", params![cluster_id], |row| row.get(0)).optional()?.flatten();
+
+    conn.execute(
+        "UPDATE face_clusters SET person_id = NULL, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1",
+        params![cluster_id],
+    )?;
+
+    if let Some(person_id) = person_id {
+        let remaining: i64 = conn.query_row("SELECT COUNT(*) FROM face_clusters WHERE person_id = ?1", params![person_id], |row| row.get(0))?;
+        if remaining == 0 {
+            conn.execute("DELETE FROM persons WHERE id = ?1", params![person_id])?;
+        }
+    }
+    Ok(())
 }
 
 /// Toggles a cluster's reversible "Hide" state (028 decision #3: "moves to
@@ -1809,6 +1951,108 @@ mod tests {
     }
 
     #[test]
+    fn rename_tag_updates_the_tag_name_in_place() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        super::add_tag(&conn, image_id, "sunet").unwrap();
+
+        super::rename_tag(&conn, "sunet", "sunset").unwrap();
+
+        assert_eq!(super::tags_for_image(&conn, image_id).unwrap(), vec!["sunset".to_string()]);
+        let tag_count: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0)).unwrap();
+        assert_eq!(tag_count, 1, "renaming must not leave a stray old row behind");
+    }
+
+    #[test]
+    fn rename_tag_merges_into_an_existing_tag_of_the_new_name() {
+        let conn = migrated_conn();
+        let image_a = insert_test_image(&conn);
+        let image_b = insert_test_image(&conn);
+        super::add_tag(&conn, image_a, "sunet").unwrap();
+        super::add_tag(&conn, image_b, "sunset").unwrap();
+
+        super::rename_tag(&conn, "sunet", "sunset").unwrap();
+
+        assert_eq!(super::tags_for_image(&conn, image_a).unwrap(), vec!["sunset".to_string()]);
+        assert_eq!(super::tags_for_image(&conn, image_b).unwrap(), vec!["sunset".to_string()]);
+        let tag_count: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0)).unwrap();
+        assert_eq!(tag_count, 1, "the two tags must merge into one row, not coexist");
+    }
+
+    #[test]
+    fn rename_tag_merging_a_tag_with_a_prior_rejection_does_not_violate_the_fk_constraint() {
+        // rejected_tags.tag_id REFERENCES tags(id), and this connection
+        // enforces foreign keys (migrate's own doc comment) — merging
+        // must move/clean up rejected_tags rows for the old tag_id before
+        // deleting its tags row, not just image_tags's.
+        let conn = migrated_conn();
+        let image_a = insert_test_image(&conn);
+        let image_b = insert_test_image(&conn);
+        super::add_tag(&conn, image_a, "sunet").unwrap();
+        super::reject_tag(&conn, image_b, "sunet").unwrap();
+        super::add_tag(&conn, image_b, "sunset").unwrap();
+
+        super::rename_tag(&conn, "sunet", "sunset").unwrap();
+
+        assert_eq!(super::tags_for_image(&conn, image_a).unwrap(), vec!["sunset".to_string()]);
+        let rejection_carried_over: bool = conn
+            .query_row(
+                "SELECT 1 FROM rejected_tags rt JOIN tags t ON t.id = rt.tag_id
+                 WHERE rt.image_id = ?1 AND t.name = 'sunset'",
+                [image_b],
+                |_| Ok(true),
+            )
+            .optional()
+            .unwrap()
+            .unwrap_or(false);
+        assert!(rejection_carried_over, "a prior rejection of the old name should still suppress re-suggesting the merged-into name");
+    }
+
+    #[test]
+    fn rename_tag_of_a_nonexistent_tag_is_a_no_op() {
+        let conn = migrated_conn();
+        super::rename_tag(&conn, "does-not-exist", "whatever").unwrap();
+        let tag_count: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0)).unwrap();
+        assert_eq!(tag_count, 0);
+    }
+
+    #[test]
+    fn delete_tag_removes_it_from_every_image_and_drops_the_row() {
+        let conn = migrated_conn();
+        let image_a = insert_test_image(&conn);
+        let image_b = insert_test_image(&conn);
+        super::add_tag(&conn, image_a, "bogus").unwrap();
+        super::add_tag(&conn, image_b, "bogus").unwrap();
+        super::add_tag(&conn, image_b, "keep-me").unwrap();
+
+        super::delete_tag(&conn, "bogus").unwrap();
+
+        assert_eq!(super::tags_for_image(&conn, image_a).unwrap(), Vec::<String>::new());
+        assert_eq!(super::tags_for_image(&conn, image_b).unwrap(), vec!["keep-me".to_string()]);
+        let tag_count: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0)).unwrap();
+        assert_eq!(tag_count, 1, "only the deleted tag's row should be gone");
+    }
+
+    #[test]
+    fn delete_tag_with_a_prior_rejection_does_not_violate_the_fk_constraint() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        super::reject_tag(&conn, image_id, "bogus").unwrap();
+
+        super::delete_tag(&conn, "bogus").unwrap();
+
+        let tag_count: i64 = conn.query_row("SELECT COUNT(*) FROM tags", [], |row| row.get(0)).unwrap();
+        assert_eq!(tag_count, 0);
+    }
+
+    #[test]
+    fn delete_tag_of_a_nonexistent_tag_is_a_no_op() {
+        let conn = migrated_conn();
+        let affected = super::delete_tag(&conn, "does-not-exist").unwrap();
+        assert!(affected.is_empty());
+    }
+
+    #[test]
     fn apply_auto_tag_inserts_with_auto_provenance_and_unreviewed_state() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
@@ -2196,6 +2440,85 @@ mod tests {
         assert_eq!(person_a, person_b, "typing a different case than the autocomplete suggestion must still attach to the same identity");
         let person_count: i64 = conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0)).unwrap();
         assert_eq!(person_count, 1);
+    }
+
+    #[test]
+    fn rename_person_fixes_a_typo_in_place() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
+        let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let cluster_id = super::create_cluster_with_member(&conn, detection_id).unwrap();
+        let person_id = super::name_cluster(&conn, cluster_id, "Alise").unwrap();
+
+        let result_id = super::rename_person(&conn, person_id, "Alice").unwrap();
+
+        assert_eq!(result_id, person_id, "a plain typo fix keeps the same identity");
+        let name: String = conn.query_row("SELECT name FROM persons WHERE id = ?1", [person_id], |row| row.get(0)).unwrap();
+        assert_eq!(name, "Alice");
+        let stored_person_id: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [cluster_id], |row| row.get(0)).unwrap();
+        assert_eq!(stored_person_id, Some(person_id), "the cluster's membership must survive the rename");
+    }
+
+    #[test]
+    fn rename_person_merges_into_an_existing_person_of_the_new_name() {
+        let conn = migrated_conn();
+        let image_a = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
+        let detection_a = super::insert_face_detection(&conn, &new_face(image_a, model_id, &[1])).unwrap();
+        let cluster_a = super::create_cluster_with_member(&conn, detection_a).unwrap();
+        let wrong_person_id = super::name_cluster(&conn, cluster_a, "Alise").unwrap();
+
+        let detection_b = super::insert_face_detection(&conn, &new_face(image_a, model_id, &[2])).unwrap();
+        let cluster_b = super::create_cluster_with_member(&conn, detection_b).unwrap();
+        let alice_id = super::name_cluster(&conn, cluster_b, "Alice").unwrap();
+
+        let result_id = super::rename_person(&conn, wrong_person_id, "Alice").unwrap();
+
+        assert_eq!(result_id, alice_id, "must resolve to the existing Alice identity, not create a second one");
+        let stored_person_id: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [cluster_a], |row| row.get(0)).unwrap();
+        assert_eq!(stored_person_id, Some(alice_id), "cluster_a must move under the surviving identity");
+        let person_count: i64 = conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0)).unwrap();
+        assert_eq!(person_count, 1, "the old (wrong-name) person row must be deleted, not left orphaned");
+    }
+
+    #[test]
+    fn clear_cluster_name_reverts_to_unidentified_and_drops_the_orphaned_person() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
+        let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let cluster_id = super::create_cluster_with_member(&conn, detection_id).unwrap();
+        super::name_cluster(&conn, cluster_id, "Wrong Person").unwrap();
+
+        super::clear_cluster_name(&conn, cluster_id).unwrap();
+
+        let person_id: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [cluster_id], |row| row.get(0)).unwrap();
+        assert_eq!(person_id, None, "the cluster must go back to unidentified");
+        let person_count: i64 = conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0)).unwrap();
+        assert_eq!(person_count, 0, "the now-unreferenced person row must be cleaned up");
+    }
+
+    #[test]
+    fn clear_cluster_name_keeps_the_person_alive_if_another_cluster_still_uses_them() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
+        let detection_a = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let cluster_a = super::create_cluster_with_member(&conn, detection_a).unwrap();
+        let person_id = super::name_cluster(&conn, cluster_a, "Alice").unwrap();
+        let detection_b = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        let cluster_b = super::create_cluster_with_member(&conn, detection_b).unwrap();
+        conn.execute("UPDATE face_clusters SET person_id = ?1 WHERE id = ?2", rusqlite::params![person_id, cluster_b]).unwrap();
+
+        super::clear_cluster_name(&conn, cluster_a).unwrap();
+
+        let cluster_a_person: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [cluster_a], |row| row.get(0)).unwrap();
+        assert_eq!(cluster_a_person, None);
+        let cluster_b_person: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [cluster_b], |row| row.get(0)).unwrap();
+        assert_eq!(cluster_b_person, Some(person_id), "cluster_b's naming must be untouched");
+        let person_count: i64 = conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0)).unwrap();
+        assert_eq!(person_count, 1, "the person is still referenced by cluster_b, so their row must survive");
     }
 
     #[test]

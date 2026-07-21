@@ -108,7 +108,24 @@ together is ~37MB by comparison).
 Both files must sit together in `siglip-so400m-onnx/`; `model.onnx`'s
 internal reference to `model.onnx_data` is a relative filename, so ONNX
 Runtime resolves it automatically as long as they're co-located — no
-extra wiring needed. Confirmed dimensions: 1152 (`hidden_size`/
+extra wiring needed.
+
+**`model.onnx_data` is not in the NSIS installer** — a real tool
+limitation, not a judgment call: `makensis.exe` (confirmed 32-bit; NSIS
+does not officially ship a 64-bit compiler) cannot `File`-embed a single
+file this large — compiling failed outright with `File: failed creating
+mmap of "...model.onnx_data"`. `tauri.conf.json`'s `bundle.resources` lists
+`siglip-so400m-onnx/`'s other files explicitly (small enough to embed:
+`model.onnx` ~1.1MB, `config.json`, `tokenizer.json`, `spiece.model`) but
+omits `model.onnx_data`. **After running the installer, manually copy
+`model.onnx_data` into `<install dir>\models\siglip-so400m-onnx\`** —
+the same manual-drop-in convention `src-tauri/models/README.md` already
+uses for dev, just extended to the installed copy. Tagging analysis fails
+gracefully (logged, backed off, auto-retried — `spawn_analysis_loop`'s doc
+comment in `src-tauri/src/lib.rs`) until this file is in place; nothing
+else in the app is blocked by its absence.
+
+Confirmed dimensions: 1152 (`hidden_size`/
 `projection_size` in `config.json`, for both towers) — not the more common
 768 some other SigLIP variants use; don't assume 768 when ML-2's tagging
 pipeline code gets written against this.

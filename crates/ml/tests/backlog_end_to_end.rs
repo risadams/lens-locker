@@ -48,7 +48,8 @@ fn backlog_batch_tags_a_real_image_and_the_vec_mirror_finds_it_back() {
     let conn = migrated_conn();
     let image_id = insert_test_image(&conn, &image_path);
 
-    let mut model = TaggingModel::load(&conn, &lenslocker_ml::models_dir()).expect("load the real SigLIP model + tokenizer");
+    let model_id = lenslocker_ml::similarity::resolve_siglip_model_id(&conn).unwrap();
+    let mut model = TaggingModel::load(model_id, &lenslocker_ml::models_dir()).expect("load the real SigLIP model + tokenizer");
     let mirror = VecMirror::build(&conn, model.model_id(), lenslocker_ml::tagging::EMBEDDING_DIM).unwrap();
 
     // Storage threshold of 0.0 — accept every scored label, since this

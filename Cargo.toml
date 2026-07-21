@@ -20,3 +20,23 @@ publish = false
 
 [workspace.lints.rust]
 unsafe_code = "deny"
+
+# Release build: tuned for runtime speed and small on-disk binary size (not
+# compile time — this profile is deliberately slow to build in exchange).
+# `opt-level = 3` keeps full speed optimization; the size win comes from
+# `lto`/single codegen unit (whole-program inlining + dead-code elimination
+# across crate boundaries) and `strip` (debug symbols add bytes with zero
+# runtime benefit once WebView2's own crash-report upload is already
+# disabled — src-tauri/src/webview2_hardening.rs). `panic = "abort"` drops
+# unwind-table overhead and further shrinks the binary; a panic anywhere
+# now hard-exits the process instead of unwinding just one thread — a
+# deliberate choice, not an oversight, matching this app's existing
+# crash-safety model (SPEC.md §3's journal/quarantine design already treats
+# "anything unexpected happened" as a hard stop to recover from on restart,
+# not something to keep running past).
+[profile.release]
+opt-level = 3
+lto = "fat"
+codegen-units = 1
+strip = "symbols"
+panic = "abort"

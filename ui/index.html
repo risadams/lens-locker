@@ -169,6 +169,11 @@
           <p class="review-intro">Faces are grouped automatically as photos are processed — nothing here is a claim about who's who until you name a group. Naming attaches to an existing person if the name matches one you've already used. A group you don't want to see again can be hidden without deleting anything. Pick two groups (checkbox on each card) to merge them if they're the same person.</p>
           <div id="people-needs-review"></div>
           <div id="people-grid" class="people-grid"></div>
+          <details id="people-unreviewed-details" class="people-unreviewed" style="display:none">
+            <summary class="people-unreviewed-summary">Unreviewed groups (<span id="people-unreviewed-count">0</span>)</summary>
+            <p class="review-intro">Not yet matched to anyone you've named — name one here to make it a real person, and it'll move up above.</p>
+            <div id="people-unreviewed-grid" class="people-grid"></div>
+          </details>
         </div>
       </div>
 

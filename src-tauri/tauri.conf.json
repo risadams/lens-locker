@@ -2,7 +2,7 @@
   "$schema": "https://schema.tauri.app/config/2",
   "productName": "LensLocker",
   "version": "0.1.0",
-  "identifier": "com.lenslocker.app",
+  "identifier": "com.lenslocker.desktop",
   "build": {
     "frontendDist": "../ui"
   },
@@ -17,7 +17,7 @@
       }
     ],
     "security": {
-      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:",
+      "csp": "default-src 'self'; img-src 'self' asset: http://asset.localhost data:; style-src 'self' 'unsafe-inline'; connect-src 'self' ipc: http://ipc.localhost",
       "assetProtocol": {
         "enable": true,
         "scope": ["$APPDATA/**"]
@@ -38,7 +38,10 @@
       "models/onnxruntime.dll": "models/onnxruntime.dll",
       "models/face_detection_yunet/*": "models/face_detection_yunet/",
       "models/face_recognition_sface/*": "models/face_recognition_sface/",
-      "models/siglip-so400m-onnx/*": "models/siglip-so400m-onnx/",
+      "models/siglip-so400m-onnx/model.onnx": "models/siglip-so400m-onnx/model.onnx",
+      "models/siglip-so400m-onnx/config.json": "models/siglip-so400m-onnx/config.json",
+      "models/siglip-so400m-onnx/tokenizer.json": "models/siglip-so400m-onnx/tokenizer.json",
+      "models/siglip-so400m-onnx/spiece.model": "models/siglip-so400m-onnx/spiece.model",
       "../LICENSES.txt": "LICENSES.txt"
     },
     "windows": {

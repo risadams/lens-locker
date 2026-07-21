@@ -647,6 +647,38 @@ fn remove_tag(
     })
 }
 
+/// Fixes a wrong/misspelled tag globally — every image tagged with `old`
+/// now carries `new` instead, resyncing every affected image's XMP
+/// sidecar (catalog-first, then sidecar — same invariant [`add_tag`]/
+/// [`remove_tag`] already follow, just for however many images the tag
+/// touches instead of one).
+#[tauri::command]
+fn rename_tag(state: tauri::State<Mutex<LibraryState>>, old: String, new: String) -> CmdResult<()> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        let affected_image_ids = lenslocker_catalog::rename_tag(&conn, &old, &new)?;
+        for image_id in affected_image_ids {
+            lenslocker_xmp::sync_sidecar(&conn, image_id)?;
+        }
+        Ok(())
+    })
+}
+
+/// Deletes a tag entirely — for one that shouldn't exist at all, not a
+/// misspelling of a real one (that's [`rename_tag`]). Same catalog-first-
+/// then-sidecar contract as `rename_tag`.
+#[tauri::command]
+fn delete_tag(state: tauri::State<Mutex<LibraryState>>, name: String) -> CmdResult<()> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        let affected_image_ids = lenslocker_catalog::delete_tag(&conn, &name)?;
+        for image_id in affected_image_ids {
+            lenslocker_xmp::sync_sidecar(&conn, image_id)?;
+        }
+        Ok(())
+    })
+}
+
 /// Flips an auto-tag's `review_state` to `confirmed` (ML-SPEC.md §4/§5) —
 /// grants full visual parity with a manual tag without rewriting its
 /// `source`, so re-scoring later still knows this one came from the model.
@@ -788,6 +820,31 @@ fn name_face_cluster(state: tauri::State<Mutex<LibraryState>>, cluster_id: i64, 
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
         Ok(lenslocker_catalog::name_cluster(&conn, cluster_id, &person_name)?)
+    })
+}
+
+/// Fixes a wrongly-named person — every cluster attached to them stays
+/// attached, just under the corrected name (or merges into whichever
+/// existing person `new_name` already belongs to — see
+/// [`lenslocker_catalog::rename_person`]). Returns the id the person now
+/// lives under.
+#[tauri::command]
+fn rename_person(state: tauri::State<Mutex<LibraryState>>, person_id: i64, new_name: String) -> CmdResult<i64> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        Ok(lenslocker_catalog::rename_person(&conn, person_id, &new_name)?)
+    })
+}
+
+/// Un-names a cluster — reverts it back to unidentified, for one
+/// attributed to a person entirely by mistake (not a typo — that's
+/// [`rename_person`]).
+#[tauri::command]
+fn clear_face_cluster_name(state: tauri::State<Mutex<LibraryState>>, cluster_id: i64) -> CmdResult<()> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        lenslocker_catalog::clear_cluster_name(&conn, cluster_id)?;
+        Ok(())
     })
 }
 
@@ -1798,7 +1855,18 @@ fn spawn_analysis_loop(app: tauri::AppHandle) {
             }
 
             let models_dir = lenslocker_ml::models_dir();
-            let result: CmdResult<(usize, usize)> = with_ready(&app.state::<Mutex<LibraryState>>(), |app_state| {
+
+            // Cheap per-iteration check (library-switch invalidation + is a
+            // (re)load even needed) under a brief lock. The actual slow
+            // load below — DirectML session creation + one forward pass
+            // per starter label, real minutes-scale wall time on a cold
+            // shader cache — runs with **no lock held at all**: holding the
+            // same app-wide connection mutex every interactive command
+            // needs for that whole duration used to freeze the entire UI
+            // on first launch (the same contention class `CLAUDE.md`
+            // already documents from `import_directory`'s history). See
+            // `TaggingModel::load`'s doc comment for the fuller reasoning.
+            let load_check: CmdResult<Option<i64>> = with_ready(&app.state::<Mutex<LibraryState>>(), |app_state| {
                 let conn = app_state.conn.lock().unwrap();
 
                 if loaded_for_library_id != Some(app_state.library_id) {
@@ -1807,22 +1875,65 @@ fn spawn_analysis_loop(app: tauri::AppHandle) {
                     loaded_for_library_id = Some(app_state.library_id);
                 }
 
-                if tagging_model.is_none() {
-                    // Resolving the model id is cheap (no ONNX session) —
-                    // check the ticket 030 decision #4 gate before paying
-                    // for TaggingModel::load's real DirectML session, not
-                    // after. Once loaded (below), never re-checked: a
-                    // notice only ever moves pending → accepted, never
-                    // back, so an already-loaded session is never wrong.
-                    let tagging_model_id = lenslocker_ml::similarity::resolve_siglip_model_id(&conn)?;
-                    if !lenslocker_catalog::model_upgrade_notice_is_pending_for(&conn, tagging_model_id)? {
-                        let model = lenslocker_ml::backlog::TaggingModel::load(&conn, &models_dir)?;
-                        let mirror = lenslocker_catalog::VecMirror::build(&conn, model.model_id(), lenslocker_ml::tagging::EMBEDDING_DIM)?;
-                        tagging_model = Some(model);
-                        vec_mirror = Some(mirror);
-                    }
+                if tagging_model.is_some() {
+                    return Ok(None);
                 }
 
+                // Resolving the model id is cheap (no ONNX session) —
+                // check the ticket 030 decision #4 gate before paying for
+                // TaggingModel::load's real DirectML session, not after.
+                // Once loaded (below), never re-checked: a notice only
+                // ever moves pending → accepted, never back, so an
+                // already-loaded session is never wrong.
+                let tagging_model_id = lenslocker_ml::similarity::resolve_siglip_model_id(&conn)?;
+                if lenslocker_catalog::model_upgrade_notice_is_pending_for(&conn, tagging_model_id)? {
+                    Ok(None)
+                } else {
+                    Ok(Some(tagging_model_id))
+                }
+            });
+
+            match load_check {
+                Ok(Some(tagging_model_id)) => {
+                    let for_library_id = loaded_for_library_id;
+                    match lenslocker_ml::backlog::TaggingModel::load(tagging_model_id, &models_dir) {
+                        Ok(model) => {
+                            // The live library could have changed while
+                            // that slow load ran with no lock held —
+                            // discard rather than store a VecMirror built
+                            // against the wrong catalog; the next
+                            // iteration resolves fresh against whatever
+                            // library is live now.
+                            let mirror_result: CmdResult<Option<lenslocker_catalog::VecMirror>> =
+                                with_ready(&app.state::<Mutex<LibraryState>>(), |app_state| {
+                                    if Some(app_state.library_id) != for_library_id {
+                                        return Ok(None);
+                                    }
+                                    let conn = app_state.conn.lock().unwrap();
+                                    Ok(Some(lenslocker_catalog::VecMirror::build(&conn, model.model_id(), lenslocker_ml::tagging::EMBEDDING_DIM)?))
+                                });
+                            match mirror_result {
+                                Ok(Some(mirror)) => {
+                                    tagging_model = Some(model);
+                                    vec_mirror = Some(mirror);
+                                }
+                                Ok(None) => {}
+                                Err(err) => eprintln!("[analysis] vec mirror build failed, will retry: {err}"),
+                            }
+                        }
+                        Err(err) => eprintln!("[analysis] tagging model load failed, will retry: {err}"),
+                    }
+                }
+                Ok(None) => {}
+                // A real error here (not just "no library yet") will surface
+                // again from the run_one_analysis_iteration call below, which
+                // already drives the outer match's backoff — no need to
+                // duplicate that handling here.
+                Err(_) => {}
+            }
+
+            let result: CmdResult<(usize, usize)> = with_ready(&app.state::<Mutex<LibraryState>>(), |app_state| {
+                let conn = app_state.conn.lock().unwrap();
                 run_one_analysis_iteration(&conn, tagging_model.as_mut().zip(vec_mirror.as_ref()), &models_dir, app_state.paths.root())
             });
 
@@ -1975,6 +2086,20 @@ pub fn run() {
             app.manage(Mutex::new(library_state));
             app.manage(ImportLock::default());
             app.manage(AnalysisLock::default());
+            // Must happen before any `lenslocker_ml::load_session`/
+            // `load_session_cpu` call (every real-model test in
+            // `crates/ml/tests` calls this first) — it points ONNX
+            // Runtime's global environment at the bundled DirectML dylib.
+            // Skipping it left the environment uninitialized for
+            // `spawn_analysis_loop`'s first session load, which is
+            // undefined behavior against the C ONNX Runtime API, not a
+            // clean Rust error. Failure here (e.g. models not installed
+            // yet) is not fatal to the app — just logged, matching how the
+            // analysis loop already tolerates a missing-models error on
+            // every iteration.
+            if let Err(err) = lenslocker_ml::init(&lenslocker_ml::dylib_path()) {
+                eprintln!("[ml] onnxruntime init failed, analysis disabled until models are installed correctly: {err}");
+            }
             // Started once, unconditionally — the loop itself checks for a
             // ready library on every iteration and idles otherwise (see
             // its own doc comment), so it's safe to start before first-run
@@ -2009,6 +2134,8 @@ pub fn run() {
             reject_auto_tag,
             bulk_add_tag,
             bulk_remove_tag,
+            rename_tag,
+            delete_tag,
             list_tags,
             list_sources,
             list_saved_albums,
@@ -2017,6 +2144,8 @@ pub fn run() {
             list_face_clusters,
             list_persons,
             name_face_cluster,
+            rename_person,
+            clear_face_cluster_name,
             set_face_cluster_hidden,
             merge_face_clusters,
             list_cluster_face_crops,
