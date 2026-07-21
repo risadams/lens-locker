@@ -1669,11 +1669,37 @@ const ANALYSIS_IDLE_SLEEP_SECS: u64 = 5;
 /// restart.
 const ANALYSIS_ERROR_BACKOFF_SECS: u64 = 300;
 
+/// A model-version bump awaiting the user's "run now" (ticket 030
+/// decision #4) — mirrors [`lenslocker_catalog::ModelUpgradeNotice`],
+/// dropping `model_id` (the frontend only needs it to send back on
+/// [`accept_model_upgrade`], via `id`, not to interpret it itself).
+/// `backlog_count` is the real number of images "run now" will process —
+/// decision #4's notice text asks for "re-analysis takes ~X"; a duration
+/// estimate would be fabricated (no profiling of this app's real
+/// per-image inference time exists yet, the same "flagged unconfirmed,
+/// not guessed at" discipline ML-SPEC.md §10 applies to installer size),
+/// so this substitutes the one honest number already on hand.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct ModelUpgradeNoticeDto {
+    id: i64,
+    model_name: String,
+    old_version: String,
+    new_version: String,
+    backlog_count: i64,
+}
+
+fn model_upgrade_notice_dto(conn: &Connection, notice: lenslocker_catalog::ModelUpgradeNotice) -> CmdResult<ModelUpgradeNoticeDto> {
+    let backlog_count = lenslocker_catalog::count_images_needing_embedding(conn, notice.model_id)?;
+    Ok(ModelUpgradeNoticeDto { id: notice.id, model_name: notice.model_name, old_version: notice.old_version, new_version: notice.new_version, backlog_count })
+}
+
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct AnalysisProgressPayload {
     tagging_remaining: i64,
     faces_remaining: i64,
+    pending_upgrades: Vec<ModelUpgradeNoticeDto>,
 }
 
 /// How long to sleep before the next iteration — factored out of the loop
@@ -1706,19 +1732,35 @@ fn to_ml_face_thresholds(settings: lenslocker_catalog::FaceThresholdSettings) ->
 /// functions already carry their own real (if `#[ignore]`d, real-model)
 /// tests in `crates/ml`; this is orchestration, not new logic to
 /// re-verify here.
+///
+/// `tagging` is `None` when [`spawn_analysis_loop`] deliberately hasn't
+/// loaded a `TaggingModel` this session — either a pending upgrade notice
+/// gates it (ticket 030 decision #4: no GPU/CPU cost until the user
+/// accepts), or a prior iteration's error left it unloaded. The face half
+/// resolves its own model id and checks the same gate here directly,
+/// since (unlike SigLIP) resolving SFace's id costs nothing — no DirectML
+/// session, no need for the caller to pre-check before this function runs.
 fn run_one_analysis_iteration(
     conn: &Connection,
-    tagging_model: &mut lenslocker_ml::backlog::TaggingModel,
-    vec_mirror: &lenslocker_catalog::VecMirror,
+    tagging: Option<(&mut lenslocker_ml::backlog::TaggingModel, &lenslocker_catalog::VecMirror)>,
     models_dir: &Path,
     library_root: &Path,
 ) -> CmdResult<(usize, usize)> {
-    let tag_storage_threshold = lenslocker_catalog::get_app_settings(conn)?.tag_storage_threshold;
-    let tagging_processed = tagging_model.process_backlog_batch(conn, vec_mirror, ANALYSIS_TAGGING_BATCH_SIZE, tag_storage_threshold)?;
+    let tagging_processed = match tagging {
+        Some((tagging_model, vec_mirror)) => {
+            let tag_storage_threshold = lenslocker_catalog::get_app_settings(conn)?.tag_storage_threshold;
+            tagging_model.process_backlog_batch(conn, vec_mirror, ANALYSIS_TAGGING_BATCH_SIZE, tag_storage_threshold)?
+        }
+        None => 0,
+    };
 
-    let face_thresholds = to_ml_face_thresholds(lenslocker_catalog::get_face_thresholds(conn)?);
-    let faces_processed =
-        lenslocker_ml::backlog::process_face_backlog_batch(conn, models_dir, library_root, ANALYSIS_FACE_BATCH_SIZE, &face_thresholds)?;
+    let faces_model_id = lenslocker_ml::backlog::resolve_sface_model_id(conn)?;
+    let faces_processed = if lenslocker_catalog::model_upgrade_notice_is_pending_for(conn, faces_model_id)? {
+        0
+    } else {
+        let face_thresholds = to_ml_face_thresholds(lenslocker_catalog::get_face_thresholds(conn)?);
+        lenslocker_ml::backlog::process_face_backlog_batch(conn, models_dir, library_root, ANALYSIS_FACE_BATCH_SIZE, &face_thresholds)?
+    };
 
     Ok((tagging_processed, faces_processed))
 }
@@ -1764,19 +1806,22 @@ fn spawn_analysis_loop(app: tauri::AppHandle) {
                 }
 
                 if tagging_model.is_none() {
-                    let model = lenslocker_ml::backlog::TaggingModel::load(&conn, &models_dir)?;
-                    let mirror = lenslocker_catalog::VecMirror::build(&conn, model.model_id(), lenslocker_ml::tagging::EMBEDDING_DIM)?;
-                    tagging_model = Some(model);
-                    vec_mirror = Some(mirror);
+                    // Resolving the model id is cheap (no ONNX session) —
+                    // check the ticket 030 decision #4 gate before paying
+                    // for TaggingModel::load's real DirectML session, not
+                    // after. Once loaded (below), never re-checked: a
+                    // notice only ever moves pending → accepted, never
+                    // back, so an already-loaded session is never wrong.
+                    let tagging_model_id = lenslocker_ml::similarity::resolve_siglip_model_id(&conn)?;
+                    if !lenslocker_catalog::model_upgrade_notice_is_pending_for(&conn, tagging_model_id)? {
+                        let model = lenslocker_ml::backlog::TaggingModel::load(&conn, &models_dir)?;
+                        let mirror = lenslocker_catalog::VecMirror::build(&conn, model.model_id(), lenslocker_ml::tagging::EMBEDDING_DIM)?;
+                        tagging_model = Some(model);
+                        vec_mirror = Some(mirror);
+                    }
                 }
 
-                run_one_analysis_iteration(
-                    &conn,
-                    tagging_model.as_mut().unwrap(),
-                    vec_mirror.as_ref().unwrap(),
-                    &models_dir,
-                    app_state.paths.root(),
-                )
+                run_one_analysis_iteration(&conn, tagging_model.as_mut().zip(vec_mirror.as_ref()), &models_dir, app_state.paths.root())
             });
 
             match result {
@@ -1817,26 +1862,36 @@ fn spawn_analysis_loop(app: tauri::AppHandle) {
     });
 }
 
-/// Both backlogs' remaining sizes — shared by [`emit_analysis_progress`]
-/// (pushed after every loop iteration) and [`get_analysis_status`] (pulled
-/// once at boot, mirroring how the People/review-queue badges each have
-/// their own explicit boot-time refresh rather than waiting for a push).
-fn analysis_remaining_counts(conn: &Connection) -> CmdResult<(i64, i64)> {
+/// Both backlogs' remaining sizes plus any pending model-upgrade notices
+/// — shared by [`emit_analysis_progress`] (pushed after every loop
+/// iteration) and [`get_analysis_status`] (pulled once at boot, mirroring
+/// how the People/review-queue badges each have their own explicit
+/// boot-time refresh rather than waiting for a push). Remaining counts
+/// deliberately include gated (pending-notice) images — hiding the real
+/// number would repeat exactly the "leaving stale embeddings forever with
+/// no visibility" failure ticket 030 decision #4 rejects; the badge
+/// honestly reflects backlog size, the popover explains why it isn't
+/// shrinking.
+fn analysis_remaining_counts(conn: &Connection) -> CmdResult<(i64, i64, Vec<ModelUpgradeNoticeDto>)> {
     let tagging_remaining = lenslocker_catalog::count_images_needing_embedding(conn, lenslocker_ml::similarity::resolve_siglip_model_id(conn)?)?;
     let faces_remaining = lenslocker_catalog::count_images_needing_embedding(conn, lenslocker_ml::backlog::resolve_sface_model_id(conn)?)?;
-    Ok((tagging_remaining, faces_remaining))
+    let pending_upgrades = lenslocker_catalog::pending_model_upgrade_notices(conn)?
+        .into_iter()
+        .map(|notice| model_upgrade_notice_dto(conn, notice))
+        .collect::<CmdResult<Vec<_>>>()?;
+    Ok((tagging_remaining, faces_remaining, pending_upgrades))
 }
 
 /// Queries both backlogs' remaining sizes and emits `analysis-progress` —
 /// called after every iteration (including idle ones, so the frontend
 /// badge reliably reaches 0/hides once a backlog actually empties out).
 fn emit_analysis_progress(app: &tauri::AppHandle) {
-    let Ok((tagging_remaining, faces_remaining)) =
+    let Ok((tagging_remaining, faces_remaining, pending_upgrades)) =
         with_ready(&app.state::<Mutex<LibraryState>>(), |app_state| analysis_remaining_counts(&app_state.conn.lock().unwrap()))
     else {
         return;
     };
-    let _ = app.emit("analysis-progress", AnalysisProgressPayload { tagging_remaining, faces_remaining });
+    let _ = app.emit("analysis-progress", AnalysisProgressPayload { tagging_remaining, faces_remaining, pending_upgrades });
 }
 
 #[derive(Debug, Serialize)]
@@ -1845,6 +1900,7 @@ struct AnalysisStatusDto {
     tagging_remaining: i64,
     faces_remaining: i64,
     paused: bool,
+    pending_upgrades: Vec<ModelUpgradeNoticeDto>,
 }
 
 /// Boot-time pull for the ambient badge, mirroring `list_review_queue`/
@@ -1854,8 +1910,8 @@ struct AnalysisStatusDto {
 #[tauri::command]
 fn get_analysis_status(state: tauri::State<Mutex<LibraryState>>, lock: tauri::State<AnalysisLock>) -> CmdResult<AnalysisStatusDto> {
     with_ready(&state, |app_state| {
-        let (tagging_remaining, faces_remaining) = analysis_remaining_counts(&app_state.conn.lock().unwrap())?;
-        Ok(AnalysisStatusDto { tagging_remaining, faces_remaining, paused: lock.is_paused() })
+        let (tagging_remaining, faces_remaining, pending_upgrades) = analysis_remaining_counts(&app_state.conn.lock().unwrap())?;
+        Ok(AnalysisStatusDto { tagging_remaining, faces_remaining, paused: lock.is_paused(), pending_upgrades })
     })
 }
 
@@ -1867,6 +1923,18 @@ fn get_analysis_status(state: tauri::State<Mutex<LibraryState>>, lock: tauri::St
 #[tauri::command]
 fn set_analysis_paused(lock: tauri::State<AnalysisLock>, paused: bool) {
     lock.paused.store(paused, std::sync::atomic::Ordering::SeqCst);
+}
+
+/// The user's "run now" on a pending model-upgrade notice (ticket 030
+/// decision #4) — opens [`run_one_analysis_iteration`]/[`spawn_analysis_loop`]'s
+/// gate for that model permanently; the background loop picks the newly-
+/// ungated backlog up on its next iteration with no further action needed.
+#[tauri::command]
+fn accept_model_upgrade(state: tauri::State<Mutex<LibraryState>>, notice_id: i64) -> CmdResult<()> {
+    with_ready(&state, |app_state| {
+        lenslocker_catalog::accept_model_upgrade_notice(&app_state.conn.lock().unwrap(), notice_id)?;
+        Ok(())
+    })
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1894,6 +1962,7 @@ pub fn run() {
             cancel_import,
             get_analysis_status,
             set_analysis_paused,
+            accept_model_upgrade,
             pick_library_folder,
             inspect_library_folder,
             create_library,

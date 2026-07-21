@@ -22,6 +22,9 @@ fn migrations() -> Migrations<'static> {
         // ML-SPEC.md Milestone ML-5 — see migrations/0005_similarity_search_floor.sql's
         // own header comment.
         M::up(include_str!("../migrations/0005_similarity_search_floor.sql")),
+        // ML-SPEC.md Milestone ML-6 — see migrations/0006_model_upgrade_notices.sql's
+        // own header comment.
+        M::up(include_str!("../migrations/0006_model_upgrade_notices.sql")),
     ])
 }
 
@@ -216,23 +219,105 @@ pub fn confirm_auto_tag(conn: &Connection, image_id: i64, tag_name: &str) -> rus
 // Milestone ML-2 first real callers) ──────────────────────────────────────
 
 /// Finds or creates the `models` row identifying a specific model
-/// name+version, returning its id. `dimension`/`license_note` only take
-/// effect on first insert — an existing row wins on a repeat call
-/// (matching [`find_or_create_tag`]'s find-first pattern), since changing
-/// either without a version bump would silently corrupt how
-/// already-stored embeddings for that model are interpreted.
-pub fn find_or_create_model(conn: &Connection, name: &str, version: &str, dimension: i64, license_note: &str) -> rusqlite::Result<i64> {
+/// name+version, returning its id and whether this call is the one that
+/// just created it. `dimension`/`license_note` only take effect on first
+/// insert — an existing row wins on a repeat call (matching
+/// [`find_or_create_tag`]'s find-first pattern), since changing either
+/// without a version bump would silently corrupt how already-stored
+/// embeddings for that model are interpreted. The `is_new` flag lets a
+/// caller detect a genuine version bump exactly once — the moment the row
+/// is inserted — to drive [`create_model_upgrade_notice`] (ticket 030
+/// decision #4); every later call for the same name+version finds the
+/// existing row and reports `is_new = false`.
+pub fn find_or_create_model(conn: &Connection, name: &str, version: &str, dimension: i64, license_note: &str) -> rusqlite::Result<(i64, bool)> {
     if let Some(id) = conn
         .query_row("SELECT id FROM models WHERE name = ?1 AND version = ?2", params![name, version], |row| row.get(0))
         .optional()?
     {
-        return Ok(id);
+        return Ok((id, false));
     }
     conn.execute(
         "INSERT INTO models (name, version, dimension, license_note) VALUES (?1, ?2, ?3, ?4)",
         params![name, version, dimension, license_note],
     )?;
-    Ok(conn.last_insert_rowid())
+    Ok((conn.last_insert_rowid(), true))
+}
+
+/// The most recent *other* version already on record for `name`, excluding
+/// `exclude_model_id` (the row just resolved this call) — a `Some` return
+/// means a genuine prior version exists, i.e. this is a real upgrade, not
+/// a first-ever install. "Most recent" is by `bundled_at`, since a name
+/// could in principle accumulate more than two versions over the app's
+/// life and the notice should reference the one it's actually superseding.
+pub fn most_recent_other_model_version(conn: &Connection, name: &str, exclude_model_id: i64) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT version FROM models WHERE name = ?1 AND id != ?2 ORDER BY bundled_at DESC LIMIT 1",
+        params![name, exclude_model_id],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
+/// Records a one-time "a newer model is available" notice (ticket 030
+/// decision #4) — call only when [`find_or_create_model`] just inserted a
+/// new row (`is_new = true`) *and* [`most_recent_other_model_version`]
+/// found a prior version, i.e. a genuine upgrade rather than first-ever
+/// install. Idempotent via `idx_model_upgrade_notices_model`'s unique
+/// index on `model_id`: a duplicate call for the same new model row is a
+/// silent no-op rather than an error, since `INSERT OR IGNORE` is the
+/// simplest way to tolerate a caller re-checking state it's unsure about.
+pub fn create_model_upgrade_notice(conn: &Connection, model_id: i64, model_name: &str, old_version: &str, new_version: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT OR IGNORE INTO model_upgrade_notices (model_id, model_name, old_version, new_version) VALUES (?1, ?2, ?3, ?4)",
+        params![model_id, model_name, old_version, new_version],
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ModelUpgradeNotice {
+    pub id: i64,
+    pub model_id: i64,
+    pub model_name: String,
+    pub old_version: String,
+    pub new_version: String,
+}
+
+/// All notices still awaiting the user's "run now" — the background loop
+/// gates a model's actual (expensive) processing on this being empty for
+/// that `model_id`; the UI popover renders one per row with a "Run now"
+/// action wired to [`accept_model_upgrade_notice`].
+pub fn pending_model_upgrade_notices(conn: &Connection) -> rusqlite::Result<Vec<ModelUpgradeNotice>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, model_id, model_name, old_version, new_version FROM model_upgrade_notices WHERE status = 'pending' ORDER BY created_at",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok(ModelUpgradeNotice { id: row.get(0)?, model_id: row.get(1)?, model_name: row.get(2)?, old_version: row.get(3)?, new_version: row.get(4)? })
+    })?;
+    rows.collect()
+}
+
+/// True while `model_id` has an unresolved upgrade notice — the
+/// background loop's gate: skip loading/running that model at all (no
+/// GPU/CPU cost) until this returns false.
+pub fn model_upgrade_notice_is_pending_for(conn: &Connection, model_id: i64) -> rusqlite::Result<bool> {
+    conn.query_row(
+        "SELECT EXISTS(SELECT 1 FROM model_upgrade_notices WHERE model_id = ?1 AND status = 'pending')",
+        [model_id],
+        |row| row.get(0),
+    )
+}
+
+/// The user's "run now" — opens the gate in [`model_upgrade_notice_is_pending_for`]
+/// permanently for that model (no "later" state to revert to; matches
+/// ticket 030 decision #4, which only ever offers "run now or later", not
+/// a way to dismiss the underlying re-analysis need).
+pub fn accept_model_upgrade_notice(conn: &Connection, notice_id: i64) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE model_upgrade_notices SET status = 'accepted', resolved_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1",
+        [notice_id],
+    )?;
+    Ok(())
 }
 
 /// Stores (or replaces) `image_id`'s embedding for `model_id`. `vector` is
@@ -1847,11 +1932,72 @@ mod tests {
     #[test]
     fn find_or_create_model_is_idempotent_and_keyed_on_name_and_version() {
         let conn = migrated_conn();
-        let id_a = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
-        let id_b = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
-        let id_c = super::find_or_create_model(&conn, "siglip-so400m", "v2", 1152, "Apache-2.0").unwrap();
+        let (id_a, new_a) = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+        let (id_b, new_b) = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+        let (id_c, new_c) = super::find_or_create_model(&conn, "siglip-so400m", "v2", 1152, "Apache-2.0").unwrap();
         assert_eq!(id_a, id_b);
         assert_ne!(id_a, id_c);
+        assert!(new_a, "first call for a name+version ever should report is_new");
+        assert!(!new_b, "a repeat call for the same name+version should find the existing row");
+        assert!(new_c, "a new version for an already-seen name should also report is_new");
+    }
+
+    #[test]
+    fn most_recent_other_model_version_is_none_on_first_ever_install() {
+        let conn = migrated_conn();
+        let (id, _) = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+        assert_eq!(super::most_recent_other_model_version(&conn, "siglip-so400m", id).unwrap(), None);
+    }
+
+    #[test]
+    fn most_recent_other_model_version_finds_the_prior_version_on_a_real_upgrade() {
+        let conn = migrated_conn();
+        super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+        let (new_id, _) = super::find_or_create_model(&conn, "siglip-so400m", "v2", 1152, "Apache-2.0").unwrap();
+        assert_eq!(super::most_recent_other_model_version(&conn, "siglip-so400m", new_id).unwrap(), Some("v1".to_string()));
+    }
+
+    #[test]
+    fn most_recent_other_model_version_ignores_a_different_models_name() {
+        let conn = migrated_conn();
+        let (siglip_id, _) = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+        super::find_or_create_model(&conn, "sface-2021dec", "v1", 128, "Apache-2.0").unwrap();
+        assert_eq!(super::most_recent_other_model_version(&conn, "siglip-so400m", siglip_id).unwrap(), None);
+    }
+
+    #[test]
+    fn create_model_upgrade_notice_is_idempotent_and_shows_up_as_pending() {
+        let conn = migrated_conn();
+        let (new_id, _) = super::find_or_create_model(&conn, "siglip-so400m", "v2", 1152, "Apache-2.0").unwrap();
+        super::create_model_upgrade_notice(&conn, new_id, "siglip-so400m", "v1", "v2").unwrap();
+        super::create_model_upgrade_notice(&conn, new_id, "siglip-so400m", "v1", "v2").unwrap();
+
+        let pending = super::pending_model_upgrade_notices(&conn).unwrap();
+        assert_eq!(pending.len(), 1, "a duplicate create call must not produce a second row");
+        assert_eq!(pending[0].model_id, new_id);
+        assert_eq!(pending[0].old_version, "v1");
+        assert_eq!(pending[0].new_version, "v2");
+        assert!(super::model_upgrade_notice_is_pending_for(&conn, new_id).unwrap());
+    }
+
+    #[test]
+    fn accepting_a_model_upgrade_notice_closes_the_gate() {
+        let conn = migrated_conn();
+        let (new_id, _) = super::find_or_create_model(&conn, "siglip-so400m", "v2", 1152, "Apache-2.0").unwrap();
+        super::create_model_upgrade_notice(&conn, new_id, "siglip-so400m", "v1", "v2").unwrap();
+        let notice_id = super::pending_model_upgrade_notices(&conn).unwrap()[0].id;
+
+        super::accept_model_upgrade_notice(&conn, notice_id).unwrap();
+
+        assert!(!super::model_upgrade_notice_is_pending_for(&conn, new_id).unwrap());
+        assert!(super::pending_model_upgrade_notices(&conn).unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_model_with_no_notice_at_all_is_not_pending() {
+        let conn = migrated_conn();
+        let (id, _) = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+        assert!(!super::model_upgrade_notice_is_pending_for(&conn, id).unwrap());
     }
 
     #[test]
@@ -1859,7 +2005,7 @@ mod tests {
         let conn = migrated_conn();
         let image_with = insert_test_image(&conn);
         let image_without = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap().0;
 
         super::upsert_embedding(&conn, image_with, model_id, &[0u8; 4], 1).unwrap();
 
@@ -1873,7 +2019,7 @@ mod tests {
         let a = insert_test_image(&conn);
         let b = insert_test_image(&conn);
         let _c = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap().0;
 
         let backlog = super::images_needing_embedding(&conn, model_id, 2).unwrap();
         assert_eq!(backlog, vec![a, b]);
@@ -1885,7 +2031,7 @@ mod tests {
         let with_embedding = insert_test_image(&conn);
         let _without_a = insert_test_image(&conn);
         let _without_b = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "siglip-so400m", "v1", 1152, "Apache-2.0").unwrap().0;
         super::upsert_embedding(&conn, with_embedding, model_id, &[0u8; 4], 1).unwrap();
 
         assert_eq!(super::count_images_needing_embedding(&conn, model_id).unwrap(), 2);
@@ -1895,7 +2041,7 @@ mod tests {
     fn upsert_embedding_replaces_the_vector_on_a_second_call() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "siglip-so400m", "v1", 4, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "siglip-so400m", "v1", 4, "Apache-2.0").unwrap().0;
 
         super::upsert_embedding(&conn, image_id, model_id, &[1, 2, 3, 4], 1).unwrap();
         super::upsert_embedding(&conn, image_id, model_id, &[9, 9, 9, 9], 1).unwrap();
@@ -1931,7 +2077,7 @@ mod tests {
     fn create_cluster_with_member_makes_an_unnamed_cluster() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
 
         let cluster_id = super::create_cluster_with_member(&conn, detection_id).unwrap();
@@ -1948,7 +2094,7 @@ mod tests {
     fn clustered_face_embeddings_excludes_unclustered_and_hidden() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
 
         let clustered = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         super::create_cluster_with_member(&conn, clustered).unwrap();
@@ -1969,7 +2115,7 @@ mod tests {
     fn attach_face_detection_to_cluster_moves_it_and_touches_updated_at() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let first = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let cluster_a = super::create_cluster_with_member(&conn, first).unwrap();
         conn.execute("INSERT INTO face_clusters DEFAULT VALUES", []).unwrap();
@@ -1987,7 +2133,7 @@ mod tests {
     fn queue_face_match_review_inserts_a_pending_row() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         conn.execute("INSERT INTO persons (name) VALUES ('Alex')", []).unwrap();
         let person_id = conn.last_insert_rowid();
@@ -2004,7 +2150,7 @@ mod tests {
     fn name_cluster_creates_a_new_person_and_assigns_it() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let cluster_id = super::create_cluster_with_member(&conn, detection_id).unwrap();
 
@@ -2020,7 +2166,7 @@ mod tests {
     fn name_cluster_reuses_an_existing_person_by_exact_name() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let first_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let cluster_a = super::create_cluster_with_member(&conn, first_detection).unwrap();
         let second_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
@@ -2038,7 +2184,7 @@ mod tests {
     fn name_cluster_matches_an_existing_person_case_insensitively() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let first_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let cluster_a = super::create_cluster_with_member(&conn, first_detection).unwrap();
         let second_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
@@ -2056,7 +2202,7 @@ mod tests {
     fn set_cluster_hidden_toggles_and_is_reversible() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let cluster_id = super::create_cluster_with_member(&conn, detection_id).unwrap();
 
@@ -2073,7 +2219,7 @@ mod tests {
     fn merge_clusters_reassigns_the_losers_detections_and_deletes_its_row() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
 
         let keeper_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let keeper_id = super::create_cluster_with_member(&conn, keeper_detection).unwrap();
@@ -2097,7 +2243,7 @@ mod tests {
     fn merge_clusters_with_no_resulting_name_leaves_the_keepers_existing_name_untouched() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let keeper_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let keeper_id = super::create_cluster_with_member(&conn, keeper_detection).unwrap();
         let alice_id = super::name_cluster(&conn, keeper_id, "Alice").unwrap();
@@ -2114,7 +2260,7 @@ mod tests {
     fn merge_clusters_with_a_resulting_name_resolves_it_via_find_or_create_person() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let keeper_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let keeper_id = super::create_cluster_with_member(&conn, keeper_detection).unwrap();
         super::name_cluster(&conn, keeper_id, "Alice").unwrap();
@@ -2135,7 +2281,7 @@ mod tests {
     fn merge_clusters_with_a_brand_new_typed_name_creates_that_person() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let keeper_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let keeper_id = super::create_cluster_with_member(&conn, keeper_detection).unwrap();
         super::name_cluster(&conn, keeper_id, "Alice").unwrap();
@@ -2160,7 +2306,7 @@ mod tests {
     fn move_detections_to_new_cluster_reassigns_only_the_selected_detections() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let stays = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let source_cluster_id = super::create_cluster_with_member(&conn, stays).unwrap();
         let moves = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
@@ -2178,7 +2324,7 @@ mod tests {
     fn move_detections_to_new_cluster_deletes_a_source_left_with_zero_detections() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let only_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let source_cluster_id = super::create_cluster_with_member(&conn, only_detection).unwrap();
 
@@ -2192,7 +2338,7 @@ mod tests {
     fn move_detections_to_new_cluster_leaves_a_non_empty_source_alone() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let stays = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let source_cluster_id = super::create_cluster_with_member(&conn, stays).unwrap();
         let moves = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
@@ -2208,7 +2354,7 @@ mod tests {
     fn move_detections_to_new_cluster_with_a_person_name_resolves_and_sets_it() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         super::create_cluster_with_member(&conn, detection_id).unwrap();
         conn.execute("INSERT INTO persons (name) VALUES ('Alice')", []).unwrap();
@@ -2224,7 +2370,7 @@ mod tests {
     fn move_detections_to_new_cluster_can_move_several_detections_at_once() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let a = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let cluster_id = super::create_cluster_with_member(&conn, a).unwrap();
         let b = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
@@ -2245,7 +2391,7 @@ mod tests {
     #[test]
     fn list_face_clusters_sorts_by_photo_count_descending_and_excludes_hidden_by_default() {
         let conn = migrated_conn();
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
 
         // Cluster A: two photos.
         let image_1 = insert_test_image(&conn);
@@ -2279,7 +2425,7 @@ mod tests {
     fn people_for_image_splits_named_chips_from_unnamed_clusters_and_unclustered() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
 
         let named_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let named_cluster = super::create_cluster_with_member(&conn, named_detection).unwrap();
@@ -2309,7 +2455,7 @@ mod tests {
     fn face_crops_for_cluster_skips_detections_with_no_crop_yet() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
 
         let first = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         let cluster_id = super::create_cluster_with_member(&conn, first).unwrap();
@@ -2329,7 +2475,7 @@ mod tests {
     fn pending_face_review_count_only_counts_pending() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         conn.execute("INSERT INTO persons (name) VALUES ('Alex')", []).unwrap();
         let person_id = conn.last_insert_rowid();
@@ -2347,7 +2493,7 @@ mod tests {
     fn list_pending_face_matches_reports_only_pending_with_person_and_crop() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         super::set_face_crop_thumbnail_path(&conn, detection_id, "thumbnails/faces/00/1.jpg").unwrap();
         conn.execute("INSERT INTO persons (name) VALUES ('Alex')", []).unwrap();
@@ -2373,7 +2519,7 @@ mod tests {
     fn confirm_face_match_creates_a_new_cluster_for_the_suggested_person_and_resolves_the_queue() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         conn.execute("INSERT INTO persons (name) VALUES ('Alex')", []).unwrap();
         let person_id = conn.last_insert_rowid();
@@ -2394,7 +2540,7 @@ mod tests {
     fn dismiss_face_match_creates_an_unnamed_cluster_and_resolves_the_queue() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
         conn.execute("INSERT INTO persons (name) VALUES ('Alex')", []).unwrap();
         let person_id = conn.last_insert_rowid();
@@ -2424,7 +2570,7 @@ mod tests {
     fn set_face_crop_thumbnail_path_updates_the_row() {
         let conn = migrated_conn();
         let image_id = insert_test_image(&conn);
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
         let detection_id = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
 
         super::set_face_crop_thumbnail_path(&conn, detection_id, "thumbnails/faces/00/1.jpg").unwrap();
@@ -2737,7 +2883,7 @@ mod tests {
         let hidden_alice_photo = insert_full_image(&conn, library_id, 52, "jpeg", "2026-01-03T00:00:00Z", 100, "D:/src", "c.jpg");
         let nobodys_photo = insert_full_image(&conn, library_id, 53, "jpeg", "2026-01-04T00:00:00Z", 100, "D:/src", "d.jpg");
 
-        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap().0;
 
         let alice_detection = super::insert_face_detection(&conn, &new_face(alices_photo, model_id, &[1])).unwrap();
         let alice_cluster = super::create_cluster_with_member(&conn, alice_detection).unwrap();
@@ -2769,7 +2915,7 @@ mod tests {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
         let image_id = insert_full_image(&conn, library_id, 60, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
-        let model_id = super::find_or_create_model(&conn, "siglip", "v1", 4, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "siglip", "v1", 4, "Apache-2.0").unwrap().0;
 
         assert_eq!(super::embedding_for_image(&conn, image_id, model_id).unwrap(), None);
     }
@@ -2779,7 +2925,7 @@ mod tests {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
         let image_id = insert_full_image(&conn, library_id, 61, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
-        let model_id = super::find_or_create_model(&conn, "siglip", "v1", 4, "Apache-2.0").unwrap();
+        let model_id = super::find_or_create_model(&conn, "siglip", "v1", 4, "Apache-2.0").unwrap().0;
         super::upsert_embedding(&conn, image_id, model_id, &[1, 2, 3, 4], 4).unwrap();
 
         assert_eq!(super::embedding_for_image(&conn, image_id, model_id).unwrap(), Some(vec![1, 2, 3, 4]));

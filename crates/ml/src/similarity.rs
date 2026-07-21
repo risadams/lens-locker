@@ -35,8 +35,10 @@ const SIGLIP_LICENSE_NOTE: &str = "Apache-2.0 (google/siglip-so400m-patch14-384,
 /// than requiring the backlog to have run first) is harmless: an empty
 /// model row with zero embeddings just means `VecMirror::build` loads
 /// nothing, which the caller already has to handle as "not analyzed yet."
+/// Also the detection point for ticket 030 decision #4's re-analysis
+/// prompt — see [`crate::resolve_model_id_and_maybe_notice`].
 pub fn resolve_siglip_model_id(conn: &Connection) -> rusqlite::Result<i64> {
-    lenslocker_catalog::find_or_create_model(conn, SIGLIP_MODEL_NAME, SIGLIP_MODEL_VERSION, tagging::EMBEDDING_DIM as i64, SIGLIP_LICENSE_NOTE)
+    crate::resolve_model_id_and_maybe_notice(conn, SIGLIP_MODEL_NAME, SIGLIP_MODEL_VERSION, tagging::EMBEDDING_DIM as i64, SIGLIP_LICENSE_NOTE)
 }
 
 /// Embeds one typed search phrase for text-to-image search — a single,

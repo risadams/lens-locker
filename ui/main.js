@@ -1917,10 +1917,22 @@ renderSortPop();
 // runs, regardless of which view is open.
 let analysisPaused = false;
 
-function renderAnalysisPop(taggingRemaining, facesRemaining) {
+// A pending entry means ticket 030 decision #4's gate is closed for that
+// model — the backend already excludes it from real processing, so this
+// is purely "ask, then let refreshAnalysisBadge() pull the real new
+// counts" rather than predicting them client-side.
+function renderAnalysisPop(taggingRemaining, facesRemaining, pendingUpgrades) {
   const pop = document.getElementById('analysisPop');
   const total = taggingRemaining + facesRemaining;
+  const upgrades = pendingUpgrades || [];
+  const upgradesHtml = upgrades.map(u => `
+    <div style="padding:6px 8px; font-size:11.5px; line-height:1.5">
+      A newer ${escapeHtml(u.modelName)} model is available (${escapeHtml(u.oldVersion)} → ${escapeHtml(u.newVersion)}). Re-analyzing will process ${u.backlogCount.toLocaleString()} image${u.backlogCount === 1 ? '' : 's'}.
+      <button class="popover-link run-upgrade-btn" data-notice-id="${u.id}" style="display:block; width:100%; text-align:left; padding:4px 0">Run now</button>
+    </div>
+  `).join('');
   pop.innerHTML = `
+    ${upgradesHtml}${upgradesHtml ? '<div class="popover-divider"></div>' : ''}
     <div style="padding:6px 8px; font-size:11.5px; color:var(--text-muted); line-height:1.6">
       ${total === 0 ? 'Everything is analyzed.' : `Tagging: ${taggingRemaining} left<br>Faces: ${facesRemaining} left`}
     </div>
@@ -1931,23 +1943,36 @@ function renderAnalysisPop(taggingRemaining, facesRemaining) {
     e.stopPropagation();
     analysisPaused = !analysisPaused;
     try { await invoke('set_analysis_paused', { paused: analysisPaused }); } catch (err) { console.error(err); }
-    renderAnalysisPop(taggingRemaining, facesRemaining);
+    renderAnalysisPop(taggingRemaining, facesRemaining, pendingUpgrades);
+  });
+  pop.querySelectorAll('.run-upgrade-btn').forEach((btn) => {
+    btn.addEventListener('click', async (e) => {
+      e.stopPropagation();
+      const noticeId = Number(btn.dataset.noticeId);
+      try {
+        await invoke('accept_model_upgrade', { noticeId });
+        await refreshAnalysisBadge();
+      } catch (err) {
+        console.error(err);
+        showToast('Could not start re-analysis.');
+      }
+    });
   });
 }
 
-function updateAnalysisBadge(taggingRemaining, facesRemaining) {
+function updateAnalysisBadge(taggingRemaining, facesRemaining, pendingUpgrades) {
   const badge = document.getElementById('analysisBadge');
   const total = taggingRemaining + facesRemaining;
   if (total > 0) { badge.style.display = 'flex'; badge.textContent = total > 999 ? '999+' : String(total); }
   else badge.style.display = 'none';
-  renderAnalysisPop(taggingRemaining, facesRemaining);
+  renderAnalysisPop(taggingRemaining, facesRemaining, pendingUpgrades);
 }
 
 async function refreshAnalysisBadge() {
   let status;
   try { status = await invoke('get_analysis_status'); } catch (e) { return; }
   analysisPaused = status.paused;
-  updateAnalysisBadge(status.taggingRemaining, status.facesRemaining);
+  updateAnalysisBadge(status.taggingRemaining, status.facesRemaining, status.pendingUpgrades);
 }
 
 document.getElementById('analysisBtn').addEventListener('click', (e) => togglePop('analysisPop', e));
@@ -1956,7 +1981,7 @@ document.getElementById('analysisBtn').addEventListener('click', (e) => togglePo
 // there's no matching unlisten call the way import's own progress
 // listener has (that one is scoped to a single import run).
 listen('analysis-progress', (event) => {
-  updateAnalysisBadge(event.payload.taggingRemaining, event.payload.facesRemaining);
+  updateAnalysisBadge(event.payload.taggingRemaining, event.payload.facesRemaining, event.payload.pendingUpgrades);
 });
 
 function startMainApp() {

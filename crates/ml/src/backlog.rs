@@ -132,9 +132,11 @@ const SFACE_LICENSE_NOTE: &str = "Apache-2.0 (OpenCV Zoo face_recognition_sface 
 /// "how many faces left") can query the backlog's remaining size without
 /// running a batch. Mirrors [`crate::similarity::resolve_siglip_model_id`]'s
 /// same reasoning for the same reason: a lazily-created row with zero
-/// embeddings is a harmless "not analyzed yet" state, not an error.
+/// embeddings is a harmless "not analyzed yet" state, not an error. Also
+/// the detection point for ticket 030 decision #4's re-analysis prompt —
+/// see [`crate::resolve_model_id_and_maybe_notice`].
 pub fn resolve_sface_model_id(conn: &Connection) -> rusqlite::Result<i64> {
-    lenslocker_catalog::find_or_create_model(conn, SFACE_MODEL_NAME, SFACE_MODEL_VERSION, crate::faces::EMBED_DIM as i64, SFACE_LICENSE_NOTE)
+    crate::resolve_model_id_and_maybe_notice(conn, SFACE_MODEL_NAME, SFACE_MODEL_VERSION, crate::faces::EMBED_DIM as i64, SFACE_LICENSE_NOTE)
 }
 
 /// Score/NMS thresholds for [`crate::faces::detect_faces`] — OpenCV's own
@@ -376,7 +378,7 @@ mod tests {
     #[test]
     fn auto_attribute_attaches_the_detection_to_the_named_cluster() {
         let conn = migrated_conn();
-        let model_id = lenslocker_catalog::find_or_create_model(&conn, "sface", "v1", 4, "Apache-2.0").unwrap();
+        let model_id = lenslocker_catalog::find_or_create_model(&conn, "sface", "v1", 4, "Apache-2.0").unwrap().0;
         let anchor = insert_test_detection(&conn, model_id);
         let cluster_id = lenslocker_catalog::create_cluster_with_member(&conn, anchor).unwrap();
 
@@ -390,7 +392,7 @@ mod tests {
     #[test]
     fn review_queue_inserts_a_pending_row_without_touching_the_detections_cluster() {
         let conn = migrated_conn();
-        let model_id = lenslocker_catalog::find_or_create_model(&conn, "sface", "v1", 4, "Apache-2.0").unwrap();
+        let model_id = lenslocker_catalog::find_or_create_model(&conn, "sface", "v1", 4, "Apache-2.0").unwrap().0;
         let detection_id = insert_test_detection(&conn, model_id);
         conn.execute("INSERT INTO persons (name) VALUES ('Alex')", []).unwrap();
         let person_id = conn.last_insert_rowid();
@@ -406,7 +408,7 @@ mod tests {
     #[test]
     fn join_cluster_attaches_the_detection_to_the_unnamed_cluster() {
         let conn = migrated_conn();
-        let model_id = lenslocker_catalog::find_or_create_model(&conn, "sface", "v1", 4, "Apache-2.0").unwrap();
+        let model_id = lenslocker_catalog::find_or_create_model(&conn, "sface", "v1", 4, "Apache-2.0").unwrap().0;
         let anchor = insert_test_detection(&conn, model_id);
         let cluster_id = lenslocker_catalog::create_cluster_with_member(&conn, anchor).unwrap();
 
@@ -420,7 +422,7 @@ mod tests {
     #[test]
     fn new_cluster_creates_and_attaches_a_fresh_unnamed_cluster() {
         let conn = migrated_conn();
-        let model_id = lenslocker_catalog::find_or_create_model(&conn, "sface", "v1", 4, "Apache-2.0").unwrap();
+        let model_id = lenslocker_catalog::find_or_create_model(&conn, "sface", "v1", 4, "Apache-2.0").unwrap().0;
         let detection_id = insert_test_detection(&conn, model_id);
 
         apply_face_match_decision(&conn, detection_id, crate::faces::FaceMatchDecision::NewCluster).unwrap();

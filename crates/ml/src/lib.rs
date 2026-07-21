@@ -25,6 +25,7 @@ use std::path::{Path, PathBuf};
 
 use ort::ep::DirectML;
 use ort::session::Session;
+use rusqlite::Connection;
 
 #[derive(Debug, thiserror::Error)]
 pub enum MlError {
@@ -97,6 +98,24 @@ impl ModelKind {
 /// rather than each call site re-joining the same two path segments.
 pub fn siglip_tokenizer_path(models_dir: &Path) -> PathBuf {
     models_dir.join("siglip-so400m-onnx").join("tokenizer.json")
+}
+
+/// Shared body of `similarity::resolve_siglip_model_id`/
+/// `backlog::resolve_sface_model_id`: find-or-create the `models` row,
+/// and — only on a genuine version bump (a brand new row for a name that
+/// already had a prior, different version) — record a
+/// [`lenslocker_catalog::create_model_upgrade_notice`] (ticket 030
+/// decision #4, ML-SPEC.md §9). First-ever install never creates a
+/// notice: [`lenslocker_catalog::most_recent_other_model_version`]
+/// returns `None` when there's nothing to be "upgrading" from.
+pub(crate) fn resolve_model_id_and_maybe_notice(conn: &Connection, name: &str, version: &str, dimension: i64, license_note: &str) -> rusqlite::Result<i64> {
+    let (model_id, is_new) = lenslocker_catalog::find_or_create_model(conn, name, version, dimension, license_note)?;
+    if is_new {
+        if let Some(old_version) = lenslocker_catalog::most_recent_other_model_version(conn, name, model_id)? {
+            lenslocker_catalog::create_model_upgrade_notice(conn, model_id, name, &old_version, version)?;
+        }
+    }
+    Ok(model_id)
 }
 
 /// Resolves the directory holding the bundled ONNX Runtime dylib and the
