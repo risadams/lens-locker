@@ -19,6 +19,9 @@ fn migrations() -> Migrations<'static> {
         // ML-SPEC.md Milestone ML-2 — see migrations/0004_tag_confidence_thresholds.sql's
         // own header comment.
         M::up(include_str!("../migrations/0004_tag_confidence_thresholds.sql")),
+        // ML-SPEC.md Milestone ML-5 — see migrations/0005_similarity_search_floor.sql's
+        // own header comment.
+        M::up(include_str!("../migrations/0005_similarity_search_floor.sql")),
     ])
 }
 
@@ -243,6 +246,19 @@ pub fn upsert_embedding(conn: &Connection, image_id: i64, model_id: i64, vector:
         params![image_id, model_id, vector, dimension],
     )?;
     Ok(())
+}
+
+/// `image_id`'s stored embedding for `model_id`, or `None` if it hasn't
+/// been analyzed yet for that model (§8/§9's "Find Similar" starting
+/// point — the source image's own vector). Same opaque-bytes contract as
+/// [`upsert_embedding`].
+pub fn embedding_for_image(conn: &Connection, image_id: i64, model_id: i64) -> rusqlite::Result<Option<Vec<u8>>> {
+    conn.query_row(
+        "SELECT vector FROM embeddings WHERE image_id = ?1 AND model_id = ?2",
+        params![image_id, model_id],
+        |row| row.get(0),
+    )
+    .optional()
 }
 
 /// Up to `limit` active images that don't yet have a stored embedding for
@@ -911,9 +927,24 @@ pub enum SortOrder {
     ImportedDesc,
     FilenameAsc,
     SizeDesc,
+    /// ML-SPEC.md §8, ticket 034: image-to-image/text-to-image similarity
+    /// ranking. Unlike every other variant, this one never reaches
+    /// [`order_by_clause`](Self::order_by_clause) in practice — a
+    /// similarity ranking isn't a static column comparison
+    /// `list_images`'s plain SQL can express; [`list_images_by_similarity`]
+    /// is the real query path, ordering by a pre-computed, pre-ranked
+    /// candidate list via a `WITH ... AS (VALUES ...)` join instead. This
+    /// variant exists so `SortOrder` has one real type callers can name
+    /// (per the spec's own wording), not so `list_images` can execute it.
+    SimilarityDesc,
 }
 
 impl SortOrder {
+    /// Panics if called with [`SortOrder::SimilarityDesc`] — see that
+    /// variant's own doc comment for why reaching this is a caller bug
+    /// (routing a similarity query through plain [`list_images`] instead
+    /// of [`list_images_by_similarity`]), not a case this function has a
+    /// sensible clause for.
     fn order_by_clause(self) -> &'static str {
         match self {
             // NULLS LAST isn't native pre-3.30 SQLite syntax portability
@@ -924,6 +955,9 @@ impl SortOrder {
             Self::ImportedDesc => "latest_import DESC, im.id DESC",
             Self::FilenameAsc => "latest_filename COLLATE NOCASE ASC, im.id ASC",
             Self::SizeDesc => "im.file_size_bytes DESC, im.id DESC",
+            Self::SimilarityDesc => unreachable!(
+                "SortOrder::SimilarityDesc has no static ORDER BY clause — route through list_images_by_similarity instead of list_images"
+            ),
         }
     }
 }
@@ -950,14 +984,12 @@ pub struct GridImage {
 /// text search) — never a full-table fetch. Returns `(page, total_matching)`
 /// so the virtualized grid can size its scroll extent without a second
 /// query.
-pub fn list_images(
-    conn: &Connection,
-    filters: &ImageFilters,
-    sort: SortOrder,
-    search: Option<&str>,
-    offset: i64,
-    limit: i64,
-) -> rusqlite::Result<(Vec<GridImage>, i64)> {
+/// Builds the `im.status = 'active'`-seeded `WHERE` clause list and its
+/// positional args for `filters`' facets (date/formats/sources/tags/
+/// persons) — shared by [`list_images`] and [`list_images_by_similarity`],
+/// which both filter the same way and only differ in how they rank/sort
+/// what's left (a static column vs. a pre-computed similarity list).
+fn filter_where_clauses(filters: &ImageFilters) -> (Vec<String>, Vec<Box<dyn rusqlite::ToSql>>) {
     let mut where_clauses = vec!["im.status = 'active'".to_string()];
     let mut args: Vec<Box<dyn rusqlite::ToSql>> = Vec::new();
 
@@ -1008,6 +1040,19 @@ pub fn list_images(
             args.push(Box::new(*p));
         }
     }
+    (where_clauses, args)
+}
+
+pub fn list_images(
+    conn: &Connection,
+    filters: &ImageFilters,
+    sort: SortOrder,
+    search: Option<&str>,
+    offset: i64,
+    limit: i64,
+) -> rusqlite::Result<(Vec<GridImage>, i64)> {
+    let (mut where_clauses, mut args) = filter_where_clauses(filters);
+
     if let Some(q) = search.filter(|q| !q.trim().is_empty()) {
         // FTS5 query syntax treats bare special characters (quotes,
         // hyphens...) as syntax errors, not literal text; wrapping the raw
@@ -1053,6 +1098,14 @@ pub fn list_images(
         .collect::<Result<_, _>>()?;
     drop(stmt);
 
+    Ok((grid_images_from_rows(conn, rows)?, total))
+}
+
+/// Builds each [`GridImage`] card from `(id, thumbnail_path, capture_date)`
+/// rows, one `tags_for_image` lookup per row — the shared tail of
+/// [`list_images`] and [`list_images_by_similarity`], which differ only in
+/// how they select/order/filter which images end up in `rows`.
+fn grid_images_from_rows(conn: &Connection, rows: Vec<(i64, Option<String>, Option<String>)>) -> rusqlite::Result<Vec<GridImage>> {
     let mut page = Vec::with_capacity(rows.len());
     for (id, thumbnail_path, capture_date) in rows {
         let tags = tags_for_image(conn, id)?;
@@ -1064,7 +1117,78 @@ pub fn list_images(
             verified: true,
         });
     }
+    Ok(page)
+}
 
+/// [`SortOrder::SimilarityDesc`]'s real query path (ML-SPEC.md §8, ticket
+/// 034) — same grid-card shape and the same facet filters as
+/// [`list_images`], but ranked by `ranked_candidates` (already-scored,
+/// already floor-filtered `(image_id, score)` pairs — cosine similarity
+/// or zero-shot probability, `crates/catalog` has no opinion on which)
+/// instead of a static column. The candidate list is joined in via a
+/// `WITH ... AS (VALUES ...)` CTE rather than a `CASE id WHEN ...`
+/// `ORDER BY` (unwieldy past a handful of rows) — a standard SQLite
+/// idiom for "order by an externally-computed rank." An empty
+/// `ranked_candidates` short-circuits before touching the database,
+/// since a `VALUES` clause can't itself be empty.
+pub fn list_images_by_similarity(
+    conn: &Connection,
+    ranked_candidates: &[(i64, f64)],
+    filters: &ImageFilters,
+    offset: i64,
+    limit: i64,
+) -> rusqlite::Result<(Vec<GridImage>, i64)> {
+    if ranked_candidates.is_empty() {
+        return Ok((Vec::new(), 0));
+    }
+
+    let (where_clauses, filter_args) = filter_where_clauses(filters);
+    let where_sql = where_clauses.join(" AND ");
+
+    let values_sql = (0..ranked_candidates.len()).map(|rank| format!("(?,{rank})")).collect::<Vec<_>>().join(",");
+    let candidate_id_args: Vec<Box<dyn rusqlite::ToSql>> = ranked_candidates.iter().map(|(id, _)| Box::new(*id) as Box<dyn rusqlite::ToSql>).collect();
+
+    let count_sql = format!(
+        "WITH sim(id, rank) AS (VALUES {values_sql})
+         SELECT COUNT(*) FROM images im JOIN sim ON sim.id = im.id WHERE {where_sql}"
+    );
+    let count_args = candidate_id_args.iter().map(|b| b.as_ref()).chain(filter_args.iter().map(|b| b.as_ref()));
+    let total: i64 = conn.query_row(&count_sql, rusqlite::params_from_iter(count_args), |row| row.get(0))?;
+
+    let sql = format!(
+        "WITH sim(id, rank) AS (VALUES {values_sql})
+         SELECT im.id, th.path, im.capture_date
+         FROM images im
+         JOIN sim ON sim.id = im.id
+         LEFT JOIN thumbnails th ON th.image_id = im.id AND th.variant = 'grid256'
+         WHERE {where_sql}
+         ORDER BY sim.rank
+         LIMIT ? OFFSET ?"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut all_args: Vec<&dyn rusqlite::ToSql> = candidate_id_args.iter().map(|b| b.as_ref()).collect();
+    all_args.extend(filter_args.iter().map(|b| b.as_ref()));
+    all_args.push(&limit);
+    all_args.push(&offset);
+
+    let rows: Vec<(i64, Option<String>, Option<String>)> = stmt
+        .query_map(rusqlite::params_from_iter(all_args), |row| {
+            Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+        })?
+        .collect::<Result<_, _>>()?;
+    drop(stmt);
+
+    let mut page = Vec::with_capacity(rows.len());
+    for (id, thumbnail_path, capture_date) in rows {
+        let tags = tags_for_image(conn, id)?;
+        page.push(GridImage {
+            id,
+            thumbnail_path,
+            capture_date,
+            tags,
+            verified: true,
+        });
+    }
     Ok((page, total))
 }
 
@@ -1244,11 +1368,16 @@ pub struct AppSettings {
     /// below this still gets a row (so confirming it later doesn't need a
     /// re-score), it just doesn't surface as a visible chip by default.
     pub tag_display_threshold: f64,
+    /// §8's minimum-similarity floor (migration 0005; placeholder pending
+    /// real calibration, see that migration's own header comment) —
+    /// applied to both image-to-image cosine similarity and
+    /// text-to-image zero-shot probability.
+    pub similarity_search_floor: f64,
 }
 
 pub fn get_app_settings(conn: &Connection) -> rusqlite::Result<AppSettings> {
     conn.query_row(
-        "SELECT hamming_threshold, retention_days, tag_storage_threshold, tag_display_threshold FROM app_settings WHERE id = 1",
+        "SELECT hamming_threshold, retention_days, tag_storage_threshold, tag_display_threshold, similarity_search_floor FROM app_settings WHERE id = 1",
         [],
         |row| {
             Ok(AppSettings {
@@ -1256,6 +1385,7 @@ pub fn get_app_settings(conn: &Connection) -> rusqlite::Result<AppSettings> {
                 retention_days: row.get(1)?,
                 tag_storage_threshold: row.get(2)?,
                 tag_display_threshold: row.get(3)?,
+                similarity_search_floor: row.get(4)?,
             })
         },
     )
@@ -1264,12 +1394,13 @@ pub fn get_app_settings(conn: &Connection) -> rusqlite::Result<AppSettings> {
 pub fn update_app_settings(conn: &Connection, settings: AppSettings) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE app_settings SET hamming_threshold = ?1, retention_days = ?2,
-         tag_storage_threshold = ?3, tag_display_threshold = ?4 WHERE id = 1",
+         tag_storage_threshold = ?3, tag_display_threshold = ?4, similarity_search_floor = ?5 WHERE id = 1",
         params![
             settings.hamming_threshold,
             settings.retention_days,
             settings.tag_storage_threshold,
-            settings.tag_display_threshold
+            settings.tag_display_threshold,
+            settings.similarity_search_floor
         ],
     )?;
     Ok(())
@@ -2563,6 +2694,85 @@ mod tests {
     }
 
     #[test]
+    fn embedding_for_image_returns_none_when_not_yet_analyzed() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let image_id = insert_full_image(&conn, library_id, 60, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
+        let model_id = super::find_or_create_model(&conn, "siglip", "v1", 4, "Apache-2.0").unwrap();
+
+        assert_eq!(super::embedding_for_image(&conn, image_id, model_id).unwrap(), None);
+    }
+
+    #[test]
+    fn embedding_for_image_returns_the_stored_vector() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let image_id = insert_full_image(&conn, library_id, 61, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
+        let model_id = super::find_or_create_model(&conn, "siglip", "v1", 4, "Apache-2.0").unwrap();
+        super::upsert_embedding(&conn, image_id, model_id, &[1, 2, 3, 4], 4).unwrap();
+
+        assert_eq!(super::embedding_for_image(&conn, image_id, model_id).unwrap(), Some(vec![1, 2, 3, 4]));
+    }
+
+    #[test]
+    fn list_images_by_similarity_orders_by_the_given_rank() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let first = insert_full_image(&conn, library_id, 70, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
+        let second = insert_full_image(&conn, library_id, 71, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/src", "b.jpg");
+        let third = insert_full_image(&conn, library_id, 72, "jpeg", "2026-01-03T00:00:00Z", 100, "D:/src", "c.jpg");
+
+        // Deliberately not capture-date order, to prove the ranking comes
+        // from the given candidate list, not a fallback column sort.
+        let ranked = vec![(third, 0.9), (first, 0.8), (second, 0.5)];
+        let filters = super::ImageFilters::default();
+        let (page, total) = super::list_images_by_similarity(&conn, &ranked, &filters, 0, 10).unwrap();
+
+        assert_eq!(total, 3);
+        assert_eq!(page.iter().map(|g| g.id).collect::<Vec<_>>(), vec![third, first, second]);
+    }
+
+    #[test]
+    fn list_images_by_similarity_composes_with_ordinary_facet_filters() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let tagged = insert_full_image(&conn, library_id, 73, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
+        let untagged = insert_full_image(&conn, library_id, 74, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/src", "b.jpg");
+        super::add_tag(&conn, tagged, "sunset").unwrap();
+
+        let ranked = vec![(untagged, 0.9), (tagged, 0.8)];
+        let filters = super::ImageFilters { tags: vec!["sunset".to_string()], ..Default::default() };
+        let (page, total) = super::list_images_by_similarity(&conn, &ranked, &filters, 0, 10).unwrap();
+
+        assert_eq!(total, 1, "the untagged candidate must be excluded by the tag filter even though it ranked higher");
+        assert_eq!(page[0].id, tagged);
+    }
+
+    #[test]
+    fn list_images_by_similarity_paginates() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let ids: Vec<i64> = (0..5)
+            .map(|i| insert_full_image(&conn, library_id, 80 + i, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", &format!("{i}.jpg")))
+            .collect();
+        let ranked: Vec<(i64, f64)> = ids.iter().enumerate().map(|(rank, &id)| (id, 1.0 - rank as f64 * 0.1)).collect();
+        let filters = super::ImageFilters::default();
+
+        let (page, total) = super::list_images_by_similarity(&conn, &ranked, &filters, 2, 2).unwrap();
+        assert_eq!(total, 5);
+        assert_eq!(page.iter().map(|g| g.id).collect::<Vec<_>>(), vec![ids[2], ids[3]]);
+    }
+
+    #[test]
+    fn list_images_by_similarity_with_no_candidates_short_circuits_to_empty() {
+        let conn = migrated_conn();
+        let filters = super::ImageFilters::default();
+        let (page, total) = super::list_images_by_similarity(&conn, &[], &filters, 0, 10).unwrap();
+        assert!(page.is_empty());
+        assert_eq!(total, 0);
+    }
+
+    #[test]
     fn list_images_filters_by_source_root() {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
@@ -2935,6 +3145,7 @@ mod tests {
                 retention_days: 30,
                 tag_storage_threshold: 0.1,
                 tag_display_threshold: 0.5,
+                similarity_search_floor: 0.5,
             }
         );
     }
@@ -2950,6 +3161,7 @@ mod tests {
                 retention_days: 14,
                 tag_storage_threshold: 0.2,
                 tag_display_threshold: 0.6,
+                similarity_search_floor: 0.7,
             },
         )
         .unwrap();
@@ -2962,6 +3174,7 @@ mod tests {
                 retention_days: 14,
                 tag_storage_threshold: 0.2,
                 tag_display_threshold: 0.6,
+                similarity_search_floor: 0.7,
             }
         );
     }

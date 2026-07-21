@@ -32,6 +32,12 @@ base64 = "0.22"
 lenslocker-catalog = { version = "0.1.0", path = "../crates/catalog" }
 lenslocker-import = { version = "0.1.0", path = "../crates/import" }
 lenslocker-xmp = { version = "0.1.0", path = "../crates/xmp" }
+# Milestone ML-5's text-to-image search (crates/ml/src/similarity.rs) is
+# the first command that runs live ML inference at query time rather than
+# only reading/writing already-computed catalog rows — the first real
+# reason this crate needs lenslocker-ml at all (CLAUDE.md previously
+# tracked this dependency edge as "not yet crossed").
+lenslocker-ml = { version = "0.1.0", path = "../crates/ml" }
 
 # Windows-only: WebView2 COM hardening (workplan/SPEC.md §8.1, Milestone 6).
 # Both crates are already transitive dependencies of `wry`/`tauri-runtime-wry`

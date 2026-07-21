@@ -113,6 +113,7 @@
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
             <input class="search" id="searchInput" placeholder="Search tags, camera, filename…">
           </div>
+          <button class="chip" id="searchModeToggle" title="Toggle between exact keyword search and searching by meaning">By meaning</button>
           <button class="btn btn-primary" id="topbarImportBtn">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 4v12m0 0l-4-4m4 4l4-4M5 20h14"/></svg>
             Import
@@ -218,6 +219,8 @@
 
       <div class="section-label">People in this photo</div>
       <div class="tag-row" id="d-people"></div>
+
+      <button class="btn" id="findSimilarBtn" style="margin-bottom:18px">Find Similar</button>
 
       <div class="section-label">In this library since</div>
       <table class="meta-table" style="margin-bottom:0">

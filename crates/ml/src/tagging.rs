@@ -113,6 +113,18 @@ pub fn embed_image(session: &mut Session, pixel_values: &[f32]) -> Result<Vec<f3
 pub const LOGIT_SCALE_RAW: f32 = 4.7214665;
 pub const LOGIT_BIAS: f32 = -16.546421;
 
+/// The sigmoid half of SigLIP's scoring formula, taking an already-
+/// computed dot product rather than the two embeddings themselves —
+/// factored out of [`zero_shot_probability`] so a caller that already has
+/// the dot product from elsewhere (Milestone ML-5's similarity search:
+/// `lenslocker_catalog::VecMirror::query_similar_cosine` derives it from
+/// L2 distance without decoding/re-dotting full vectors) can reuse the
+/// exact same calibrated formula instead of recomputing or duplicating it.
+pub fn zero_shot_probability_from_dot(dot: f32) -> f32 {
+    let logit = dot * LOGIT_SCALE_RAW.exp() + LOGIT_BIAS;
+    1.0 / (1.0 + (-logit).exp())
+}
+
 /// Zero-shot label-match probability for one image/text embedding pair —
 /// `sigmoid((image_embeds · text_embeds) * exp(LOGIT_SCALE_RAW) + LOGIT_BIAS)`,
 /// SigLIP's own scoring formula (§2/§4). Uses the raw dot product, not a
@@ -125,8 +137,7 @@ pub fn zero_shot_probability(image_embeds: &[f32], text_embeds: &[f32]) -> f32 {
     debug_assert_eq!(image_embeds.len(), EMBEDDING_DIM);
     debug_assert_eq!(text_embeds.len(), EMBEDDING_DIM);
     let dot: f32 = image_embeds.iter().zip(text_embeds).map(|(a, b)| a * b).sum();
-    let logit = dot * LOGIT_SCALE_RAW.exp() + LOGIT_BIAS;
-    1.0 / (1.0 + (-logit).exp())
+    zero_shot_probability_from_dot(dot)
 }
 
 #[cfg(test)]
@@ -154,6 +165,19 @@ mod tests {
         b[1] = 1.0;
         let probability = zero_shot_probability(&a, &b);
         assert!(probability < 0.5, "expected a low probability for orthogonal embeddings, got {probability}");
+    }
+
+    #[test]
+    fn zero_shot_probability_from_dot_matches_the_two_vector_form() {
+        // Confirms the factored-out sigmoid-from-dot function reproduces
+        // exactly what zero_shot_probability computes internally, since
+        // Milestone ML-5's similarity search calls it directly with a dot
+        // product it already has (derived from VecMirror's L2 distance)
+        // rather than re-deriving it from two decoded vectors.
+        let mut v = vec![0f32; EMBEDDING_DIM];
+        v[0] = 1.0;
+        let dot = 1.0; // identical unit vectors
+        assert_eq!(zero_shot_probability_from_dot(dot), zero_shot_probability(&v, &v));
     }
 }
 
@@ -240,7 +264,7 @@ pub mod text {
         use super::*;
 
         fn tokenizer_path() -> std::path::PathBuf {
-            crate::models_dir().join("siglip-so400m-onnx").join("tokenizer.json")
+            crate::siglip_tokenizer_path(&crate::models_dir())
         }
 
         /// Doesn't need the ONNX Runtime dylib at all — pure tokenization,

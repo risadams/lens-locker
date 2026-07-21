@@ -33,16 +33,6 @@ use crate::labels::STARTER_LABELS;
 use crate::tagging::text::TextEncoder;
 use crate::{ModelKind, Result, tagging};
 
-/// This project's own name/version for the bundled SigLIP checkpoint —
-/// not upstream's own versioning (SigLIP doesn't publish one in a form
-/// suited to `models.version`), chosen so a future deliberate model swap
-/// (e.g. a different checkpoint or a re-export) can bump this string to
-/// trigger §9's "re-analysis on a model upgrade" path. A judgment call,
-/// flagged rather than sourced from anywhere.
-const SIGLIP_MODEL_NAME: &str = "siglip-so400m-patch14-384";
-const SIGLIP_MODEL_VERSION: &str = "v1";
-const SIGLIP_LICENSE_NOTE: &str = "Apache-2.0 (google/siglip-so400m-patch14-384, self-converted — MODELS.md §4)";
-
 /// A loaded SigLIP session plus every starter label's pre-computed text
 /// embedding (§4: "adding a custom label is a cheap backfill... not a
 /// re-embed" — the same principle applies across a single backlog pass:
@@ -62,7 +52,7 @@ impl TaggingModel {
         let model_path = models_dir.join(ModelKind::Siglip.relative_path());
         let mut session = crate::load_session(&model_path)?;
 
-        let tokenizer_path = models_dir.join("siglip-so400m-onnx").join("tokenizer.json");
+        let tokenizer_path = crate::siglip_tokenizer_path(models_dir);
         let text_encoder = TextEncoder::load(&tokenizer_path)?;
 
         let mut label_embeddings = Vec::with_capacity(STARTER_LABELS.len());
@@ -72,13 +62,7 @@ impl TaggingModel {
             label_embeddings.push((label.to_string(), embedding));
         }
 
-        let model_id = lenslocker_catalog::find_or_create_model(
-            conn,
-            SIGLIP_MODEL_NAME,
-            SIGLIP_MODEL_VERSION,
-            tagging::EMBEDDING_DIM as i64,
-            SIGLIP_LICENSE_NOTE,
-        )?;
+        let model_id = crate::similarity::resolve_siglip_model_id(conn)?;
 
         Ok(Self { session, label_embeddings, model_id })
     }

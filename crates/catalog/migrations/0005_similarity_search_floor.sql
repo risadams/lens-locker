@@ -1,0 +1,21 @@
+-- Migration 5 (ML-SPEC.md Milestone ML-5, §8, ticket 034): similarity
+-- search's minimum-similarity floor.
+--
+-- "A minimum-similarity floor (same shape as ticket 029's tag storage
+-- floor) keeps results meaningfully bounded rather than ranking the whole
+-- library down to irrelevance" — same treatment migration 0004 already
+-- gave tag_storage_threshold/tag_display_threshold: an illustrative
+-- placeholder, not a researched number, pending real calibration against
+-- actual SigLIP cosine-similarity/zero-shot-probability output on real
+-- photos. Applied to both image-to-image cosine similarity and
+-- text-to-image zero-shot probability (crates/ml/src/tagging.rs's
+-- zero_shot_probability) — different metrics that happen to share a
+-- comparable 0..1 range, not a rigorously unified scale; flagged, not
+-- hidden, in the query code that reads this column. Not yet exposed in
+-- the Settings UI, matching tag/face thresholds' own precedent.
+--
+-- Per crates/catalog/schema.sql's own migration discipline comment: do
+-- not hand-edit an existing migration once it has shipped; add a new one
+-- instead.
+
+ALTER TABLE app_settings ADD COLUMN similarity_search_floor REAL NOT NULL DEFAULT 0.5;

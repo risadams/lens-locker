@@ -18,6 +18,7 @@ pub mod backlog;
 pub mod faces;
 pub mod labels;
 pub mod placeholder;
+pub mod similarity;
 pub mod tagging;
 
 use std::path::{Path, PathBuf};
@@ -87,6 +88,15 @@ impl ModelKind {
             ModelKind::Siglip => "siglip-so400m-onnx/model.onnx",
         }
     }
+}
+
+/// SigLIP's tokenizer, sibling to [`ModelKind::Siglip`]'s own `model.onnx`
+/// (same directory — see [`ModelKind::relative_path`]) — every SigLIP text
+/// encoding call site (`backlog.rs`'s batch tagging, `similarity.rs`'s
+/// live text-query embedding) needs this same path, so it's one function
+/// rather than each call site re-joining the same two path segments.
+pub fn siglip_tokenizer_path(models_dir: &Path) -> PathBuf {
+    models_dir.join("siglip-so400m-onnx").join("tokenizer.json")
 }
 
 /// Resolves the directory holding the bundled ONNX Runtime dylib and the

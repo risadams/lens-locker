@@ -48,7 +48,9 @@ const state = {
   tags: new Set(),
   persons: new Set(),        // person ids (ticket 031's Person facet, Milestone ML-5)
   sort: 'captured-desc',
-  query: '',
+  query: '',                 // keyword (FTS) search box text — irrelevant while similarityQuery is set
+  searchByMeaning: false,    // ML-SPEC.md §8: the search box's mode toggle, keyword vs. semantic
+  similarityQuery: null,     // {type:'image', imageId} | {type:'text', text} | null — §8's "Find Similar"/text-to-image search
 };
 
 // id -> name, refreshed whenever the Person popover renders — active-filter
@@ -170,23 +172,38 @@ function resetGridData() {
   gridWrap.scrollTop = 0;
 }
 
+// Routes to the plain filtered/sorted query, or one of §8's two
+// similarity queries when state.similarityQuery is set — "Find Similar"/
+// "search by meaning" reuse the same grid/pagination machinery as normal
+// browsing ("same grid, a new sort order... no new rendering surface"),
+// just a different data source. The ordinary filter facets still compose
+// either way (ticket 031's reuse pattern extends to similarity search).
+function fetchGridPage(offset) {
+  if (!state.similarityQuery) {
+    return invoke('list_images', { filters: filtersDto(), sort: state.sort, search: state.query || null, offset, limit: PAGE });
+  }
+  if (state.similarityQuery.type === 'image') {
+    return invoke('find_similar_images', { imageId: state.similarityQuery.imageId, filters: filtersDto(), offset, limit: PAGE });
+  }
+  return invoke('search_by_text', { query: state.similarityQuery.text, filters: filtersDto(), offset, limit: PAGE });
+}
+
 async function fetchPage(offset, token) {
   if (pendingPages.has(offset)) return;
   pendingPages.add(offset);
   try {
-    const res = await invoke('list_images', {
-      filters: filtersDto(),
-      sort: state.sort,
-      search: state.query || null,
-      offset,
-      limit: PAGE,
-    });
+    const res = await fetchGridPage(offset);
     if (token !== requestToken) return; // stale — a newer filter/sort/search superseded this request
     total = res.total;
     res.items.forEach((item, i) => itemCache.set(offset + i, item));
     layout();
   } catch (e) {
-    console.error('list_images failed', e);
+    console.error('grid page fetch failed', e);
+    // A similarity query can fail for a real, expected reason today (the
+    // source photo hasn't been analyzed yet — nothing populates
+    // embeddings automatically until Milestone ML-6) — worth surfacing,
+    // unlike a normal list_images failure the console log already covers.
+    if (state.similarityQuery) showToast(typeof e === 'string' ? e : 'Could not run this search');
   } finally {
     pendingPages.delete(offset);
   }
@@ -507,6 +524,21 @@ function renderActiveFilters() {
   state.sources.forEach(s => pills.push({ text: s.split(/[\\/]/).pop(), clear: () => state.sources.delete(s) }));
   state.tags.forEach(t => pills.push({ text: '#' + t, clear: () => state.tags.delete(t) }));
   state.persons.forEach(id => pills.push({ text: personNamesById.get(id) ?? `Person #${id}`, clear: () => state.persons.delete(id) }));
+  // §8's similarity query — shown as just another active-filter pill
+  // (reusing the existing "chip + clear ×" pattern) rather than a
+  // separate banner UI element, since it behaves exactly like one: a
+  // narrowing of the grid with one clear way to remove it.
+  if (state.similarityQuery) {
+    const isText = state.similarityQuery.type === 'text';
+    const text = isText ? `Meaning: “${state.similarityQuery.text}”` : 'Similar to this photo';
+    pills.push({
+      text,
+      clear: () => {
+        state.similarityQuery = null;
+        if (isText) document.getElementById('searchInput').value = '';
+      },
+    });
+  }
 
   const bar = document.getElementById('activeFilters');
   if (!pills.length) { bar.classList.remove('show'); bar.innerHTML = ''; return; }
@@ -519,6 +551,8 @@ function renderActiveFilters() {
 }
 function clearAllFilters() {
   state.dateRange = null; state.formats.clear(); state.sources.clear(); state.tags.clear(); state.persons.clear();
+  if (state.similarityQuery?.type === 'text') document.getElementById('searchInput').value = '';
+  state.similarityQuery = null;
   refresh();
 }
 
@@ -540,6 +574,11 @@ function renderSortPop() {
   pop.querySelectorAll('[data-sort]').forEach(el => el.addEventListener('click', (e) => {
     e.stopPropagation();
     setSort(el.dataset.sort);
+    // Picking an explicit column sort only makes sense for plain
+    // browsing — a similarity ranking has no "newest captured"/"largest
+    // file" order of its own — so it exits similarity mode rather than
+    // being silently ignored while similarityQuery stays set.
+    state.similarityQuery = null;
     closeAllPops();
     renderSortPop();
     refreshGrid();
@@ -551,7 +590,39 @@ let searchDebounce = null;
 document.getElementById('searchInput').addEventListener('input', (e) => {
   clearTimeout(searchDebounce);
   const value = e.target.value.trim();
-  searchDebounce = setTimeout(() => { state.query = value; refreshGrid(); }, 180);
+  searchDebounce = setTimeout(() => {
+    if (state.searchByMeaning) {
+      state.similarityQuery = value ? { type: 'text', text: value } : null;
+    } else {
+      // Typing a keyword search always exits image-similarity mode too
+      // ("Find Similar" results) — a stray leftover similarity query
+      // would otherwise silently ignore whatever was just typed, since
+      // fetchGridPage checks similarityQuery before the plain search.
+      state.similarityQuery = null;
+      state.query = value;
+    }
+    refreshGrid();
+  }, 180);
+});
+
+// §8's search-mode toggle — keyword (FTS, unchanged) vs. semantic
+// (SigLIP text search). Re-routes whatever's currently typed rather than
+// requiring the user to retype it after switching modes.
+document.getElementById('searchModeToggle').addEventListener('click', () => {
+  state.searchByMeaning = !state.searchByMeaning;
+  const toggle = document.getElementById('searchModeToggle');
+  toggle.classList.toggle('on', state.searchByMeaning);
+  const input = document.getElementById('searchInput');
+  input.placeholder = state.searchByMeaning ? 'Describe what you’re looking for…' : 'Search tags, camera, filename…';
+  const value = input.value.trim();
+  if (state.searchByMeaning) {
+    state.query = '';
+    state.similarityQuery = value ? { type: 'text', text: value } : null;
+  } else {
+    state.similarityQuery = null;
+    state.query = value;
+  }
+  refreshGrid();
 });
 
 async function refresh() {
@@ -766,6 +837,24 @@ document.getElementById('drawerCloseBtn').addEventListener('click', (e) => { e.s
 document.getElementById('drawerScrim').addEventListener('click', closeDrawer);
 document.getElementById('drawerExpandBtn').addEventListener('click', (e) => { e.stopPropagation(); if (currentDetail) openLightbox(currentDetail.id); });
 document.getElementById('drawerPreview').addEventListener('click', () => { if (currentDetail) openLightbox(currentDetail.id); });
+
+// "Find Similar" (ML-SPEC.md §8) — always starts from a library-resident
+// image already open in the drawer, per the spec's own entry-point
+// decision (no external-file-picker flow anywhere else in this app).
+// Clears any keyword/meaning search in progress, same reasoning as the
+// search box's own mode switch: a stray leftover query would otherwise
+// silently coexist with the new similarity mode instead of being
+// replaced by it.
+document.getElementById('findSimilarBtn').addEventListener('click', (e) => {
+  e.stopPropagation();
+  if (!currentDetail) return;
+  state.query = '';
+  document.getElementById('searchInput').value = '';
+  state.similarityQuery = { type: 'image', imageId: currentDetail.id };
+  closeDrawer();
+  switchView('grid');
+  refresh();
+});
 
 // ── Lightbox: full-size view, prev/next, scroll-to-zoom + pan ───────────
 // Ported near-verbatim from the approved design's interaction logic; only

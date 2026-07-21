@@ -2420,6 +2420,7 @@ dependencies = [
  "base64 0.22.1",
  "lenslocker-catalog",
  "lenslocker-import",
+ "lenslocker-ml",
  "lenslocker-xmp",
  "rusqlite",
  "serde",

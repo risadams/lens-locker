@@ -89,6 +89,33 @@ impl VecMirror {
         let mut stmt = self.conn.prepare("SELECT rowid, distance FROM vec_mirror WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2")?;
         stmt.query_map(params![query_vector, k as i64], |row| Ok((row.get(0)?, row.get(1)?)))?.collect()
     }
+
+    /// Cosine similarity — equivalently, the raw dot product — for every
+    /// result within `k` nearest neighbors of `query_vector`, derived from
+    /// [`query_similar`](Self::query_similar)'s L2 distance rather than
+    /// decoding and re-dotting full vectors: `cos_sim = 1 - (L2²)/2` holds
+    /// exactly for **unit-normalized** vectors, which every embedding this
+    /// app stores is — SigLIP L2-normalizes both its image and text
+    /// towers' output internally (`lenslocker_ml::tagging`'s own doc
+    /// comment confirms this against the real model to ~1e-6). Order is
+    /// preserved (ascending L2 distance == descending cosine similarity,
+    /// since the map is monotonic), so results stay sorted best-first.
+    ///
+    /// Because this *is* the raw dot product for unit vectors, the same
+    /// values feed two different downstream uses without a second
+    /// nearest-neighbor pass: image-to-image "Find Similar" (ML-SPEC.md
+    /// §8) uses them directly; text-to-image search feeds them through
+    /// `lenslocker_ml::tagging::zero_shot_probability_from_dot` — SigLIP's
+    /// own calibrated sigmoid, the same formula zero-shot tagging already
+    /// uses, since a text/image pair is exactly what that formula was
+    /// calibrated for.
+    pub fn query_similar_cosine(&self, query_vector: &[u8], k: usize) -> rusqlite::Result<Vec<(i64, f64)>> {
+        Ok(self
+            .query_similar(query_vector, k)?
+            .into_iter()
+            .map(|(id, l2)| (id, 1.0 - (l2 * l2) / 2.0))
+            .collect())
+    }
 }
 
 #[cfg(test)]
@@ -162,5 +189,39 @@ mod tests {
         assert_eq!(results.len(), 1, "upsert must replace, not duplicate, the row");
         assert_eq!(results[0].0, 1);
         assert!(results[0].1 < 0.001, "the mirror should now hold the replaced vector, not the original");
+    }
+
+    #[test]
+    fn query_similar_cosine_of_an_exact_match_is_one() {
+        let source = source_conn_with_embeddings(&[(1, &[1.0, 0.0, 0.0])]);
+        let mirror = VecMirror::build(&source, 1, 3).unwrap();
+
+        let results = mirror.query_similar_cosine(&vector_bytes(&[1.0, 0.0, 0.0]), 1).unwrap();
+        assert_eq!(results.len(), 1);
+        assert!((results[0].1 - 1.0).abs() < 1e-6, "an exact match's cosine similarity should be ~1.0, got {}", results[0].1);
+    }
+
+    #[test]
+    fn query_similar_cosine_of_orthogonal_unit_vectors_is_zero() {
+        let source = source_conn_with_embeddings(&[(1, &[0.0, 1.0, 0.0])]);
+        let mirror = VecMirror::build(&source, 1, 3).unwrap();
+
+        let results = mirror.query_similar_cosine(&vector_bytes(&[1.0, 0.0, 0.0]), 1).unwrap();
+        assert!(results[0].1.abs() < 1e-6, "orthogonal unit vectors should score ~0.0 cosine similarity, got {}", results[0].1);
+    }
+
+    #[test]
+    fn query_similar_cosine_preserves_the_best_match_first_ordering() {
+        let source = source_conn_with_embeddings(&[
+            (1, &[1.0, 0.0, 0.0]),  // exact match
+            (2, &[0.0, 1.0, 0.0]),  // orthogonal
+            (3, &[0.7071, 0.7071, 0.0]), // partial match
+        ]);
+        let mirror = VecMirror::build(&source, 1, 3).unwrap();
+
+        let results = mirror.query_similar_cosine(&vector_bytes(&[1.0, 0.0, 0.0]), 3).unwrap();
+        let ids: Vec<i64> = results.iter().map(|(id, _)| *id).collect();
+        assert_eq!(ids, vec![1, 3, 2], "must stay ordered best-match-first, same as query_similar's ascending-distance order");
+        assert!(results[0].1 > results[1].1 && results[1].1 > results[2].1);
     }
 }

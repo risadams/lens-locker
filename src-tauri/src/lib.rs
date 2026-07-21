@@ -171,6 +171,10 @@ enum CmdError {
     DiskSpace(String),
     #[error("could not save the vault location: {0}")]
     Bootstrap(String),
+    #[error("image {0} hasn't been analyzed yet — similarity search needs it to have been processed first")]
+    ImageNotAnalyzedYet(i64),
+    #[error(transparent)]
+    Ml(#[from] lenslocker_ml::MlError),
 }
 
 // Tauri commands need their error type to serialize across the IPC bridge;
@@ -463,6 +467,129 @@ async fn get_full_preview(app: tauri::AppHandle, id: i64) -> CmdResult<Option<St
             let conn = app_state.conn.lock().unwrap();
             let bytes = lenslocker_import::render_full_preview_bytes(&conn, id)?;
             Ok(bytes.map(|b| format!("data:image/jpeg;base64,{}", BASE64_STANDARD.encode(b))))
+        })
+    })
+    .await
+    .map_err(|e| CmdError::TaskPanicked(e.to_string()))?
+}
+
+/// Candidate pool size for both similarity-search commands below — a
+/// generous over-fetch from `VecMirror` (well past any single page) so
+/// the ordinary grid filters (§7's reuse pattern) still have enough
+/// floor-cleared candidates to page through after composing with them,
+/// without querying the mirror again per page.
+const SIMILARITY_CANDIDATE_POOL: usize = 500;
+
+/// Shared by [`find_similar_images`] and [`search_by_text`] — both
+/// resolve to "get a query vector, rank every other analyzed photo
+/// against it via `VecMirror`, floor-filter, compose with the ordinary
+/// grid filters via [`lenslocker_catalog::list_images_by_similarity`]."
+/// They differ only in where `query_vector` comes from and how a raw
+/// dot product becomes a score (`score_transform` — the identity for
+/// image-to-image cosine similarity, SigLIP's calibrated sigmoid for
+/// text-to-image; see [`lenslocker_catalog::VecMirror::query_similar_cosine`]'s
+/// own doc comment for why one dot product serves both). `exclude_id`
+/// drops a candidate from its own "similar to me" results — only
+/// meaningful for image-to-image.
+fn rank_and_paginate(
+    conn: &Connection,
+    model_id: i64,
+    query_vector: &[u8],
+    floor: f64,
+    exclude_id: Option<i64>,
+    score_transform: impl Fn(f64) -> f64,
+    filters: lenslocker_catalog::ImageFilters,
+    offset: i64,
+    limit: i64,
+) -> CmdResult<ListImagesResult> {
+    let mirror = lenslocker_catalog::VecMirror::build(conn, model_id, lenslocker_ml::tagging::EMBEDDING_DIM)?;
+    let ranked: Vec<(i64, f64)> = mirror
+        .query_similar_cosine(query_vector, SIMILARITY_CANDIDATE_POOL)?
+        .into_iter()
+        .map(|(id, dot)| (id, score_transform(dot)))
+        .filter(|(id, score)| Some(*id) != exclude_id && *score >= floor)
+        .collect();
+
+    let (items, total) = lenslocker_catalog::list_images_by_similarity(conn, &ranked, &filters, offset, limit)?;
+    Ok(ListImagesResult { items: items.into_iter().map(Into::into).collect(), total })
+}
+
+/// "Find Similar" (ML-SPEC.md §8, ticket 034) — ranks every other
+/// analyzed photo by cosine similarity to `image_id`'s own stored SigLIP
+/// embedding. Run via `spawn_blocking`: `VecMirror::build` loads every
+/// stored embedding for the model fresh on each call (no persistent
+/// background-kept mirror yet — that's Milestone ML-6's job), real
+/// synchronous work scaling with library size, same reasoning as
+/// `get_full_preview`'s use of it.
+///
+/// `Err(ImageNotAnalyzedYet)` if `image_id` has no stored embedding —
+/// nothing populates these automatically in the live app yet either (the
+/// ML-2 backlog isn't wired to run until Milestone ML-6), so this is a
+/// real, expected state today, not a defensive-only guard.
+#[tauri::command]
+async fn find_similar_images(
+    app: tauri::AppHandle,
+    image_id: i64,
+    filters: FiltersDto,
+    offset: i64,
+    limit: i64,
+) -> CmdResult<ListImagesResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        with_ready(&app.state::<Mutex<LibraryState>>(), |app_state| {
+            let conn = app_state.conn.lock().unwrap();
+            let model_id = lenslocker_ml::similarity::resolve_siglip_model_id(&conn)?;
+            let source_vector = lenslocker_catalog::embedding_for_image(&conn, image_id, model_id)?
+                .ok_or(CmdError::ImageNotAnalyzedYet(image_id))?;
+            let floor = lenslocker_catalog::get_app_settings(&conn)?.similarity_search_floor;
+
+            rank_and_paginate(&conn, model_id, &source_vector, floor, Some(image_id), |dot| dot, filters.into(), offset, limit)
+        })
+    })
+    .await
+    .map_err(|e| CmdError::TaskPanicked(e.to_string()))?
+}
+
+/// Text-to-image search (ML-SPEC.md §8, ticket 034 decision #4) — embeds
+/// `query` live via SigLIP's text tower (CPU-only:
+/// [`lenslocker_ml::similarity::embed_text_query`]'s own doc comment
+/// explains why DirectML is off the table here), then ranks every
+/// analyzed photo by SigLIP's own calibrated zero-shot probability
+/// against that query — the same formula zero-shot tagging already uses,
+/// reused via `zero_shot_probability_from_dot` rather than decoding every
+/// candidate and re-dotting. Additive to the existing FTS keyword
+/// search, not a replacement — the frontend's own search-mode toggle
+/// decides which one a given query routes through, never both at once
+/// (ticket 034 leaves blending mechanics unspecified; a mode toggle
+/// avoids inventing a cross-metric score-blending scheme the spec
+/// doesn't ask for).
+#[tauri::command]
+async fn search_by_text(
+    app: tauri::AppHandle,
+    query: String,
+    filters: FiltersDto,
+    offset: i64,
+    limit: i64,
+) -> CmdResult<ListImagesResult> {
+    tauri::async_runtime::spawn_blocking(move || {
+        with_ready(&app.state::<Mutex<LibraryState>>(), |app_state| {
+            let conn = app_state.conn.lock().unwrap();
+            let model_id = lenslocker_ml::similarity::resolve_siglip_model_id(&conn)?;
+
+            let text_vector = lenslocker_ml::similarity::embed_text_query(&lenslocker_ml::models_dir(), &query)?;
+            let query_bytes = lenslocker_ml::encode_embedding(&text_vector);
+            let floor = lenslocker_catalog::get_app_settings(&conn)?.similarity_search_floor;
+
+            rank_and_paginate(
+                &conn,
+                model_id,
+                &query_bytes,
+                floor,
+                None,
+                |dot| lenslocker_ml::tagging::zero_shot_probability_from_dot(dot as f32) as f64,
+                filters.into(),
+                offset,
+                limit,
+            )
         })
     })
     .await
@@ -1511,6 +1638,8 @@ pub fn run() {
             list_images,
             get_image_detail,
             get_full_preview,
+            find_similar_images,
+            search_by_text,
             add_tag,
             remove_tag,
             confirm_auto_tag,
@@ -1674,6 +1803,7 @@ mod tests {
                 retention_days: 30,
                 tag_storage_threshold: 0.1,
                 tag_display_threshold: 0.5,
+                similarity_search_floor: 0.5,
             }
         );
 
