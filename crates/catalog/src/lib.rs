@@ -771,6 +771,51 @@ fn mark_face_match_resolved(conn: &Connection, queue_id: i64, status: &str) -> r
     Ok(())
 }
 
+// ── Saved albums / smart searches (ML-SPEC.md §7, ticket 031, Milestone
+// ML-5) ─────────────────────────────────────────────────────────────────
+//
+// "Always live — re-evaluated on open, never a static snapshot" (ticket
+// 031 decision #1): a saved album is nothing but a name + a serialized
+// filter/sort/search blob (`saved_albums.filters` — same JSON shape as
+// the frontend's own `filtersDto()` plus `sort`/`search`, per the
+// schema's own comment), re-run through the ordinary `list_images` query
+// every time it's opened. There is deliberately no image-membership table
+// (decision #4) — this crate never even parses `filters`'s contents; it's
+// an opaque blob to `catalog`, assembled and consumed entirely by the
+// frontend.
+
+pub struct SavedAlbum {
+    pub id: i64,
+    pub name: String,
+    pub filters: String,
+    pub created_at: String,
+}
+
+/// Every saved album, alphabetical (matching [`list_persons`]'s own
+/// findability-first ordering for a small, user-curated list).
+pub fn list_saved_albums(conn: &Connection) -> rusqlite::Result<Vec<SavedAlbum>> {
+    let mut stmt = conn.prepare("SELECT id, name, filters, created_at FROM saved_albums ORDER BY name COLLATE NOCASE")?;
+    stmt.query_map([], |row| {
+        Ok(SavedAlbum { id: row.get(0)?, name: row.get(1)?, filters: row.get(2)?, created_at: row.get(3)? })
+    })?
+    .collect()
+}
+
+/// Saves the current filter/sort/search state under `name` — always a new
+/// row (ticket 031's resolution never asks for update/rename-in-place
+/// semantics, and the schema itself has no unique constraint on `name`
+/// stopping one); duplicate names are the user's own choice to manage via
+/// delete, not something this layer prevents. Returns the new row's id.
+pub fn save_album(conn: &Connection, name: &str, filters_json: &str) -> rusqlite::Result<i64> {
+    conn.execute("INSERT INTO saved_albums (name, filters) VALUES (?1, ?2)", params![name.trim(), filters_json])?;
+    Ok(conn.last_insert_rowid())
+}
+
+pub fn delete_saved_album(conn: &Connection, id: i64) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM saved_albums WHERE id = ?1", [id])?;
+    Ok(())
+}
+
 // ── Full-text search index sync (workplan/SPEC.md §9's "text search" filter,
 // Milestone 5) ───────────────────────────────────────────────────────────
 //
@@ -849,6 +894,14 @@ pub struct ImageFilters {
     pub sources: Vec<String>,
     /// Tag names; OR'd together.
     pub tags: Vec<String>,
+    /// `persons.id` values (ticket 031's Person facet, Milestone ML-5) —
+    /// OR'd together like `tags`. Matches an image if any of its face
+    /// detections belong to a non-hidden cluster attributed to one of
+    /// these people — hidden clusters are excluded by default, mirroring
+    /// the People view's own `list_face_clusters(include_hidden: false)`
+    /// default, since a cluster the user hid shouldn't resurface photos
+    /// via a filter either.
+    pub persons: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -942,6 +995,17 @@ pub fn list_images(
         ));
         for t in &filters.tags {
             args.push(Box::new(t.clone()));
+        }
+    }
+    if !filters.persons.is_empty() {
+        let placeholders = vec!["?"; filters.persons.len()].join(",");
+        where_clauses.push(format!(
+            "im.id IN (SELECT fd.image_id FROM face_detections fd \
+             JOIN face_clusters fc ON fc.id = fd.face_cluster_id \
+             WHERE fc.hidden = 0 AND fc.person_id IN ({placeholders}))"
+        ));
+        for p in &filters.persons {
+            args.push(Box::new(*p));
         }
     }
     if let Some(q) = search.filter(|q| !q.trim().is_empty()) {
@@ -2463,6 +2527,42 @@ mod tests {
     }
 
     #[test]
+    fn list_images_filters_by_person_and_excludes_hidden_clusters() {
+        let conn = migrated_conn();
+        let library_id = test_library(&conn);
+        let alices_photo = insert_full_image(&conn, library_id, 50, "jpeg", "2026-01-01T00:00:00Z", 100, "D:/src", "a.jpg");
+        let bobs_photo = insert_full_image(&conn, library_id, 51, "jpeg", "2026-01-02T00:00:00Z", 100, "D:/src", "b.jpg");
+        let hidden_alice_photo = insert_full_image(&conn, library_id, 52, "jpeg", "2026-01-03T00:00:00Z", 100, "D:/src", "c.jpg");
+        let nobodys_photo = insert_full_image(&conn, library_id, 53, "jpeg", "2026-01-04T00:00:00Z", 100, "D:/src", "d.jpg");
+
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+
+        let alice_detection = super::insert_face_detection(&conn, &new_face(alices_photo, model_id, &[1])).unwrap();
+        let alice_cluster = super::create_cluster_with_member(&conn, alice_detection).unwrap();
+        let alice_id = super::name_cluster(&conn, alice_cluster, "Alice").unwrap();
+
+        let bob_detection = super::insert_face_detection(&conn, &new_face(bobs_photo, model_id, &[2])).unwrap();
+        let bob_cluster = super::create_cluster_with_member(&conn, bob_detection).unwrap();
+        super::name_cluster(&conn, bob_cluster, "Bob").unwrap();
+
+        let hidden_detection = super::insert_face_detection(&conn, &new_face(hidden_alice_photo, model_id, &[3])).unwrap();
+        let hidden_cluster = super::create_cluster_with_member(&conn, hidden_detection).unwrap();
+        super::name_cluster(&conn, hidden_cluster, "Alice").unwrap();
+        super::set_cluster_hidden(&conn, hidden_cluster, true).unwrap();
+
+        let _ = nobodys_photo;
+
+        let filters = super::ImageFilters { persons: vec![alice_id], ..Default::default() };
+        let (page, total) = super::list_images(&conn, &filters, super::SortOrder::CapturedDesc, None, 0, 10).unwrap();
+
+        let ids: Vec<i64> = page.iter().map(|g| g.id).collect();
+        assert_eq!(total, 1, "must match only the non-hidden Alice photo");
+        assert!(ids.contains(&alices_photo));
+        assert!(!ids.contains(&hidden_alice_photo), "a hidden cluster's photos must not surface via the Person filter");
+        assert!(!ids.contains(&bobs_photo));
+    }
+
+    #[test]
     fn list_images_filters_by_source_root() {
         let conn = migrated_conn();
         let library_id = test_library(&conn);
@@ -2874,5 +2974,40 @@ mod tests {
             settings.tag_storage_threshold <= settings.tag_display_threshold,
             "storage floor must never exceed the display floor"
         );
+    }
+
+    #[test]
+    fn save_album_inserts_and_list_saved_albums_returns_it_alphabetically() {
+        let conn = migrated_conn();
+        super::save_album(&conn, "Zebras", r#"{"tags":["zebra"]}"#).unwrap();
+        super::save_album(&conn, "  Alpine Trip  ", r#"{"tags":["alpine"]}"#).unwrap();
+
+        let albums = super::list_saved_albums(&conn).unwrap();
+        let names: Vec<&str> = albums.iter().map(|a| a.name.as_str()).collect();
+        assert_eq!(names, vec!["Alpine Trip", "Zebras"], "alphabetical, and the name must be trimmed before storing");
+        assert_eq!(albums[0].filters, r#"{"tags":["alpine"]}"#);
+    }
+
+    #[test]
+    fn save_album_always_inserts_a_new_row_even_for_a_duplicate_name() {
+        let conn = migrated_conn();
+        super::save_album(&conn, "Beach", "{}").unwrap();
+        super::save_album(&conn, "Beach", "{}").unwrap();
+
+        let albums = super::list_saved_albums(&conn).unwrap();
+        assert_eq!(albums.len(), 2, "Save always creates a new row — no update-by-name semantics");
+    }
+
+    #[test]
+    fn delete_saved_album_removes_only_the_targeted_row() {
+        let conn = migrated_conn();
+        let keep_id = super::save_album(&conn, "Keep", "{}").unwrap();
+        let delete_id = super::save_album(&conn, "Delete Me", "{}").unwrap();
+
+        super::delete_saved_album(&conn, delete_id).unwrap();
+
+        let albums = super::list_saved_albums(&conn).unwrap();
+        assert_eq!(albums.len(), 1);
+        assert_eq!(albums[0].id, keep_id);
     }
 }

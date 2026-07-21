@@ -227,6 +227,8 @@ struct FiltersDto {
     sources: Vec<String>,
     #[serde(default)]
     tags: Vec<String>,
+    #[serde(default)]
+    persons: Vec<i64>,
 }
 
 impl From<FiltersDto> for ImageFilters {
@@ -237,6 +239,7 @@ impl From<FiltersDto> for ImageFilters {
             formats: f.formats,
             sources: f.sources,
             tags: f.tags,
+            persons: f.persons,
         }
     }
 }
@@ -813,6 +816,52 @@ fn list_sources(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<Vec<Sourc
                 count: s.count,
             })
             .collect())
+    })
+}
+
+// ── Saved albums (ML-SPEC.md §7, ticket 031, Milestone ML-5) ───────────────
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct SavedAlbumDto {
+    id: i64,
+    name: String,
+    filters: String,
+    created_at: String,
+}
+
+impl From<lenslocker_catalog::SavedAlbum> for SavedAlbumDto {
+    fn from(a: lenslocker_catalog::SavedAlbum) -> Self {
+        Self { id: a.id, name: a.name, filters: a.filters, created_at: a.created_at }
+    }
+}
+
+#[tauri::command]
+fn list_saved_albums(state: tauri::State<Mutex<LibraryState>>) -> CmdResult<Vec<SavedAlbumDto>> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        Ok(lenslocker_catalog::list_saved_albums(&conn)?.into_iter().map(Into::into).collect())
+    })
+}
+
+/// `filters` is an opaque JSON blob to this whole layer — assembled and
+/// consumed entirely by the frontend (`filtersDto()` + `sort` + `search`),
+/// never parsed here or in `catalog`. See [`lenslocker_catalog::save_album`]
+/// for why this always inserts a new row rather than upserting by name.
+#[tauri::command]
+fn save_album(state: tauri::State<Mutex<LibraryState>>, name: String, filters: String) -> CmdResult<i64> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        Ok(lenslocker_catalog::save_album(&conn, &name, &filters)?)
+    })
+}
+
+#[tauri::command]
+fn delete_saved_album(state: tauri::State<Mutex<LibraryState>>, id: i64) -> CmdResult<()> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        lenslocker_catalog::delete_saved_album(&conn, id)?;
+        Ok(())
     })
 }
 
@@ -1470,6 +1519,9 @@ pub fn run() {
             bulk_remove_tag,
             list_tags,
             list_sources,
+            list_saved_albums,
+            save_album,
+            delete_saved_album,
             list_face_clusters,
             list_persons,
             name_face_cluster,

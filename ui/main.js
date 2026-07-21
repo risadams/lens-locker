@@ -46,9 +46,15 @@ const state = {
   formats: new Set(),
   sources: new Set(),
   tags: new Set(),
+  persons: new Set(),        // person ids (ticket 031's Person facet, Milestone ML-5)
   sort: 'captured-desc',
   query: '',
 };
+
+// id -> name, refreshed whenever the Person popover renders — active-filter
+// pills and the popover itself both need a name for an id, and list_persons
+// is the only source of that mapping.
+let personNamesById = new Map();
 
 const DATE_PRESETS = [
   { label: 'Today', days: 1 },
@@ -76,6 +82,7 @@ function filtersDto() {
     formats: [...state.formats],
     sources: [...state.sources],
     tags: [...state.tags],
+    persons: [...state.persons],
   };
 }
 
@@ -330,7 +337,7 @@ gridWrap.addEventListener('scroll', scheduleRenderWindow);
 window.addEventListener('resize', () => layout());
 
 function hasActiveQuery() {
-  return !!(state.dateRange || state.formats.size || state.sources.size || state.tags.size || state.query);
+  return !!(state.dateRange || state.formats.size || state.sources.size || state.tags.size || state.persons.size || state.query);
 }
 
 function updateCount() {
@@ -357,7 +364,7 @@ document.addEventListener('click', () => closeAllPops());
 
 async function renderFilterBar() {
   const bar = document.getElementById('filterBar');
-  const dateOn = !!state.dateRange, fmtOn = state.formats.size > 0, srcOn = state.sources.size > 0, tagOn = state.tags.size > 0;
+  const dateOn = !!state.dateRange, fmtOn = state.formats.size > 0, srcOn = state.sources.size > 0, tagOn = state.tags.size > 0, personOn = state.persons.size > 0;
   bar.innerHTML = `
     <div class="chip ${dateOn ? 'on' : ''}" id="dateChip">
       ${state.dateRange ? escapeHtml(state.dateRange.label) : 'Date'}
@@ -375,15 +382,20 @@ async function renderFilterBar() {
       Tags${tagOn ? ` (${state.tags.size})` : ''}
       <div class="popover" id="tagPop"></div>
     </div>
+    <div class="chip ${personOn ? 'on' : ''}" id="personChip">
+      Person${personOn ? ` (${state.persons.size})` : ''}
+      <div class="popover" id="personPop"></div>
+    </div>
   `;
   document.getElementById('dateChip').addEventListener('click', (e) => togglePop('datePop', e));
   document.getElementById('fmtChip').addEventListener('click', (e) => togglePop('fmtPop', e));
   document.getElementById('srcChip').addEventListener('click', (e) => togglePop('srcPop', e));
   document.getElementById('tagChip').addEventListener('click', (e) => togglePop('tagPop', e));
+  document.getElementById('personChip').addEventListener('click', (e) => togglePop('personPop', e));
   [...bar.querySelectorAll('.popover')].forEach(p => p.addEventListener('click', (e) => e.stopPropagation()));
 
   renderDatePop();
-  await Promise.all([renderFormatPop(), renderSourcePop(), renderTagPop()]);
+  await Promise.all([renderFormatPop(), renderSourcePop(), renderTagPop(), renderPersonPop()]);
 }
 
 function renderDatePop() {
@@ -467,12 +479,34 @@ async function renderTagPop() {
   }));
 }
 
+// The Person facet (ticket 031, Milestone ML-5) — mirrors renderTagPop
+// exactly, backed by list_persons (already built for the People view)
+// instead of list_tags. personNamesById is refreshed here so active-filter
+// pills (which only have an id, not a name) can look one up.
+async function renderPersonPop() {
+  const pop = document.getElementById('personPop');
+  let persons = [];
+  try { persons = await invoke('list_persons'); } catch (e) { console.error(e); }
+  personNamesById = new Map(persons.map(p => [p.id, p.name]));
+  pop.innerHTML = persons.map(p => {
+    const on = state.persons.has(p.id);
+    return `<div class="popover-item ${on ? 'checked' : ''}" data-person="${p.id}"><span class="box">${on ? checkIcon() : ''}</span><span class="label">${escapeHtml(p.name)}</span></div>`;
+  }).join('') || `<div style="font-size:10px;color:var(--text-faint);padding:4px 8px 6px">No named people yet</div>`;
+  pop.querySelectorAll('[data-person]').forEach(el => el.addEventListener('click', (e) => {
+    e.stopPropagation();
+    const id = Number(el.dataset.person);
+    state.persons.has(id) ? state.persons.delete(id) : state.persons.add(id);
+    refresh();
+  }));
+}
+
 function renderActiveFilters() {
   const pills = [];
   if (state.dateRange) pills.push({ text: state.dateRange.label, clear: () => { state.dateRange = null; } });
   state.formats.forEach(f => pills.push({ text: f.toUpperCase(), clear: () => state.formats.delete(f) }));
   state.sources.forEach(s => pills.push({ text: s.split(/[\\/]/).pop(), clear: () => state.sources.delete(s) }));
   state.tags.forEach(t => pills.push({ text: '#' + t, clear: () => state.tags.delete(t) }));
+  state.persons.forEach(id => pills.push({ text: personNamesById.get(id) ?? `Person #${id}`, clear: () => state.persons.delete(id) }));
 
   const bar = document.getElementById('activeFilters');
   if (!pills.length) { bar.classList.remove('show'); bar.innerHTML = ''; return; }
@@ -484,8 +518,17 @@ function renderActiveFilters() {
   bar.querySelector('#clearAllBtn').addEventListener('click', clearAllFilters);
 }
 function clearAllFilters() {
-  state.dateRange = null; state.formats.clear(); state.sources.clear(); state.tags.clear();
+  state.dateRange = null; state.formats.clear(); state.sources.clear(); state.tags.clear(); state.persons.clear();
   refresh();
+}
+
+// Shared by the sort popover's own click handler and `openSavedAlbum` —
+// both need to set state.sort and keep the visible sortLabel text in sync
+// with it; only the popover click additionally closes/re-renders the
+// popover and refreshes the grid immediately.
+function setSort(key) {
+  state.sort = key;
+  document.getElementById('sortLabel').textContent = (SORT_OPTIONS.find(o => o.key === key) ?? SORT_OPTIONS[0]).label;
 }
 
 function renderSortPop() {
@@ -496,8 +539,7 @@ function renderSortPop() {
   }).join('');
   pop.querySelectorAll('[data-sort]').forEach(el => el.addEventListener('click', (e) => {
     e.stopPropagation();
-    state.sort = el.dataset.sort;
-    document.getElementById('sortLabel').textContent = SORT_OPTIONS.find(o => o.key === state.sort).label;
+    setSort(el.dataset.sort);
     closeAllPops();
     renderSortPop();
     refreshGrid();
@@ -907,6 +949,86 @@ function openImportModal() {
 function closeImportModal() { document.getElementById('importModal').classList.remove('open'); }
 document.getElementById('railImportBtn').addEventListener('click', openImportModal);
 document.getElementById('topbarImportBtn').addEventListener('click', openImportModal);
+
+// ── Smart albums (ML-SPEC.md §7, ticket 031, Milestone ML-5) ───────────────
+// "Save as Smart Album" saves the *current* filter/sort/search combination
+// under a name — "no separate query-builder UI... let any combination of
+// existing facets be named and saved" (ticket 031 decision #2). The saved
+// blob is exactly filtersDto() plus sort/search, matching saved_albums'
+// own documented shape, so a new facet is automatically saveable without
+// ever touching this function again.
+document.getElementById('saveAlbumBtn').addEventListener('click', (e) => {
+  promptTagNameInput(e.currentTarget, async (name) => {
+    const filters = JSON.stringify({ ...filtersDto(), sort: state.sort, search: state.query });
+    try {
+      await invoke('save_album', { name, filters });
+      showToast(`Saved “${name}”`);
+    } catch (err) { showToast('Could not save this album'); }
+  }, { placeholder: 'album name…' });
+});
+
+async function renderAlbumsView() {
+  let albums = [];
+  try { albums = await invoke('list_saved_albums'); } catch (e) { showToast('Could not load Albums'); return; }
+  document.getElementById('albumsCount').textContent = `${albums.length} album${albums.length === 1 ? '' : 's'}`;
+
+  const list = document.getElementById('albums-list');
+  if (!albums.length) {
+    list.innerHTML = `<div class="empty-results" style="position:static">No albums saved yet.</div>`;
+    return;
+  }
+  list.innerHTML = albums.map(a => `
+    <div class="face-match-card">
+      <div>
+        <div class="people-card-name">${escapeHtml(a.name)}</div>
+        <div class="face-match-similarity">Saved ${a.createdAt ? a.createdAt.slice(0, 10) : ''}</div>
+      </div>
+      <div class="face-match-actions">
+        <button class="btn" data-delete-album="${a.id}">Delete</button>
+        <button class="btn btn-primary" data-open-album="${a.id}">Open</button>
+      </div>
+    </div>
+  `).join('');
+
+  list.querySelectorAll('[data-open-album]').forEach(btn => btn.addEventListener('click', () => {
+    const album = albums.find(a => a.id === Number(btn.dataset.openAlbum));
+    if (album) openSavedAlbum(album);
+  }));
+  list.querySelectorAll('[data-delete-album]').forEach(btn => btn.addEventListener('click', async () => {
+    try {
+      await invoke('delete_saved_album', { id: Number(btn.dataset.deleteAlbum) });
+      renderAlbumsView();
+    } catch (err) { showToast('Could not delete this album'); }
+  }));
+}
+
+// Loading a saved album means replacing `state`'s filter/sort/search
+// fields wholesale from its stored JSON (the same shape `filtersDto()` +
+// sort + search produced when it was saved), then switching to the grid
+// — "opening one shows the same grid with that album's filters
+// pre-applied and editable" (ticket 031 decision #3). "Editable" needs no
+// special handling here: once loaded, this is just the live `state` like
+// any manually-built filter combination, freely changeable afterward.
+function openSavedAlbum(album) {
+  let parsed;
+  try { parsed = JSON.parse(album.filters); } catch (e) { showToast('This album’s saved filters are corrupted'); return; }
+
+  state.formats = new Set(parsed.formats || []);
+  state.sources = new Set(parsed.sources || []);
+  state.tags = new Set(parsed.tags || []);
+  state.persons = new Set(parsed.persons || []);
+  state.dateRange = (parsed.dateFrom || parsed.dateTo)
+    ? { label: `${parsed.dateFrom || '…'} – ${parsed.dateTo || '…'}`, from: parsed.dateFrom || null, to: parsed.dateTo || null }
+    : null;
+  state.query = parsed.search || '';
+
+  setSort(parsed.sort || 'captured-desc');
+  document.getElementById('searchInput').value = state.query;
+  renderSortPop();
+
+  switchView('grid');
+  refresh();
+}
 
 // ── Bulk tag correction (ML-SPEC.md §5) — the grid multi-select
 // primitive's first real use. Uses the same promptTagNameInput helper the
@@ -1486,9 +1608,11 @@ function switchView(name) {
   document.getElementById('view-grid').style.display = currentView === 'grid' ? 'flex' : 'none';
   document.getElementById('view-review').style.display = currentView === 'review' ? 'flex' : 'none';
   document.getElementById('view-people').style.display = currentView === 'people' ? 'flex' : 'none';
+  document.getElementById('view-albums').style.display = currentView === 'albums' ? 'flex' : 'none';
   if (currentView === 'grid') layout();
   if (currentView === 'review') renderReviewQueue();
   if (currentView === 'people') renderPeopleView();
+  if (currentView === 'albums') renderAlbumsView();
 }
 
 document.querySelectorAll('.rail-btn[data-view]').forEach(btn => {
@@ -1526,6 +1650,7 @@ document.getElementById('view-grid').style.minHeight = '0';
 // way view-grid's state is already established above.
 document.getElementById('view-review').style.display = 'none';
 document.getElementById('view-people').style.display = 'none';
+document.getElementById('view-albums').style.display = 'none';
 
 // ── First-run vault setup (Milestone 5.5) ────────────────────────────────
 //

@@ -83,6 +83,9 @@
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><circle cx="12" cy="8" r="3.5"/><path d="M5 20c0-3.5 3-6 7-6s7 2.5 7 6"/></svg>
         <span class="rail-badge" id="peopleBadge" style="display:none">0</span>
       </button>
+      <button class="rail-btn" data-view="albums" title="Albums">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M3 5a2 2 0 012-2h4l2 2h8a2 2 0 012 2v10a2 2 0 01-2 2H5a2 2 0 01-2-2V5z"/></svg>
+      </button>
       <div class="rail-spacer"></div>
       <button class="rail-btn" title="Import" id="railImportBtn">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6"><path d="M12 3v12m0 0l-4-4m4 4l4-4M4 19h16"/></svg>
@@ -105,6 +108,7 @@
             <svg class="chev" viewBox="0 0 24 24" fill="currentColor"><path d="M7 10l5 5 5-5z"/></svg>
             <div class="popover sort-popover" id="sortPop"></div>
           </div>
+          <button class="btn" id="saveAlbumBtn" title="Save the current filters, sort, and search as a smart album">Save as Smart Album</button>
           <div class="search-wrap">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
             <input class="search" id="searchInput" placeholder="Search tags, camera, filename…">
@@ -156,6 +160,18 @@
           <p class="review-intro">Faces are grouped automatically as photos are processed — nothing here is a claim about who's who until you name a group. Naming attaches to an existing person if the name matches one you've already used. A group you don't want to see again can be hidden without deleting anything. Pick two groups (checkbox on each card) to merge them if they're the same person.</p>
           <div id="people-needs-review"></div>
           <div id="people-grid" class="people-grid"></div>
+        </div>
+      </div>
+
+      <!-- ALBUMS VIEW -->
+      <div id="view-albums" style="display:none; flex-direction: column; flex: 1; min-height: 0;">
+        <div class="topbar">
+          <span class="topbar-title">Albums</span>
+          <span class="topbar-count" id="albumsCount">0 albums</span>
+        </div>
+        <div class="review-list">
+          <p class="review-intro">A saved album is just a filter combination with a name — it always shows whatever currently matches, including photos imported after it was saved. Save one from the "Save as Smart Album" button on the filter bar.</p>
+          <div id="albums-list"></div>
         </div>
       </div>
     </div>
