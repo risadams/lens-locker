@@ -178,6 +178,24 @@ pub fn reject_tag(conn: &Connection, image_id: i64, tag_name: &str) -> rusqlite:
     Ok(())
 }
 
+/// The `source` (`"manual"`/`"auto"`) of `tag_name` on `image_id`, if
+/// that tag is currently applied there — `None` if the image doesn't
+/// carry this tag at all. Lets a caller route between [`remove_tag`] and
+/// [`reject_tag`] per image, since the same tag name can be manual on one
+/// image and auto-sourced on another (Milestone ML-4's bulk correction —
+/// §5 — needs exactly this per-image branch; a single-image drawer
+/// already has the tag's provenance in hand and doesn't need to ask).
+pub fn tag_source_for_image(conn: &Connection, image_id: i64, tag_name: &str) -> rusqlite::Result<Option<String>> {
+    conn.query_row(
+        "SELECT it.source FROM image_tags it
+         JOIN tags t ON t.id = it.tag_id
+         WHERE it.image_id = ?1 AND t.name = ?2",
+        params![image_id, tag_name],
+        |row| row.get(0),
+    )
+    .optional()
+}
+
 /// Flips an auto-tag's `review_state` to `confirmed` without touching its
 /// `source` — confirming doesn't turn a model-generated tag into a
 /// manually-typed one, keeping provenance honest (§4). A no-op if
@@ -1149,6 +1167,21 @@ mod tests {
             .unwrap();
         assert_eq!(source, "auto");
         assert_eq!(review_state, Some("confirmed".to_string()));
+    }
+
+    #[test]
+    fn tag_source_for_image_reports_the_right_source_per_image() {
+        let conn = migrated_conn();
+        let manual_image = insert_test_image(&conn);
+        let auto_image = insert_test_image(&conn);
+        let untagged_image = insert_test_image(&conn);
+
+        super::add_tag(&conn, manual_image, "beach").unwrap();
+        super::apply_auto_tag(&conn, auto_image, "beach", 0.9).unwrap();
+
+        assert_eq!(super::tag_source_for_image(&conn, manual_image, "beach").unwrap(), Some("manual".to_string()));
+        assert_eq!(super::tag_source_for_image(&conn, auto_image, "beach").unwrap(), Some("auto".to_string()));
+        assert_eq!(super::tag_source_for_image(&conn, untagged_image, "beach").unwrap(), None);
     }
 
     #[test]

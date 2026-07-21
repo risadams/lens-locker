@@ -498,13 +498,30 @@ fn bulk_add_tag(state: tauri::State<Mutex<LibraryState>>, image_ids: Vec<i64>, t
 }
 
 /// Removes `tag` from every id in `image_ids` — [`bulk_add_tag`]'s
-/// counterpart, same partial-application-on-error contract.
+/// counterpart, same partial-application-on-error contract. Per image,
+/// routes through [`lenslocker_catalog::reject_tag`] instead of
+/// [`lenslocker_catalog::remove_tag`] when that image's copy of the tag
+/// is auto-sourced — matching the single-image drawer's own
+/// `confirm_auto_tag`/`reject_auto_tag` routing (`ui/main.js`'s
+/// `renderDrawerTags`) — rather than always plain-deleting. §5's own
+/// motivating example for bulk correction is literally "the model
+/// consistently mis-tagging something across many photos"; always using
+/// `remove_tag` would let that same wrong auto-tag silently reappear on
+/// every image in the selection the next time it re-scores, exactly what
+/// `rejected_tags` exists to prevent. The same tag name can be manual on
+/// one selected image and auto-sourced on another, so this is decided per
+/// image, not once for the whole batch.
 #[tauri::command]
 fn bulk_remove_tag(state: tauri::State<Mutex<LibraryState>>, image_ids: Vec<i64>, tag: String) -> CmdResult<()> {
     with_ready(&state, |app_state| {
         let conn = app_state.conn.lock().unwrap();
         for image_id in image_ids {
-            lenslocker_catalog::remove_tag(&conn, image_id, &tag)?;
+            let source = lenslocker_catalog::tag_source_for_image(&conn, image_id, &tag)?;
+            if source.as_deref() == Some("auto") {
+                lenslocker_catalog::reject_tag(&conn, image_id, &tag)?;
+            } else {
+                lenslocker_catalog::remove_tag(&conn, image_id, &tag)?;
+            }
             lenslocker_xmp::sync_sidecar(&conn, image_id)?;
         }
         Ok(())
@@ -1457,5 +1474,55 @@ mod tests {
         lenslocker_catalog::add_tag(&conn, image_id, "beach").unwrap(); // retry, e.g. after a bad_id further down the same selection failed
 
         assert_eq!(lenslocker_catalog::tags_for_image(&conn, image_id).unwrap(), vec!["beach".to_string()]);
+    }
+
+    /// `bulk_remove_tag` itself is a thin loop with no `#[tauri::command]`
+    /// logic of its own (same reasoning as the two tests above) — this
+    /// exercises the real per-image routing decision it makes: an
+    /// auto-sourced tag goes through `reject_tag` (persists the
+    /// rejection), a manual one through plain `remove_tag`, even when
+    /// both images are in the same bulk selection with the same tag name.
+    #[test]
+    fn bulk_remove_routes_auto_tags_through_reject_and_manual_tags_through_remove() {
+        let dir = tempfile::tempdir().unwrap();
+        let app_state = create_library_at(&dir.path().join("vault"), true).unwrap();
+        let conn = app_state.conn.lock().unwrap();
+
+        let insert_image = |hash: u8| -> i64 {
+            conn.execute(
+                "INSERT INTO images (
+                    library_id, original_hash, stored_hash, stored_path,
+                    original_format, stored_format, file_size_bytes
+                ) VALUES (?1, ?2, x'00', 'a', 'jpeg', 'jpeg', 0)",
+                rusqlite::params![app_state.library_id, vec![hash]],
+            )
+            .unwrap();
+            conn.last_insert_rowid()
+        };
+        let manual_image = insert_image(1);
+        let auto_image = insert_image(2);
+
+        lenslocker_catalog::add_tag(&conn, manual_image, "beach").unwrap();
+        lenslocker_catalog::apply_auto_tag(&conn, auto_image, "beach", 0.9).unwrap();
+
+        // Mirrors bulk_remove_tag's own per-image routing decision (the
+        // command itself isn't callable here — no tauri::State outside a
+        // running app; see the tests above).
+        for image_id in [manual_image, auto_image] {
+            let source = lenslocker_catalog::tag_source_for_image(&conn, image_id, "beach").unwrap();
+            if source.as_deref() == Some("auto") {
+                lenslocker_catalog::reject_tag(&conn, image_id, "beach").unwrap();
+            } else {
+                lenslocker_catalog::remove_tag(&conn, image_id, "beach").unwrap();
+            }
+        }
+
+        assert_eq!(lenslocker_catalog::tags_for_image(&conn, manual_image).unwrap(), Vec::<String>::new());
+        assert_eq!(lenslocker_catalog::tags_for_image(&conn, auto_image).unwrap(), Vec::<String>::new());
+
+        // The auto image's rejection must persist — re-scoring must not
+        // silently reapply it; the manual image has no such memory.
+        lenslocker_catalog::apply_auto_tag(&conn, auto_image, "beach", 0.95).unwrap();
+        assert_eq!(lenslocker_catalog::tags_for_image(&conn, auto_image).unwrap(), Vec::<String>::new(), "rejection must survive a re-score");
     }
 }

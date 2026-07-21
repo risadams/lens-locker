@@ -250,23 +250,16 @@ gridWindow.addEventListener('click', (e) => {
   if (!cell) return;
   const id = Number(cell.dataset.id);
   const idx = Number(cell.dataset.idx);
+  const onPickTarget = !!e.target.closest('[data-pick]');
 
-  if (e.target.closest('[data-pick]')) {
-    e.stopPropagation();
-    if (e.shiftKey && lastClickedIdx !== null) {
-      selectRange(lastClickedIdx, idx);
-    } else {
-      toggleBulkSelection(id);
-    }
-    lastClickedIdx = idx;
-    return;
-  }
-
-  // Once 1+ items are already selected, clicking a thumb's body continues
-  // selecting instead of opening the drawer (module doc comment above
-  // bulkSelection's declaration) — a stray click can't silently abandon a
-  // half-built selection.
-  if (bulkSelection.size > 0) {
+  // The checkbox always selects; the thumb's body only selects once 1+
+  // items are already selected — "once selection is active, clicking a
+  // thumb's body continues selecting instead of opening the drawer"
+  // (module doc comment above bulkSelection's declaration) — a stray
+  // click can't silently abandon a half-built selection. Otherwise, a
+  // body click opens the drawer as it always has.
+  if (onPickTarget || bulkSelection.size > 0) {
+    if (onPickTarget) e.stopPropagation();
     if (e.shiftKey && lastClickedIdx !== null) {
       selectRange(lastClickedIdx, idx);
     } else {
@@ -588,15 +581,8 @@ function renderDrawerTags(detail) {
   }));
   el.querySelector('#tagAddBtn').addEventListener('click', (e) => {
     e.stopPropagation();
-    el.querySelector('#tagAddBtn').remove();
-    const input = document.createElement('input');
-    input.className = 'tag-input';
-    input.placeholder = 'tag name…';
-    el.appendChild(input);
-    input.focus();
-    const commit = async () => {
-      const value = input.value.trim();
-      if (value && !detail.tags.some(t => t.name === value)) {
+    promptTagNameInput(el.querySelector('#tagAddBtn'), async (value) => {
+      if (!detail.tags.some(t => t.name === value)) {
         await invoke('add_tag', { imageId: detail.id, tag: value });
         detail.tags.push({ name: value, source: 'manual', confidence: null, reviewState: null });
         detail.tags.sort((a, b) => a.name.localeCompare(b.name));
@@ -604,13 +590,45 @@ function renderDrawerTags(detail) {
       renderDrawerTags(detail);
       invalidateItemTags(detail.id, detail.tags.map(t => t.name));
       renderTagPop();
-    };
-    input.addEventListener('keydown', (ev) => {
-      if (ev.key === 'Enter') commit();
-      if (ev.key === 'Escape') renderDrawerTags(detail);
     });
-    input.addEventListener('blur', commit);
   });
+}
+
+// Shared by the drawer's "+ Add tag" flow above and the bulk-bar's "Add
+// tag"/"Remove tag" flows below — all three need the exact same
+// create-input/focus/commit-on-Enter-or-blur/Escape-discards lifecycle;
+// factored out once rather than parallel-implemented per call site.
+// Replaces `triggerEl` with a text input; on Enter or blur with a
+// non-empty trimmed value, restores `triggerEl` and calls
+// `onCommit(value)`; on Escape, or an empty Enter/blur, just restores
+// `triggerEl` unchanged (Escape always discards, even if something was
+// typed — a different rule from blur/Enter, which only "cancel" when
+// there was nothing to commit).
+function promptTagNameInput(triggerEl, onCommit) {
+  const input = document.createElement('input');
+  input.className = 'tag-input';
+  input.placeholder = 'tag name…';
+  triggerEl.replaceWith(input);
+  input.focus();
+  let settled = false;
+  const restore = () => { if (input.isConnected) input.replaceWith(triggerEl); };
+  const commit = async () => {
+    if (settled) return;
+    settled = true;
+    const value = input.value.trim();
+    restore();
+    if (value) await onCommit(value);
+  };
+  const cancel = () => {
+    if (settled) return;
+    settled = true;
+    restore();
+  };
+  input.addEventListener('keydown', (ev) => {
+    if (ev.key === 'Enter') commit();
+    if (ev.key === 'Escape') cancel();
+  });
+  input.addEventListener('blur', commit);
 }
 
 function invalidateItemTags(id, tags) {
@@ -812,38 +830,25 @@ document.getElementById('railImportBtn').addEventListener('click', openImportMod
 document.getElementById('topbarImportBtn').addEventListener('click', openImportModal);
 
 // ── Bulk tag correction (ML-SPEC.md §5) — the grid multi-select
-// primitive's first real use. Reuses the drawer's own click-to-input tag
-// pattern (renderDrawerTags) for a consistent add-a-tag-name interaction,
-// rather than a native prompt() (which this app's other tag-entry flow
-// never uses either).
-function promptBulkTagName(button, onCommit) {
-  const input = document.createElement('input');
-  input.className = 'tag-input';
-  input.placeholder = 'tag name…';
-  button.replaceWith(input);
-  input.focus();
-  let committed = false;
-  const commit = async () => {
-    if (committed) return;
-    committed = true;
-    const value = input.value.trim();
-    input.replaceWith(button);
-    if (value) await onCommit(value);
-  };
-  input.addEventListener('keydown', (ev) => {
-    if (ev.key === 'Enter') commit();
-    if (ev.key === 'Escape') { committed = true; input.replaceWith(button); }
-  });
-  input.addEventListener('blur', commit);
-}
+// primitive's first real use. Uses the same promptTagNameInput helper the
+// drawer's own tag-add flow does (defined next to renderDrawerTags,
+// above), rather than a native prompt() (which this app never uses for
+// tag entry either).
 
 document.getElementById('bulkAddTagBtn').addEventListener('click', (e) => {
   const ids = [...bulkSelection];
-  promptBulkTagName(e.currentTarget, async (tag) => {
+  promptTagNameInput(e.currentTarget, async (tag) => {
     try {
       await invoke('bulk_add_tag', { imageIds: ids, tag });
     } catch (err) {
+      // bulk_add_tag's own contract (src-tauri/src/lib.rs): stops at the
+      // first failing id, ids processed before it stay applied. Which
+      // ones isn't knowable from here, so — matching get_image_detail's
+      // own catch (this file, ~line 518): don't optimistically apply the
+      // change to any cached item on failure, rather than guess and risk
+      // the grid showing a tag that was never actually saved.
       showToast('Could not add the tag to every selected photo');
+      return;
     }
     for (const id of ids) {
       const item = [...itemCache.values()].find(it => it.id === id);
@@ -856,11 +861,14 @@ document.getElementById('bulkAddTagBtn').addEventListener('click', (e) => {
 
 document.getElementById('bulkRemoveTagBtn').addEventListener('click', (e) => {
   const ids = [...bulkSelection];
-  promptBulkTagName(e.currentTarget, async (tag) => {
+  promptTagNameInput(e.currentTarget, async (tag) => {
     try {
       await invoke('bulk_remove_tag', { imageIds: ids, tag });
     } catch (err) {
+      // See bulkAddTagBtn's matching catch above for why this returns
+      // early instead of optimistically updating the cache.
       showToast('Could not remove the tag from every selected photo');
+      return;
     }
     for (const id of ids) {
       const item = [...itemCache.values()].find(it => it.id === id);
