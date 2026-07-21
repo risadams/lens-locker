@@ -1148,6 +1148,7 @@ async function renderPeopleView() {
 
   renderPersonDatalist(persons);
   document.getElementById('peopleCount').textContent = `${clusters.length} group${clusters.length === 1 ? '' : 's'}`;
+  peopleClustersCache = clusters;
 
   const grid = document.getElementById('people-grid');
   if (!clusters.length) {
@@ -1155,8 +1156,11 @@ async function renderPeopleView() {
     return;
   }
   grid.innerHTML = clusters.map(c => `
-    <div class="people-card" data-cluster-card="${c.id}">
-      <div class="people-card-thumb" data-expand-cluster="${c.id}">${c.representativeCropPath ? `<img src="${assetSrc(c.representativeCropPath)}" alt="">` : ''}</div>
+    <div class="people-card${mergeSelection.has(c.id) ? ' people-card-picked' : ''}" data-cluster-card="${c.id}">
+      <div class="people-card-thumb" data-expand-cluster="${c.id}">
+        ${c.representativeCropPath ? `<img src="${assetSrc(c.representativeCropPath)}" alt="">` : ''}
+        <div class="people-card-pick" data-pick-cluster="${c.id}" title="Select to merge">${mergeSelection.has(c.id) ? checkIcon() : ''}</div>
+      </div>
       <div class="people-card-crops" id="crops-${c.id}" style="display:none"></div>
       <div class="people-card-body">
         <div class="people-card-count">${c.photoCount} photo${c.photoCount === 1 ? '' : 's'}</div>
@@ -1170,8 +1174,11 @@ async function renderPeopleView() {
 
   // "click a cluster, see its member thumbnails + photo count" (028
   // decision #3) — a read-only expand, fetched lazily on first click
-  // rather than upfront for every card. Not the selectable grid Slice D's
-  // split/merge flow needs; this is display only.
+  // rather than upfront for every card. Distinct from the merge checkbox
+  // below (which operates on whole cluster cards) and from Slice D3's
+  // still-unbuilt primitive (selecting individual face crops *within* one
+  // cluster, for Split) — three different selection granularities that
+  // only look similar at a glance.
   grid.querySelectorAll('[data-expand-cluster]').forEach(thumb => thumb.addEventListener('click', async (e) => {
     e.stopPropagation();
     const panel = document.getElementById(`crops-${thumb.dataset.expandCluster}`);
@@ -1184,6 +1191,11 @@ async function renderPeopleView() {
       panel.dataset.loaded = '1';
     }
     panel.style.display = 'flex';
+  }));
+
+  grid.querySelectorAll('[data-pick-cluster]').forEach(pick => pick.addEventListener('click', (e) => {
+    e.stopPropagation();
+    toggleMergeSelection(Number(pick.dataset.pickCluster));
   }));
 
   grid.querySelectorAll('button[data-name-cluster]').forEach(btn => btn.addEventListener('click', (e) => {
@@ -1200,10 +1212,166 @@ async function renderPeopleView() {
     try {
       await invoke('set_face_cluster_hidden', { clusterId: Number(btn.dataset.hideCluster), hidden: true });
       showToast('Hidden — hidden groups are never deleted');
+      // A hidden cluster drops out of the (non-hidden-only) list this view
+      // shows — clear any stale merge selection referencing it, since the
+      // merge bar's "2 selected" count must only ever count cards actually
+      // visible and checked.
+      mergeSelection.delete(Number(btn.dataset.hideCluster));
+      updateMergeBar();
       renderPeopleView();
     } catch (err) { showToast('Could not hide this group'); }
   }));
 }
+
+// ── Cluster merge (028 decision #4, Milestone ML-4 Slice D2) ───────────────
+// Pairwise only — the spec's "side-by-side" comparison card has no shape
+// for 3+ candidates — so selection caps at 2, unlike the grid's bulk-select
+// (Slice B), which allows any number.
+let mergeSelection = new Set();
+let peopleClustersCache = [];
+let mergeKeeperId = null;
+
+// Shared by `toggleMergeSelection`/`clearMergeSelection` — both need to
+// keep a card's outline and its checkbox glyph in sync with `mergeSelection`.
+function syncPickUI(card, picked) {
+  card.classList.toggle('people-card-picked', picked);
+  const pick = card.querySelector('[data-pick-cluster]');
+  if (pick) pick.innerHTML = picked ? checkIcon() : '';
+}
+
+function toggleMergeSelection(clusterId) {
+  if (mergeSelection.has(clusterId)) {
+    mergeSelection.delete(clusterId);
+  } else {
+    if (mergeSelection.size >= 2) { showToast('Merge compares two groups at a time — deselect one first'); return; }
+    mergeSelection.add(clusterId);
+  }
+  document.querySelectorAll('.people-card').forEach(card => {
+    syncPickUI(card, mergeSelection.has(Number(card.dataset.clusterCard)));
+  });
+  updateMergeBar();
+}
+
+function updateMergeBar() {
+  const bar = document.getElementById('mergeBar');
+  bar.style.display = mergeSelection.size === 2 ? 'flex' : 'none';
+}
+
+function clearMergeSelection() {
+  mergeSelection.clear();
+  document.querySelectorAll('.people-card.people-card-picked').forEach(card => syncPickUI(card, false));
+  updateMergeBar();
+}
+document.getElementById('mergeClearBtn').addEventListener('click', clearMergeSelection);
+
+// Renders one side of the side-by-side comparison, reusing dedupe's own
+// .review-candidate/.suggested-badge shape (028 decision #4: "reuses
+// dedupe's already-locked review-card shape directly"). Clicking a
+// candidate makes it the keeper — "a pre-selected suggestion, human can
+// override."
+function renderMergeCandidate(cluster, isKeeper) {
+  return `
+    <div class="review-candidate${isKeeper ? ' suggested' : ''}" data-merge-candidate="${cluster.id}" style="cursor:pointer">
+      ${isKeeper ? `<div class="suggested-badge">KEEPER</div>` : ''}
+      <div class="review-candidate-img">${cluster.representativeCropPath ? `<img src="${assetSrc(cluster.representativeCropPath)}" alt="">` : ''}</div>
+      <div class="candidate-meta">${cluster.personName ? escapeHtml(cluster.personName) : 'Unnamed'}<br>${cluster.photoCount} photo${cluster.photoCount === 1 ? '' : 's'}</div>
+    </div>`;
+}
+
+function renderMergeNameConflict(a, b) {
+  const el = document.getElementById('mergeNameConflict');
+  if (!a.personName || !b.personName || a.personName.toLowerCase() === b.personName.toLowerCase()) {
+    el.style.display = 'none';
+    return;
+  }
+  // "present both, human picks one (or types a third) — never silently choose."
+  el.style.display = 'block';
+  el.innerHTML = `
+    <div class="merge-name-label">These groups are named differently — which name should the merged group use?</div>
+    <span class="merge-name-option" data-name-choice="${escapeHtml(a.personName)}">${escapeHtml(a.personName)}</span>
+    <span class="merge-name-option" data-name-choice="${escapeHtml(b.personName)}">${escapeHtml(b.personName)}</span>
+    <input class="tag-input" id="mergeNameCustom" placeholder="or type a different name…" list="personNames">
+  `;
+  el.querySelectorAll('[data-name-choice]').forEach(opt => opt.addEventListener('click', () => {
+    el.querySelectorAll('.merge-name-option').forEach(o => o.classList.remove('checked'));
+    opt.classList.add('checked');
+    document.getElementById('mergeNameCustom').value = '';
+  }));
+}
+
+// Resolves the 2 selected cluster ids in `mergeSelection` back to their
+// full cluster objects — shared by `renderMergeModal` (opening the
+// confirmation) and the confirm handler (acting on it), both of which
+// need the same pair looked up the same way.
+function getMergeCandidates() {
+  const [idA, idB] = [...mergeSelection];
+  return [peopleClustersCache.find(c => c.id === idA), peopleClustersCache.find(c => c.id === idB)];
+}
+
+function renderMergeModal() {
+  const [clusterA, clusterB] = getMergeCandidates();
+  if (!clusterA || !clusterB) { showToast('Could not open merge — try reselecting'); return; }
+
+  // Pre-selected suggestion: the cluster with more photos (real/established
+  // groups outrank thin ones, same reasoning as the People view's own
+  // photo-count-descending sort).
+  mergeKeeperId = clusterA.photoCount >= clusterB.photoCount ? clusterA.id : clusterB.id;
+  renderMergeCandidates(clusterA, clusterB);
+  // Rendered once, not on every keeper swap below: which name the merged
+  // group ends up with is independent of which cluster row survives as
+  // "keeper" — swapping keeper must not discard an in-progress name pick.
+  renderMergeNameConflict(clusterA, clusterB);
+  document.getElementById('mergeModal').classList.add('open');
+}
+
+function renderMergeCandidates(clusterA, clusterB) {
+  const compare = document.getElementById('mergeCompare');
+  const [keeper, other] = mergeKeeperId === clusterA.id ? [clusterA, clusterB] : [clusterB, clusterA];
+  compare.innerHTML = renderMergeCandidate(keeper, true) + renderMergeCandidate(other, false);
+  compare.querySelectorAll('[data-merge-candidate]').forEach(card => card.addEventListener('click', () => {
+    mergeKeeperId = Number(card.dataset.mergeCandidate);
+    renderMergeCandidates(clusterA, clusterB);
+  }));
+}
+
+function closeMergeModal() {
+  document.getElementById('mergeModal').classList.remove('open');
+}
+document.getElementById('mergeCancelBtn').addEventListener('click', closeMergeModal);
+
+document.getElementById('mergeSelectedBtn').addEventListener('click', () => {
+  if (mergeSelection.size !== 2) return;
+  renderMergeModal();
+});
+
+document.getElementById('mergeConfirmBtn').addEventListener('click', async () => {
+  const [clusterA, clusterB] = getMergeCandidates();
+  if (!clusterA || !clusterB) return;
+  const loserId = mergeKeeperId === clusterA.id ? clusterB.id : clusterA.id;
+
+  // Resulting name: the checked conflict option/typed text when a real
+  // conflict was shown; otherwise whichever side (if either) already has
+  // one — there's nothing to ask about when only one side is named or
+  // both already agree.
+  let resultingPersonName = null;
+  const conflictEl = document.getElementById('mergeNameConflict');
+  if (conflictEl.style.display !== 'none') {
+    const custom = document.getElementById('mergeNameCustom').value.trim();
+    const checked = conflictEl.querySelector('.merge-name-option.checked');
+    resultingPersonName = custom || checked?.dataset.nameChoice || null;
+    if (!resultingPersonName) { showToast('Pick a name or type one first'); return; }
+  } else {
+    resultingPersonName = clusterA.personName || clusterB.personName || null;
+  }
+
+  try {
+    await invoke('merge_face_clusters', { keeperClusterId: mergeKeeperId, loserClusterId: loserId, resultingPersonName });
+    showToast('Merged');
+    closeMergeModal();
+    clearMergeSelection();
+    renderPeopleView();
+  } catch (err) { showToast('Could not merge these groups'); }
+});
 
 // ── Nav switching ─────────────────────────────────────────────────────────
 let currentView = 'grid';

@@ -147,11 +147,29 @@
           <span class="topbar-title">People</span>
           <span class="topbar-count" id="peopleCount">0 groups</span>
         </div>
+        <div class="bulk-bar" id="mergeBar" style="display:none">
+          <span id="mergeBarLabel">2 groups selected</span>
+          <button class="btn btn-primary" id="mergeSelectedBtn">Merge Selected</button>
+          <button class="btn" id="mergeClearBtn">Clear</button>
+        </div>
         <div class="review-list">
-          <p class="review-intro">Faces are grouped automatically as photos are processed — nothing here is a claim about who's who until you name a group. Naming attaches to an existing person if the name matches one you've already used. A group you don't want to see again can be hidden without deleting anything.</p>
+          <p class="review-intro">Faces are grouped automatically as photos are processed — nothing here is a claim about who's who until you name a group. Naming attaches to an existing person if the name matches one you've already used. A group you don't want to see again can be hidden without deleting anything. Pick two groups (checkbox on each card) to merge them if they're the same person.</p>
           <div id="people-needs-review"></div>
           <div id="people-grid" class="people-grid"></div>
         </div>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-scrim" id="mergeModal">
+    <div class="modal" style="width:520px">
+      <h3>Merge these groups?</h3>
+      <p>All photos from both groups end up in one — nothing is deleted. Click a card to make it the keeper.</p>
+      <div class="review-compare" id="mergeCompare"></div>
+      <div id="mergeNameConflict" style="display:none; margin-top:14px"></div>
+      <div class="review-actions" style="margin-top:16px">
+        <button class="btn" id="mergeCancelBtn">Cancel</button>
+        <button class="btn btn-primary" id="mergeConfirmBtn">Merge</button>
       </div>
     </div>
   </div>

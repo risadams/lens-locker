@@ -437,26 +437,32 @@ pub fn list_face_clusters(conn: &Connection, include_hidden: bool) -> rusqlite::
     .collect()
 }
 
-/// Names a cluster — "the confirmation gate" (028 decision #2) that turns
-/// "some grouped faces" into an actual person. Finds an existing person by
-/// case-insensitive name first (matching `list_persons`'s own `COLLATE
-/// NOCASE` ordering — typing "alice" without picking the autocomplete
-/// suggestion for "Alice" must still attach to one identity, not silently
-/// create a second person) so naming the same person from two different
-/// clusters attaches to one identity (028 decision #3); creates one
-/// otherwise. Returns the person's id.
-pub fn name_cluster(conn: &Connection, cluster_id: i64, person_name: &str) -> rusqlite::Result<i64> {
+/// Finds a person by case-insensitive name (matching `list_persons`'s own
+/// `COLLATE NOCASE` ordering — typing "alice" without picking the
+/// autocomplete suggestion for "Alice" must still resolve to one identity,
+/// not silently create a second person), creating one otherwise. Shared by
+/// [`name_cluster`] and [`merge_clusters`] — both need "resolve a typed
+/// name to a person id" as one step in a larger operation.
+fn find_or_create_person(conn: &Connection, person_name: &str) -> rusqlite::Result<i64> {
     let name = person_name.trim();
     let existing: Option<i64> = conn
         .query_row("SELECT id FROM persons WHERE name = ?1 COLLATE NOCASE", params![name], |row| row.get(0))
         .optional()?;
-    let person_id = match existing {
-        Some(id) => id,
+    match existing {
+        Some(id) => Ok(id),
         None => {
             conn.execute("INSERT INTO persons (name) VALUES (?1)", params![name])?;
-            conn.last_insert_rowid()
+            Ok(conn.last_insert_rowid())
         }
-    };
+    }
+}
+
+/// Names a cluster — "the confirmation gate" (028 decision #2) that turns
+/// "some grouped faces" into an actual person; naming the same person from
+/// two different clusters attaches to one identity (028 decision #3).
+/// Returns the person's id.
+pub fn name_cluster(conn: &Connection, cluster_id: i64, person_name: &str) -> rusqlite::Result<i64> {
+    let person_id = find_or_create_person(conn, person_name)?;
     conn.execute(
         "UPDATE face_clusters SET person_id = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2",
         params![person_id, cluster_id],
@@ -473,6 +479,46 @@ pub fn set_cluster_hidden(conn: &Connection, cluster_id: i64, hidden: bool) -> r
         "UPDATE face_clusters SET hidden = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2",
         params![hidden, cluster_id],
     )?;
+    Ok(())
+}
+
+/// Merges `loser_cluster_id` into `keeper_cluster_id` (028 decision #4:
+/// "confirm produces the union of both clusters' member faces — exactly
+/// like dedupe's tag-union-on-merge") — reassigns every one of the
+/// loser's face detections to the keeper, then deletes the (now-empty)
+/// loser row. `resulting_person_name`, when given, is resolved via
+/// [`find_or_create_person`] and set on the keeper — the caller (the
+/// People view's merge confirmation UI) is what decides this name, since
+/// only it knows whether the two clusters' existing names conflicted and,
+/// if so, which one the human picked (028 decision #4: "present both,
+/// human picks one — never silently choose"); `None` leaves the keeper's
+/// current name/unnamed state untouched, for the no-conflict cases where
+/// only one side was ever named (or neither was) and there's nothing to
+/// resolve. `keeper_cluster_id` and `loser_cluster_id` must be different
+/// clusters — which one is "keeper" carries no meaning of its own beyond
+/// which row survives (the merged result's representative crop is picked
+/// fresh from all member detections either way).
+pub fn merge_clusters(conn: &Connection, keeper_cluster_id: i64, loser_cluster_id: i64, resulting_person_name: Option<&str>) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE face_detections SET face_cluster_id = ?1 WHERE face_cluster_id = ?2",
+        params![keeper_cluster_id, loser_cluster_id],
+    )?;
+    match resulting_person_name {
+        Some(name) => {
+            let person_id = find_or_create_person(conn, name)?;
+            conn.execute(
+                "UPDATE face_clusters SET person_id = ?1, updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?2",
+                params![person_id, keeper_cluster_id],
+            )?;
+        }
+        None => {
+            conn.execute(
+                "UPDATE face_clusters SET updated_at = strftime('%Y-%m-%dT%H:%M:%fZ','now') WHERE id = ?1",
+                [keeper_cluster_id],
+            )?;
+        }
+    }
+    conn.execute("DELETE FROM face_clusters WHERE id = ?1", [loser_cluster_id])?;
     Ok(())
 }
 
@@ -1684,6 +1730,93 @@ mod tests {
         super::set_cluster_hidden(&conn, cluster_id, false).unwrap();
         let hidden: i64 = conn.query_row("SELECT hidden FROM face_clusters WHERE id = ?1", [cluster_id], |row| row.get(0)).unwrap();
         assert_eq!(hidden, 0, "hiding must be reversible — 028 decision #3");
+    }
+
+    #[test]
+    fn merge_clusters_reassigns_the_losers_detections_and_deletes_its_row() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+
+        let keeper_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let keeper_id = super::create_cluster_with_member(&conn, keeper_detection).unwrap();
+        let loser_detection_a = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        let loser_id = super::create_cluster_with_member(&conn, loser_detection_a).unwrap();
+        let loser_detection_b = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[3])).unwrap();
+        super::attach_face_detection_to_cluster(&conn, loser_detection_b, loser_id).unwrap();
+
+        super::merge_clusters(&conn, keeper_id, loser_id, None).unwrap();
+
+        for detection_id in [keeper_detection, loser_detection_a, loser_detection_b] {
+            let stored_cluster_id: Option<i64> =
+                conn.query_row("SELECT face_cluster_id FROM face_detections WHERE id = ?1", [detection_id], |row| row.get(0)).unwrap();
+            assert_eq!(stored_cluster_id, Some(keeper_id), "every detection must end up on the keeper cluster");
+        }
+        let loser_still_exists: i64 = conn.query_row("SELECT COUNT(*) FROM face_clusters WHERE id = ?1", [loser_id], |row| row.get(0)).unwrap();
+        assert_eq!(loser_still_exists, 0, "the loser cluster row must be deleted, not left empty");
+    }
+
+    #[test]
+    fn merge_clusters_with_no_resulting_name_leaves_the_keepers_existing_name_untouched() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let keeper_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let keeper_id = super::create_cluster_with_member(&conn, keeper_detection).unwrap();
+        let alice_id = super::name_cluster(&conn, keeper_id, "Alice").unwrap();
+        let loser_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        let loser_id = super::create_cluster_with_member(&conn, loser_detection).unwrap();
+
+        super::merge_clusters(&conn, keeper_id, loser_id, None).unwrap();
+
+        let stored_person_id: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [keeper_id], |row| row.get(0)).unwrap();
+        assert_eq!(stored_person_id, Some(alice_id), "an unnamed loser merged with no explicit resulting name must not un-name the keeper");
+    }
+
+    #[test]
+    fn merge_clusters_with_a_resulting_name_resolves_it_via_find_or_create_person() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let keeper_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let keeper_id = super::create_cluster_with_member(&conn, keeper_detection).unwrap();
+        super::name_cluster(&conn, keeper_id, "Alice").unwrap();
+        let loser_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        let loser_id = super::create_cluster_with_member(&conn, loser_detection).unwrap();
+        let bob_id = super::name_cluster(&conn, loser_id, "Bob").unwrap();
+
+        // Human resolved the Alice/Bob name conflict by picking "Bob".
+        super::merge_clusters(&conn, keeper_id, loser_id, Some("Bob")).unwrap();
+
+        let stored_person_id: Option<i64> = conn.query_row("SELECT person_id FROM face_clusters WHERE id = ?1", [keeper_id], |row| row.get(0)).unwrap();
+        assert_eq!(stored_person_id, Some(bob_id));
+        let person_count: i64 = conn.query_row("SELECT COUNT(*) FROM persons", [], |row| row.get(0)).unwrap();
+        assert_eq!(person_count, 2, "must reuse Bob's existing person row, not create a third");
+    }
+
+    #[test]
+    fn merge_clusters_with_a_brand_new_typed_name_creates_that_person() {
+        let conn = migrated_conn();
+        let image_id = insert_test_image(&conn);
+        let model_id = super::find_or_create_model(&conn, "sface", "v1", 128, "Apache-2.0").unwrap();
+        let keeper_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[1])).unwrap();
+        let keeper_id = super::create_cluster_with_member(&conn, keeper_detection).unwrap();
+        super::name_cluster(&conn, keeper_id, "Alice").unwrap();
+        let loser_detection = super::insert_face_detection(&conn, &new_face(image_id, model_id, &[2])).unwrap();
+        let loser_id = super::create_cluster_with_member(&conn, loser_detection).unwrap();
+        super::name_cluster(&conn, loser_id, "Bob").unwrap();
+
+        // Human resolved the conflict by typing a third name entirely.
+        super::merge_clusters(&conn, keeper_id, loser_id, Some("Carol")).unwrap();
+
+        let stored_person_name: Option<String> = conn
+            .query_row(
+                "SELECT p.name FROM face_clusters fc JOIN persons p ON p.id = fc.person_id WHERE fc.id = ?1",
+                [keeper_id],
+                |row| row.get(0),
+            )
+            .unwrap();
+        assert_eq!(stored_person_name.as_deref(), Some("Carol"));
     }
 
     #[test]

@@ -644,6 +644,26 @@ fn set_face_cluster_hidden(state: tauri::State<Mutex<LibraryState>>, cluster_id:
     })
 }
 
+/// Merges two clusters (028 decision #4, Milestone ML-4 Slice D2) —
+/// `resulting_person_name` is whatever the People view's merge
+/// confirmation card already resolved (one side's name when there was no
+/// conflict, or the human's pick/typed name when both sides disagreed);
+/// see [`lenslocker_catalog::merge_clusters`] for why `None` means "leave
+/// the keeper's name untouched" rather than "unname it."
+#[tauri::command]
+fn merge_face_clusters(
+    state: tauri::State<Mutex<LibraryState>>,
+    keeper_cluster_id: i64,
+    loser_cluster_id: i64,
+    resulting_person_name: Option<String>,
+) -> CmdResult<()> {
+    with_ready(&state, |app_state| {
+        let conn = app_state.conn.lock().unwrap();
+        lenslocker_catalog::merge_clusters(&conn, keeper_cluster_id, loser_cluster_id, resulting_person_name.as_deref())?;
+        Ok(())
+    })
+}
+
 /// A cluster's individual member face crops (028 decision #3: "click a
 /// cluster, see its member thumbnails + photo count") — read-only display,
 /// not the selectable grid Slice D's split/merge flow will need.
@@ -1424,6 +1444,7 @@ pub fn run() {
             list_persons,
             name_face_cluster,
             set_face_cluster_hidden,
+            merge_face_clusters,
             list_cluster_face_crops,
             pending_face_review_count,
             list_pending_face_matches,
