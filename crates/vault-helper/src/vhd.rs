@@ -13,7 +13,8 @@ use std::path::Path;
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, WIN32_ERROR};
 use windows::Win32::Storage::Vhd::{
-    ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER, ATTACH_VIRTUAL_DISK_PARAMETERS,
+    ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER, ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME,
+    ATTACH_VIRTUAL_DISK_PARAMETERS,
     ATTACH_VIRTUAL_DISK_VERSION_1, AttachVirtualDisk, CREATE_VIRTUAL_DISK_FLAG_FULL_PHYSICAL_ALLOCATION,
     CREATE_VIRTUAL_DISK_PARAMETERS, CREATE_VIRTUAL_DISK_PARAMETERS_0, CREATE_VIRTUAL_DISK_PARAMETERS_0_1,
     CREATE_VIRTUAL_DISK_VERSION_2, CreateVirtualDisk, DETACH_VIRTUAL_DISK_FLAG_NONE, DetachVirtualDisk,
@@ -130,11 +131,20 @@ pub fn attach(path: &Path) -> Result<String, String> {
         Version: ATTACH_VIRTUAL_DISK_VERSION_1,
         ..Default::default()
     };
+    // Real bug, found via live testing (Milestone L4): without
+    // PERMANENT_LIFETIME, the attach succeeded at the raw Win32 level
+    // (a valid `\\.\PhysicalDriveN` path) but the disk never appeared in
+    // `Get-Disk`/Storage Management's CIM view at all — not a transient
+    // enumeration lag (a 10-attempt retry didn't help), the disk was
+    // never registered as a first-class manageable object in the first
+    // place. Microsoft's own official sample
+    // (microsoft/Windows-classic-samples, Hyper-V/Storage/cpp/AttachVirtualDisk.cpp)
+    // always passes this flag; this code originally didn't.
     let err = unsafe {
         AttachVirtualDisk(
             handle,
             None,
-            ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER,
+            ATTACH_VIRTUAL_DISK_FLAG_NO_DRIVE_LETTER | ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME,
             0,
             Some(&attach_params),
             None,

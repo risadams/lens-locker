@@ -85,18 +85,23 @@ pub fn disk_number_from_physical_path(physical_path: &str) -> Result<String, Str
 ///
 /// **Real bug, found via live testing (Milestone L4)**: a disk just
 /// attached via `AttachVirtualDisk` isn't always immediately visible to
-/// `Get-Disk`/`Initialize-Disk`'s CIM/WMI-backed Storage Management view
-/// — `Initialize-Disk` can fail with "No MSFT_Disk objects found" for a
-/// disk number that the raw Win32 API already reports as attached. A
-/// short retry loop (not a fixed sleep before the first attempt, which
-/// would pay the delay even when it's not needed) is the documented
-/// real-world workaround for this class of Storage Management enumeration
-/// lag.
+/// `Get-Disk`/`Initialize-Disk`'s CIM/WMI-backed Storage Management view.
+///
+/// **Real bug, found via live testing (Milestone L4)**: the root cause
+/// turned out to be `vhd::attach` missing `ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME`
+/// (fixed there — see that module) — without it, the disk was never
+/// registered as a first-class manageable Storage Management object at
+/// all, not merely slow to enumerate. `Update-HostStorageCache` plus a
+/// short retry loop are kept here anyway as defense-in-depth against the
+/// class of transient enumeration lag that genuinely can still happen on
+/// some systems, now that the actual root cause is fixed at the source.
 pub fn partition_and_format(disk_number: &str, mount_point: &Path) -> Result<(), String> {
     const SCRIPT: &str = r#"
         $ErrorActionPreference = "Stop"
         $diskNumber = [int]$args[0]
         $mountPoint = $args[1]
+
+        Update-HostStorageCache
 
         $attempt = 0
         while ($true) {
@@ -107,6 +112,7 @@ pub fn partition_and_format(disk_number: &str, mount_point: &Path) -> Result<(),
                 $attempt++
                 if ($attempt -ge 10) { throw }
                 Start-Sleep -Milliseconds 300
+                Update-HostStorageCache
             }
         }
 
