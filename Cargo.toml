@@ -10,6 +10,8 @@ members = [
     "crates/xmp",
     "crates/import",
     "crates/ml",
+    "crates/vault",
+    "crates/vault-helper",
     "src-tauri",
 ]
 
