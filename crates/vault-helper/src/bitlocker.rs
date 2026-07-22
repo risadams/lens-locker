@@ -82,12 +82,34 @@ pub fn disk_number_from_physical_path(physical_path: &str) -> Result<String, Str
 /// its access path — `mount_point` must already exist as an empty
 /// directory on an NTFS volume (`Add-PartitionAccessPath`'s own
 /// requirement); the caller creates it before calling this.
+///
+/// **Real bug, found via live testing (Milestone L4)**: a disk just
+/// attached via `AttachVirtualDisk` isn't always immediately visible to
+/// `Get-Disk`/`Initialize-Disk`'s CIM/WMI-backed Storage Management view
+/// — `Initialize-Disk` can fail with "No MSFT_Disk objects found" for a
+/// disk number that the raw Win32 API already reports as attached. A
+/// short retry loop (not a fixed sleep before the first attempt, which
+/// would pay the delay even when it's not needed) is the documented
+/// real-world workaround for this class of Storage Management enumeration
+/// lag.
 pub fn partition_and_format(disk_number: &str, mount_point: &Path) -> Result<(), String> {
     const SCRIPT: &str = r#"
         $ErrorActionPreference = "Stop"
         $diskNumber = [int]$args[0]
         $mountPoint = $args[1]
-        Initialize-Disk -Number $diskNumber -PartitionStyle GPT
+
+        $attempt = 0
+        while ($true) {
+            try {
+                Initialize-Disk -Number $diskNumber -PartitionStyle GPT
+                break
+            } catch {
+                $attempt++
+                if ($attempt -ge 10) { throw }
+                Start-Sleep -Milliseconds 300
+            }
+        }
+
         $part = New-Partition -DiskNumber $diskNumber -UseMaximumSize -AssignDriveLetter:$false
         $part | Format-Volume -FileSystem NTFS -Confirm:$false -Force | Out-Null
         Add-PartitionAccessPath -InputObject $part -AccessPath $mountPoint
