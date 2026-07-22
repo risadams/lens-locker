@@ -4,6 +4,7 @@
 use rusqlite::{Connection, OptionalExtension, params};
 use rusqlite_migration::{M, Migrations};
 
+pub mod migration;
 pub mod vec_mirror;
 pub use vec_mirror::VecMirror;
 
@@ -25,6 +26,9 @@ fn migrations() -> Migrations<'static> {
         // ML-SPEC.md Milestone ML-6 — see migrations/0006_model_upgrade_notices.sql's
         // own header comment.
         M::up(include_str!("../migrations/0006_model_upgrade_notices.sql")),
+        // LOCK-SPEC.md Milestone L3, ticket 050 — see
+        // migrations/0007_migration_journal.sql's own header comment.
+        M::up(include_str!("../migrations/0007_migration_journal.sql")),
     ])
 }
 

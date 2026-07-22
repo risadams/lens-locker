@@ -1986,12 +1986,21 @@ async function refreshLockingAvailability() {
   }
 }
 
-function openLockingSetupModal() {
+// 'firstrun' (default): confirming just records lockingSetup for
+// firstrunConfirmBtn to consume when it creates the vault.
+// 'migrate': confirming calls migrate_vault_to_encrypted directly against
+// the already-open vault (ticket 050's "enable Locking on an existing
+// library" path) — there's no separate "create" step to chain into.
+let lockingSetupMode = 'firstrun';
+
+function openLockingSetupModal(mode) {
+  lockingSetupMode = mode || 'firstrun';
   document.getElementById('lockingKeyStatus').textContent = '';
   document.getElementById('lockingPasswordInput').value = '';
   document.getElementById('lockingPasswordConfirmInput').value = '';
   document.getElementById('lockingConfirmPhraseInput').value = '';
   document.getElementById('lockingSetupConfirmBtn').disabled = true;
+  document.getElementById('lockingSetupConfirmBtn').textContent = 'Enable Encryption';
   lockingModalKeypairPath = null;
   document.getElementById('lockingSetupModal').classList.add('open');
 }
@@ -2055,13 +2064,36 @@ document.getElementById('lockingSetupCancelBtn').addEventListener('click', () =>
   closeLockingSetupModal();
 });
 
-document.getElementById('lockingSetupConfirmBtn').addEventListener('click', () => {
-  lockingSetup = {
-    keypairPath: lockingModalKeypairPath,
-    password: document.getElementById('lockingPasswordInput').value,
-  };
+document.getElementById('lockingSetupConfirmBtn').addEventListener('click', async () => {
+  const password = document.getElementById('lockingPasswordInput').value;
+  const keypairPath = lockingModalKeypairPath;
+
+  if (lockingSetupMode === 'migrate') {
+    const btn = document.getElementById('lockingSetupConfirmBtn');
+    btn.disabled = true;
+    btn.textContent = 'Migrating… approve the Windows permission prompt if asked';
+    try {
+      await invoke('migrate_vault_to_encrypted', { keypairPath, password, sizeBytes: null });
+    } catch (e) {
+      showToast('Could not encrypt this vault — it stays as it was, nothing was changed.');
+      btn.disabled = false;
+      btn.textContent = 'Enable Encryption';
+      return;
+    }
+    closeLockingSetupModal();
+    showToast('Vault encrypted.');
+    document.getElementById('settingsEnableLockingRow').style.display = 'none';
+    return;
+  }
+
+  lockingSetup = { keypairPath, password };
   document.getElementById('lockingToggle').classList.add('on');
   closeLockingSetupModal();
+});
+
+document.getElementById('settingsEnableLockingBtn').addEventListener('click', () => {
+  closeSettingsModal();
+  openLockingSetupModal('migrate');
 });
 
 document.getElementById('firstrunConfirmBtn').addEventListener('click', async () => {
@@ -2112,6 +2144,13 @@ function openSettingsModal() {
     document.getElementById('settingsHammingInput').value = s.hammingThreshold;
     document.getElementById('settingsRetentionInput').value = s.retentionDays;
   }).catch(() => showToast('Could not load settings'));
+  // Locking's own edition support was already checked once at boot
+  // (refreshLockingAvailability) — no need to re-check on every open.
+  // Whether *this* vault is already encrypted isn't currently exposed by
+  // any status DTO, so the row shows whenever the edition supports it;
+  // migrate_vault_to_encrypted itself refuses cleanly if already
+  // encrypted (surfaced as a toast, same as any other backend error).
+  document.getElementById('settingsEnableLockingRow').style.display = lockingSupported ? 'flex' : 'none';
 }
 function closeSettingsModal() { document.getElementById('settingsModal').classList.remove('open'); }
 document.getElementById('railSettingsBtn').addEventListener('click', openSettingsModal);

@@ -287,6 +287,14 @@
       </div>
       <input type="number" class="search" style="width:100%;" id="settingsRetentionInput" min="1" step="1">
 
+      <div class="firstrun-option" id="settingsEnableLockingRow" style="display:none">
+        <div>
+          <div class="firstrun-option-label">Encrypt this vault</div>
+          <div class="firstrun-option-sub">Not encrypted yet. Password plus a key file, both required to unlock — this can take a while for a large vault, and needs enough free space for a full second copy while migrating.</div>
+        </div>
+        <button class="btn" id="settingsEnableLockingBtn">Enable…</button>
+      </div>
+
       <div class="modal-footer">
         <button class="btn" id="settingsCancelBtn">Cancel</button>
         <button class="btn btn-primary" id="settingsSaveBtn">Save</button>

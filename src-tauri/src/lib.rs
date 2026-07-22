@@ -158,6 +158,39 @@ impl AnalysisLock {
     }
 }
 
+/// Guards against a migration running concurrently with itself or with an
+/// import (ticket 050 — "needs its own new exclusive lock... doesn't run
+/// concurrently with either"). Deliberately no `cancel_requested` field
+/// unlike [`ImportLock`] — resumability comes from the journal (a killed
+/// process is already the recovery path this is designed around), and
+/// the locked spec never called for a manual cancel action here.
+#[derive(Default)]
+struct MigrationLock {
+    running: std::sync::atomic::AtomicBool,
+}
+
+struct MigrationGuard<'a>(&'a MigrationLock);
+
+impl MigrationLock {
+    fn try_acquire(&self) -> Option<MigrationGuard<'_>> {
+        self.running
+            .compare_exchange(
+                false,
+                true,
+                std::sync::atomic::Ordering::SeqCst,
+                std::sync::atomic::Ordering::SeqCst,
+            )
+            .ok()
+            .map(|_| MigrationGuard(self))
+    }
+}
+
+impl Drop for MigrationGuard<'_> {
+    fn drop(&mut self) {
+        self.0.running.store(false, std::sync::atomic::Ordering::SeqCst);
+    }
+}
+
 /// Whether a live library is available yet. Replaces the Milestone 5
 /// assumption that `AppState` always exists — a true first run, or a
 /// previously-configured library whose path is no longer reachable (e.g. an
@@ -2070,6 +2103,220 @@ fn lock_vault_now(app: &tauri::AppHandle) -> CmdResult<()> {
     }
 }
 
+/// "Enable Locking" on an already-populated, unencrypted library —
+/// `LOCK-SPEC.md` §8, ticket 050. Takes an **already-generated**
+/// `keypair_path` (via a prior `generate_vault_keypair` call — same
+/// two-step shape as `create_encrypted_vault`), provisions a fixed-size
+/// encrypted VHDX sized at the vault's current usage × 3 (flat default;
+/// `size_bytes` overrides), migrates every vault-internal file into it via
+/// a crash-safe per-file journal, rewrites every path column, and finally
+/// migrates the catalog file itself. A real UAC prompt (VHDX creation),
+/// hence `spawn_blocking`; also acquires `MigrationLock` and `ImportLock`
+/// (ticket 050 — its own exclusive lock, and mutually exclusive with
+/// import) for the whole run, held inside the blocking closure so their
+/// guards never need to cross the async boundary.
+#[tauri::command]
+async fn migrate_vault_to_encrypted(
+    app: tauri::AppHandle,
+    keypair_path: String,
+    password: String,
+    size_bytes: Option<u64>,
+) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let migration_lock = app.state::<MigrationLock>();
+        let _migration_guard = migration_lock
+            .try_acquire()
+            .ok_or_else(|| CmdError::Vault("a migration is already running".into()))?;
+        let import_lock = app.state::<ImportLock>();
+        let _import_guard = import_lock.try_acquire().ok_or(CmdError::ImportAlreadyRunning)?;
+
+        wind_down_background_work(&app);
+        migrate_vault_to_encrypted_now(&app, &keypair_path, &password, size_bytes)
+    })
+    .await
+    .map_err(|e| CmdError::TaskPanicked(e.to_string()))?
+}
+
+/// Takes an **already-generated** keypair path (via a prior
+/// `generate_vault_keypair` call), matching `create_encrypted_vault`'s
+/// convention exactly — both flows generate the keypair the same way,
+/// through the same command, before either elevated operation runs.
+fn migrate_vault_to_encrypted_now(
+    app: &tauri::AppHandle,
+    keypair_path: &str,
+    password: &str,
+    size_bytes: Option<u64>,
+) -> CmdResult<()> {
+    let state = app.state::<Mutex<LibraryState>>();
+    let library_guard = state.lock().unwrap();
+    let app_state = match &*library_guard {
+        LibraryState::Ready(app_state) => app_state,
+        LibraryState::Locked { .. } => return Err(CmdError::LibraryLocked),
+        LibraryState::NeedsSetup { .. } => return Err(CmdError::LibraryNotConfigured),
+    };
+    if app_state.vault_root.is_some() {
+        return Err(CmdError::Vault("this vault is already encrypted".into()));
+    }
+    let root = app_state.paths.root().to_path_buf();
+    let library_id = app_state.library_id;
+    let conn = app_state.conn.lock().unwrap();
+
+    if !windows_edition_supports_locking()? {
+        return Err(CmdError::Vault(
+            "Locking requires Windows Pro, Enterprise, or Education — this edition doesn't include BitLocker".into(),
+        ));
+    }
+
+    let used_bytes = directory_size_bytes(&root)?;
+    let size_bytes = size_bytes.unwrap_or(used_bytes.saturating_mul(3));
+    let free_bytes = free_space_bytes(&root)?;
+    if free_bytes < used_bytes.saturating_add(size_bytes) {
+        return Err(CmdError::Vault(format!(
+            "not enough free space for this migration — needs about {} GB (the existing vault plus its new encrypted copy), only {} GB available",
+            (used_bytes.saturating_add(size_bytes)) / 1_000_000_000,
+            free_bytes / 1_000_000_000
+        )));
+    }
+
+    let keypair_bytes =
+        lenslocker_vault::read_raw_key_bytes(Path::new(keypair_path)).map_err(|e| CmdError::Vault(e.to_string()))?;
+    let salt = lenslocker_vault::generate_salt();
+    let combined_secret = lenslocker_vault::derive_combined_secret(password, &keypair_bytes, &salt)
+        .map_err(|e| CmdError::Vault(e.to_string()))?;
+
+    let vhdx_path = lenslocker_vault::vhdx_path(&root);
+    let mount_point = lenslocker_vault::mount_point(&root);
+    let root_str = root.to_string_lossy().into_owned();
+    let mount_str = mount_point.to_string_lossy().into_owned();
+
+    let command = lenslocker_vault::VaultCommand::CreateAndEncrypt {
+        vhdx_path,
+        size_bytes,
+        mount_point: mount_point.clone(),
+        combined_secret_hex: combined_secret.to_bitlocker_password(),
+    };
+    match vault_elevation::run_elevated(&command)? {
+        lenslocker_vault::VaultResponse::Ok => {}
+        lenslocker_vault::VaultResponse::Err { message, .. } => {
+            return Err(CmdError::Vault(format!(
+                "could not create the encrypted vault: {message}"
+            )));
+        }
+    }
+
+    lenslocker_catalog::migration::plan_migration(&conn, library_id, &root_str, &mount_str)?;
+
+    // One query returns every row not yet `original_removed` — on a fresh
+    // run that's everything just planned; on a resume after a crash,
+    // `plan_migration` above re-plans nothing new (idempotent) and this
+    // picks up exactly where the crash left off. `migrate_one_journal_row`
+    // always drives a row to completion or propagates an error, so a
+    // single pass is sufficient — no need to re-query afterward.
+    for row in lenslocker_catalog::migration::pending_journal_rows(&conn, library_id)? {
+        migrate_one_journal_row(&conn, &row)?;
+    }
+
+    lenslocker_catalog::migration::rewrite_paths(&conn, library_id, &root_str, &mount_str)?;
+
+    // Checkpoint any pending WAL data into the main file and close this
+    // connection before copying it — otherwise the copy could miss
+    // committed data still sitting in a `-wal` sidecar.
+    let _ = conn.pragma_update(None, "wal_checkpoint", "TRUNCATE");
+    drop(conn);
+    drop(library_guard);
+
+    let old_catalog = root.join("catalog.sqlite");
+    let new_catalog = mount_point.join("catalog.sqlite");
+    std::fs::copy(&old_catalog, &new_catalog)?;
+    verify_file_copy(&old_catalog, &new_catalog)?;
+    std::fs::remove_file(&old_catalog)?;
+    let _ = std::fs::remove_file(root.join("catalog.sqlite-wal"));
+    let _ = std::fs::remove_file(root.join("catalog.sqlite-shm"));
+
+    let marker = lenslocker_vault::VaultMarker::new(&salt, keypair_path.to_string());
+    lenslocker_vault::write_marker(&root, &marker).map_err(|e| CmdError::Vault(e.to_string()))?;
+
+    let mut new_app_state = try_init_state(&mount_point)?;
+    new_app_state.vault_root = Some(root.clone());
+    write_bootstrap_config(app, &root)?;
+    allow_library_in_asset_scope(app, &mount_point);
+    *state.lock().unwrap() = LibraryState::Ready(new_app_state);
+
+    Ok(())
+}
+
+/// One journal row through to `original_removed`, resuming from whatever
+/// step it's currently at — a crash between any two steps just means the
+/// next run redoes the remaining ones, matching the import pipeline's
+/// "re-run in full, every step checks existing state" discipline (ticket
+/// 010) rather than trusting the `step` field as sole truth.
+fn migrate_one_journal_row(
+    conn: &Connection,
+    row: &lenslocker_catalog::migration::MigrationJournalRow,
+) -> CmdResult<()> {
+    use lenslocker_catalog::migration::JournalStep;
+
+    let old_path = Path::new(&row.old_path);
+    let new_path = Path::new(&row.new_path);
+
+    if matches!(row.step, JournalStep::Pending) {
+        if let Some(parent) = new_path.parent() {
+            std::fs::create_dir_all(parent)?;
+        }
+        std::fs::copy(old_path, new_path)?;
+        lenslocker_catalog::migration::set_journal_step(conn, row.id, JournalStep::Copied)?;
+    }
+
+    if matches!(row.step, JournalStep::Pending | JournalStep::Copied) {
+        verify_file_copy(old_path, new_path)?;
+        lenslocker_catalog::migration::set_journal_step(conn, row.id, JournalStep::Verified)?;
+    }
+
+    // The original is removed only once a verified copy exists — the one
+    // genuinely irreversible step here, done last (ticket 050).
+    if old_path.is_file() {
+        std::fs::remove_file(old_path)?;
+    }
+    lenslocker_catalog::migration::set_journal_step(conn, row.id, JournalStep::OriginalRemoved)?;
+
+    Ok(())
+}
+
+/// Byte-for-byte size comparison — cheap and sufficient here, since
+/// `old_path`/`new_path` are always a same-machine local copy of an
+/// already-hashed, already-verified-on-import file (`crates/import`
+/// already established these bytes are trustworthy at import time); this
+/// only needs to catch a truncated/interrupted copy, not detect bit-rot.
+fn verify_file_copy(old_path: &Path, new_path: &Path) -> CmdResult<()> {
+    let old_len = std::fs::metadata(old_path)?.len();
+    let new_len = std::fs::metadata(new_path)?.len();
+    if old_len != new_len {
+        return Err(CmdError::Vault(format!(
+            "copy verification failed for {}: {old_len} bytes vs {new_len} bytes",
+            new_path.display()
+        )));
+    }
+    Ok(())
+}
+
+/// Plain recursive directory-size walk (no new dependency — `walkdir` is
+/// already used elsewhere in the workspace, but this is a one-off need
+/// and `std::fs::read_dir` covers it without adding a dependency to
+/// `src-tauri` just for this).
+fn directory_size_bytes(dir: &Path) -> CmdResult<u64> {
+    let mut total = 0u64;
+    for entry in std::fs::read_dir(dir)? {
+        let entry = entry?;
+        let metadata = entry.metadata()?;
+        if metadata.is_dir() {
+            total = total.saturating_add(directory_size_bytes(&entry.path())?);
+        } else {
+            total = total.saturating_add(metadata.len());
+        }
+    }
+    Ok(total)
+}
+
 /// The actual "open a pre-existing vault" logic, factored out of the
 /// [`open_existing_library`] command so it's testable directly.
 fn open_existing_library_at(root: &Path) -> CmdResult<AppState> {
@@ -2576,6 +2823,7 @@ pub fn run() {
             let library_state = load_initial_library_state(&app_handle);
             app.manage(Mutex::new(library_state));
             app.manage(ImportLock::default());
+            app.manage(MigrationLock::default());
             app.manage(AnalysisLock::default());
             // Must happen before any `lenslocker_ml::load_session`/
             // `load_session_cpu` call (every real-model test in
@@ -2617,6 +2865,7 @@ pub fn run() {
             create_encrypted_vault,
             unlock_vault,
             lock_vault,
+            migrate_vault_to_encrypted,
             get_app_settings,
             update_app_settings,
             list_images,
@@ -2778,6 +3027,91 @@ mod tests {
             lenslocker_vault::read_marker(&root).unwrap().is_none(),
             "marker must not be written when the helper call fails — would permanently block retries"
         );
+    }
+
+    #[test]
+    fn directory_size_bytes_sums_real_files_recursively() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(dir.path().join("a.txt"), vec![0u8; 100]).unwrap();
+        std::fs::create_dir(dir.path().join("sub")).unwrap();
+        std::fs::write(dir.path().join("sub").join("b.txt"), vec![0u8; 250]).unwrap();
+
+        assert_eq!(directory_size_bytes(dir.path()).unwrap(), 350);
+    }
+
+    #[test]
+    fn migrate_one_journal_row_copies_verifies_and_removes_the_original() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_path = dir.path().join("old").join("blob.jxl");
+        let new_path = dir.path().join("new").join("blob.jxl");
+        std::fs::create_dir_all(old_path.parent().unwrap()).unwrap();
+        std::fs::write(&old_path, b"real image bytes, not actually an image").unwrap();
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        lenslocker_catalog::migrate(&mut conn).unwrap();
+        conn.execute(
+            "INSERT INTO libraries (name, root_path) VALUES ('t', 'x')",
+            [],
+        )
+        .unwrap();
+        let library_id = conn.last_insert_rowid();
+        lenslocker_catalog::migration::plan_migration(
+            &conn,
+            library_id,
+            &dir.path().join("old").to_string_lossy(),
+            &dir.path().join("new").to_string_lossy(),
+        )
+        .unwrap();
+        // plan_migration only plans rows referenced by `images`/`quarantine`/
+        // `thumbnails` — insert the journal row directly here since this
+        // test is exercising `migrate_one_journal_row` in isolation, not
+        // the planning step (already covered in crates/catalog's tests).
+        conn.execute(
+            "INSERT INTO migration_journal (library_id, kind, old_path, new_path) VALUES (?1, 'blob', ?2, ?3)",
+            rusqlite::params![library_id, old_path.to_string_lossy(), new_path.to_string_lossy()],
+        )
+        .unwrap();
+
+        let rows = lenslocker_catalog::migration::pending_journal_rows(&conn, library_id).unwrap();
+        assert_eq!(rows.len(), 1);
+        migrate_one_journal_row(&conn, &rows[0]).unwrap();
+
+        assert!(new_path.is_file(), "verified copy should exist at the new path");
+        assert!(!old_path.is_file(), "original should be removed only after verification");
+        assert_eq!(
+            std::fs::read(&new_path).unwrap(),
+            b"real image bytes, not actually an image"
+        );
+        assert!(lenslocker_catalog::migration::migration_fully_complete(&conn, library_id).unwrap());
+    }
+
+    #[test]
+    fn migrate_one_journal_row_resumes_correctly_when_already_copied() {
+        // Simulates a crash between the copy and verify steps — the row
+        // is already at `copied`, and re-running must not error just
+        // because the destination file already exists.
+        let dir = tempfile::tempdir().unwrap();
+        let old_path = dir.path().join("blob.jxl");
+        let new_path = dir.path().join("live").join("blob.jxl");
+        std::fs::write(&old_path, b"contents").unwrap();
+        std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
+        std::fs::copy(&old_path, &new_path).unwrap();
+
+        let mut conn = Connection::open_in_memory().unwrap();
+        lenslocker_catalog::migrate(&mut conn).unwrap();
+        conn.execute("INSERT INTO libraries (name, root_path) VALUES ('t', 'x')", []).unwrap();
+        let library_id = conn.last_insert_rowid();
+        conn.execute(
+            "INSERT INTO migration_journal (library_id, kind, old_path, new_path, step) VALUES (?1, 'blob', ?2, ?3, 'copied')",
+            rusqlite::params![library_id, old_path.to_string_lossy(), new_path.to_string_lossy()],
+        )
+        .unwrap();
+
+        let rows = lenslocker_catalog::migration::pending_journal_rows(&conn, library_id).unwrap();
+        migrate_one_journal_row(&conn, &rows[0]).unwrap();
+
+        assert!(!old_path.is_file());
+        assert!(lenslocker_catalog::migration::migration_fully_complete(&conn, library_id).unwrap());
     }
 
     #[test]
