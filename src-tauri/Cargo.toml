@@ -52,4 +52,4 @@ webview2-com = "0.38"
 # Milestone 5.5 adds `Win32_Storage_FileSystem` for `GetDiskFreeSpaceExW`
 # (free-space reporting in `inspect_library_folder`) — reusing this already-
 # direct dependency rather than adding a new disk-space crate.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_Storage_FileSystem"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }

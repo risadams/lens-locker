@@ -202,6 +202,8 @@ enum CmdError {
     Ml(#[from] lenslocker_ml::MlError),
     #[error("could not resolve the running executable's directory")]
     ExeDirUnresolvable,
+    #[error("{0}")]
+    Vault(String),
 }
 
 // Tauri commands need their error type to serialize across the IPC bridge;
@@ -1555,6 +1557,74 @@ fn free_space_bytes(_path: &Path) -> CmdResult<u64> {
     Ok(0)
 }
 
+/// Per `workplan/LOCK-SPEC.md` §1: Locking requires Windows Pro/Enterprise/
+/// Education — BitLocker doesn't exist on Home at all, and no fallback is
+/// designed (ticket 052's finding, ticket 040's resolution). Called by the
+/// setup UX before offering the "encrypt this vault" opt-in, so Home users
+/// see a clear explanation instead of a confusing failure partway through
+/// setup.
+#[tauri::command]
+fn check_windows_edition_supports_locking() -> CmdResult<bool> {
+    windows_edition_supports_locking()
+}
+
+// Same unsafe-code exception rationale as `free_space_bytes` above —
+// `GetProductInfo` is a raw Win32 FFI call with no safe wrapper.
+#[cfg(windows)]
+#[allow(unsafe_code)]
+fn windows_edition_supports_locking() -> CmdResult<bool> {
+    use windows::Win32::System::SystemInformation::{
+        GetProductInfo, PRODUCT_EDUCATION, PRODUCT_EDUCATION_N, PRODUCT_ENTERPRISE,
+        PRODUCT_ENTERPRISE_E, PRODUCT_ENTERPRISE_EVALUATION, PRODUCT_ENTERPRISE_N,
+        PRODUCT_ENTERPRISE_N_EVALUATION, PRODUCT_ENTERPRISE_S, PRODUCT_ENTERPRISE_S_EVALUATION,
+        PRODUCT_ENTERPRISE_S_N, PRODUCT_ENTERPRISE_S_N_EVALUATION, PRODUCT_PRO_WORKSTATION,
+        PRODUCT_PRO_WORKSTATION_N, PRODUCT_PROFESSIONAL, PRODUCT_PROFESSIONAL_E,
+        PRODUCT_PROFESSIONAL_N, PRODUCT_PROFESSIONAL_WMC,
+    };
+
+    // Version params are effectively ignored by GetProductInfo on modern
+    // Windows (10/0/0/0 is the documented, standard call shape) — it
+    // reports the actual running edition regardless.
+    let mut product_type = Default::default();
+    unsafe {
+        GetProductInfo(10, 0, 0, 0, &mut product_type)
+            .ok()
+            .map_err(|e| CmdError::Vault(format!("GetProductInfo failed: {e}")))?;
+    }
+
+    // Desktop SKUs only (no server editions — LensLocker is a desktop
+    // app); not exhaustive of every possible Pro/Enterprise/Education
+    // variant Microsoft has ever shipped, but covers the realistic set.
+    let supported = [
+        PRODUCT_PROFESSIONAL,
+        PRODUCT_PROFESSIONAL_N,
+        PRODUCT_PROFESSIONAL_E,
+        PRODUCT_PROFESSIONAL_WMC,
+        PRODUCT_PRO_WORKSTATION,
+        PRODUCT_PRO_WORKSTATION_N,
+        PRODUCT_ENTERPRISE,
+        PRODUCT_ENTERPRISE_N,
+        PRODUCT_ENTERPRISE_E,
+        PRODUCT_ENTERPRISE_EVALUATION,
+        PRODUCT_ENTERPRISE_N_EVALUATION,
+        PRODUCT_ENTERPRISE_S,
+        PRODUCT_ENTERPRISE_S_N,
+        PRODUCT_ENTERPRISE_S_EVALUATION,
+        PRODUCT_ENTERPRISE_S_N_EVALUATION,
+        PRODUCT_EDUCATION,
+        PRODUCT_EDUCATION_N,
+    ];
+
+    Ok(supported.contains(&product_type))
+}
+
+#[cfg(not(windows))]
+fn windows_edition_supports_locking() -> CmdResult<bool> {
+    // LensLocker ships Windows-only (workplan/SPEC.md); this stub exists
+    // only so the crate still type-checks on other hosts.
+    Ok(false)
+}
+
 /// Creates a brand-new vault at `path`: makes the directory if needed,
 /// initializes a fresh catalog, creates the `libraries` row with
 /// `conversion_enabled` fixed at creation (ticket 009), points the
@@ -2111,6 +2181,7 @@ pub fn run() {
         })
         .invoke_handler(tauri::generate_handler![
             check_library_status,
+            check_windows_edition_supports_locking,
             cancel_import,
             get_analysis_status,
             set_analysis_paused,
@@ -2167,6 +2238,35 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[cfg(windows)]
+    fn windows_edition_check_matches_the_real_registry_edition_id() {
+        // Cross-checks GetProductInfo's result against the registry's own
+        // EditionID string on whatever real machine this test runs on,
+        // rather than hardcoding an assumed edition (portable across dev
+        // machines/CI, still a real regression test).
+        let output = std::process::Command::new("powershell.exe")
+            .args([
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                r#"(Get-ItemProperty "HKLM:\SOFTWARE\Microsoft\Windows NT\CurrentVersion").EditionID"#,
+            ])
+            .output()
+            .expect("powershell should run");
+        let edition_id = String::from_utf8_lossy(&output.stdout).trim().to_lowercase();
+
+        let expected_supported = edition_id.contains("professional")
+            || edition_id.contains("enterprise")
+            || edition_id.contains("education");
+
+        let actual = windows_edition_supports_locking().unwrap();
+        assert_eq!(
+            actual, expected_supported,
+            "GetProductInfo result ({actual}) disagreed with registry EditionID '{edition_id}'"
+        );
+    }
 
     #[test]
     fn analysis_sleep_duration_is_short_after_real_work() {

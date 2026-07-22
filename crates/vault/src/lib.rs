@@ -10,10 +10,12 @@
 //! Windows-specific, separately-elevated process that actually calls
 //! `AttachVirtualDisk`/BitLocker.
 
+pub mod keypair;
 pub mod marker;
 pub mod protocol;
 pub mod secret;
 
+pub use keypair::{generate_and_write_keypair, read_raw_key_bytes};
 pub use marker::{VaultMarker, mount_point, read_marker, vhdx_path, write_marker};
 pub use protocol::{VaultCommand, VaultResponse};
 pub use secret::{CombinedSecret, derive_combined_secret};
@@ -26,6 +28,8 @@ pub enum VaultError {
     Marker(String),
     #[error("vault-helper protocol error: {0}")]
     Protocol(String),
+    #[error("keypair error: {0}")]
+    Keypair(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
