@@ -1,9 +1,7 @@
 name: CI
 
-# Dormant until this repo has a remote to run against (workplan/SPEC.md
-# Milestone 0) — the checks themselves already run locally via
-# `cargo check`, `cargo test`, and `cargo deny check`. This file activates
-# automatically the moment the repo is pushed anywhere that runs Actions.
+# Runs on every push to main and every PR — the checks themselves also run
+# locally via `cargo check`, `cargo test`, and `cargo deny check`.
 
 on:
   push:
@@ -16,13 +14,48 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      # tauri-build's build script validates every src-tauri/models/ path
+      # in tauri.conf.json's bundle.resources at *compile* time — not just
+      # `tauri build` time — so `cargo check`/`cargo test` fail outright if
+      # those files are missing. They're real, ~GB-scale ML weights,
+      # gitignored on purpose (src-tauri/models/README.md, MODELS.md): never
+      # committed, never fetched over network (this project's first
+      # non-negotiable constraint), manually dropped in for local dev.
+      # CI has no such local drop-in, so it needs empty stand-ins just to
+      # satisfy the existence check — their content is never read by
+      # `cargo check`/`cargo test` (the real-model tests that need actual
+      # weights are already #[ignore]d, per MODELS.md's own verification
+      # section).
+      - name: create placeholder model files (see comment above)
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path `
+            src-tauri/models/face_detection_yunet, `
+            src-tauri/models/face_recognition_sface, `
+            src-tauri/models/siglip-so400m-onnx | Out-Null
+          foreach ($f in @(
+            "src-tauri/models/onnxruntime.dll",
+            "src-tauri/models/face_detection_yunet/face_detection_yunet_2023mar.onnx",
+            "src-tauri/models/face_recognition_sface/face_recognition_sface_2021dec.onnx",
+            "src-tauri/models/siglip-so400m-onnx/model.onnx",
+            "src-tauri/models/siglip-so400m-onnx/config.json",
+            "src-tauri/models/siglip-so400m-onnx/tokenizer.json",
+            "src-tauri/models/siglip-so400m-onnx/spiece.model"
+          )) {
+            if (-not (Test-Path $f)) { New-Item -ItemType File -Path $f | Out-Null }
+          }
       - name: cargo check
         run: cargo check --workspace --all-targets
       - name: cargo test
         run: cargo test --workspace
 
   deny:
-    runs-on: windows-latest
+    # cargo-deny-action is a Docker container action — GitHub only supports
+    # those on Linux runners, regardless of what platform the checked
+    # project itself targets. cargo-deny's own [graph.targets] in
+    # deny.toml already restricts its analysis to x86_64-pc-windows-msvc,
+    # so running the *checker* on Linux doesn't change what it evaluates.
+    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
       - uses: EmbarkStudios/cargo-deny-action@v2
