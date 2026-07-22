@@ -5,43 +5,50 @@
 //! risky/native operation into its own subprocess rather than growing the
 //! main app's privilege or trust surface.
 //!
-//! Protocol: reads one `VaultCommand` as JSON on stdin, performs the
-//! operation, writes one `VaultResponse` as JSON on stdout, exits.
+//! Invocation: `lenslocker-vault-helper.exe <request-file> <response-file>`.
+//! Reads one `VaultCommand` as JSON from the request file, performs the
+//! operation, writes one `VaultResponse` as JSON to the response file,
+//! exits. **Not stdin/stdout** — a process launched elevated via the UAC
+//! consent broker doesn't reliably inherit the parent's standard handles,
+//! so file paths are the dependable transport across that boundary (see
+//! `lenslocker_vault::protocol`'s doc comment).
 
 #[cfg(windows)]
 mod bitlocker;
 #[cfg(windows)]
 mod vhd;
 
-use std::io::{self, Read, Write};
+use std::path::PathBuf;
 use std::process::ExitCode;
 
+use lenslocker_vault::protocol::{read_command, write_response};
 use lenslocker_vault::{VaultCommand, VaultResponse};
 
 fn main() -> ExitCode {
-    let mut input = String::new();
-    if let Err(e) = io::stdin().read_to_string(&mut input) {
-        return respond(VaultResponse::err(format!("failed to read command: {e}")));
-    }
+    let mut args = std::env::args_os().skip(1);
+    let (Some(request_path), Some(response_path)) = (args.next(), args.next()) else {
+        eprintln!(
+            "usage: lenslocker-vault-helper.exe <request-file> <response-file>"
+        );
+        return ExitCode::FAILURE;
+    };
+    let request_path = PathBuf::from(request_path);
+    let response_path = PathBuf::from(response_path);
 
-    let command: VaultCommand = match serde_json::from_str(&input) {
-        Ok(c) => c,
-        Err(e) => return respond(VaultResponse::err(format!("invalid command: {e}"))),
+    let response = match read_command(&request_path) {
+        Ok(command) => dispatch(command),
+        Err(e) => VaultResponse::err(format!("invalid command: {e}")),
     };
 
-    let response = dispatch(command);
-    respond(response)
-}
-
-fn respond(response: VaultResponse) -> ExitCode {
-    let json = serde_json::to_string(&response).unwrap_or_else(|_| {
-        r#"{"result":"Err","message":"failed to serialize response","still_in_use":false}"#.into()
-    });
-    let _ = writeln!(io::stdout(), "{json}");
-    match response {
-        VaultResponse::Ok => ExitCode::SUCCESS,
-        VaultResponse::Err { .. } => ExitCode::FAILURE,
+    let is_ok = matches!(response, VaultResponse::Ok);
+    if let Err(e) = write_response(&response_path, &response) {
+        // Nothing left to report to — the caller is waiting on this
+        // process's exit code and the response file it never got. Exit
+        // code alone still distinguishes success from failure.
+        eprintln!("failed to write response file: {e}");
+        return ExitCode::FAILURE;
     }
+    if is_ok { ExitCode::SUCCESS } else { ExitCode::FAILURE }
 }
 
 #[cfg(windows)]

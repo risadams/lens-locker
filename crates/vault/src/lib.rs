@@ -24,6 +24,8 @@ pub enum VaultError {
     KeyDerivation(String),
     #[error("vault marker error: {0}")]
     Marker(String),
+    #[error("vault-helper protocol error: {0}")]
+    Protocol(String),
     #[error("io error: {0}")]
     Io(#[from] std::io::Error),
 }
