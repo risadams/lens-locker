@@ -55,6 +55,14 @@
           </div>
           <div class="toggle on" id="conversionToggle"></div>
         </div>
+        <div class="firstrun-option">
+          <div>
+            <div class="firstrun-option-label">Encrypt this vault</div>
+            <div class="firstrun-option-sub" id="lockingOptionSub">A password plus a generated key file, both required to unlock — lose either one and the vault is permanently unrecoverable. Fixed for this vault — can't be changed after creation.</div>
+            <div class="locking-edition-blocked" id="lockingEditionBlocked" style="display:none">Requires Windows Pro, Enterprise, or Education — this edition doesn't include BitLocker.</div>
+          </div>
+          <div class="toggle" id="lockingToggle"></div>
+        </div>
       </div>
 
       <div class="firstrun-actions">
@@ -282,6 +290,42 @@
       <div class="modal-footer">
         <button class="btn" id="settingsCancelBtn">Cancel</button>
         <button class="btn btn-primary" id="settingsSaveBtn">Save</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="modal-scrim" id="lockingSetupModal">
+    <div class="modal" style="width:480px">
+      <h3>Encrypt this vault</h3>
+      <p class="firstrun-option-sub" style="margin-bottom: 4px;">Both a password and a key file are required every time you unlock this vault. Neither one alone is enough.</p>
+
+      <div class="locking-step">
+        <div class="locking-step-label">1. Key file</div>
+        <div class="locking-step-sub">Choose where to keep it — a USB key works well, since it's a factor you physically hold. Back it up somewhere safe; losing it locks the vault forever.</div>
+        <button class="btn" id="lockingChooseKeyFolderBtn">Choose Folder &amp; Generate Key</button>
+        <div class="locking-keypair-path" id="lockingKeyStatus"></div>
+      </div>
+
+      <div class="locking-step">
+        <div class="locking-step-label">2. Password</div>
+        <div class="locking-step-sub">At least 12 characters. Any character is fine, including spaces.</div>
+        <input type="password" class="search" id="lockingPasswordInput" placeholder="Password" style="margin-bottom:8px;">
+        <input type="password" class="search" id="lockingPasswordConfirmInput" placeholder="Confirm password">
+      </div>
+
+      <div class="locking-step">
+        <div class="locking-warning">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+          <span>There is no recovery option. If you lose the password or the key file, this vault and everything in it is permanently inaccessible — LensLocker cannot help you get it back.</span>
+        </div>
+        <div class="locking-step-sub">Type the sentence below to confirm you understand:</div>
+        <div class="locking-step-sub" style="font-style: italic;">I understand this cannot be recovered</div>
+        <input type="text" class="search" id="lockingConfirmPhraseInput" placeholder="Type the sentence above">
+      </div>
+
+      <div class="modal-footer">
+        <button class="btn" id="lockingSetupCancelBtn">Cancel</button>
+        <button class="btn btn-primary" id="lockingSetupConfirmBtn" disabled>Enable Encryption</button>
       </div>
     </div>
   </div>

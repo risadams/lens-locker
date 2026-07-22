@@ -669,7 +669,23 @@ button { font-family: inherit; }
 .toggle.on { background: var(--accent-dim); }
 .toggle::after { content: ''; position: absolute; width: 15px; height: 15px; border-radius: 50%; background: var(--text); top: 2px; left: 2px; transition: left 0.12s; }
 .toggle.on::after { left: 17px; background: var(--on-accent); }
+.toggle.disabled { opacity: 0.35; cursor: not-allowed; }
 
 /* Settings modal number inputs reuse .search's look outside the search bar */
 input[type="number"].search { padding-left: 10px; }
+input[type="text"].search, input[type="password"].search { padding-left: 10px; width: 100%; }
+
+/* Locking setup modal (ticket 043) */
+.locking-step { padding: 14px 0; border-top: 1px solid var(--border-soft); }
+.locking-step:first-of-type { border-top: none; padding-top: 0; }
+.locking-step-label { font-size: 12.5px; font-weight: 500; margin-bottom: 6px; }
+.locking-step-sub { font-size: 11.5px; color: var(--text-faint); line-height: 1.5; margin-bottom: 8px; }
+.locking-keypair-path { font-family: var(--mono); font-size: 11px; color: var(--text-faint); word-break: break-all; margin-top: 6px; }
+.locking-warning {
+  display: flex; gap: 8px; align-items: flex-start; padding: 10px 12px; border-radius: var(--radius);
+  background: var(--danger-soft); border: 1px solid var(--danger); color: var(--danger); font-size: 11.5px; line-height: 1.5;
+  margin-bottom: 10px;
+}
+.locking-warning svg { width: 15px; height: 15px; flex-shrink: 0; margin-top: 1px; }
+.locking-edition-blocked { font-size: 11.5px; color: var(--danger); margin-top: 4px; }
 .toast svg { width: 13px; height: 13px; color: var(--accent); }

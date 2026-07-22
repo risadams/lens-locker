@@ -1960,18 +1960,132 @@ document.getElementById('conversionToggle').addEventListener('click', () => {
   document.getElementById('conversionToggle').classList.toggle('on');
 });
 
+// ── Locking setup (workplan/LOCK-SPEC.md §6) ─────────────────────────────
+// Opt-in per vault, decided here at first-run creation (ticket 043) — never
+// available for "open existing vault," since encryption is fixed at
+// creation, and never silently defaulted on.
+let lockingSetup = null; // { keypairPath, password } | null, set once fully configured
+let lockingSupported = false;
+
+async function refreshLockingAvailability() {
+  try {
+    lockingSupported = await invoke('check_windows_edition_supports_locking');
+  } catch (e) {
+    lockingSupported = false;
+  }
+  const toggle = document.getElementById('lockingToggle');
+  const blocked = document.getElementById('lockingEditionBlocked');
+  if (lockingSupported) {
+    toggle.classList.remove('disabled');
+    blocked.style.display = 'none';
+  } else {
+    toggle.classList.add('disabled');
+    toggle.classList.remove('on');
+    blocked.style.display = 'block';
+    lockingSetup = null;
+  }
+}
+
+function openLockingSetupModal() {
+  document.getElementById('lockingKeyStatus').textContent = '';
+  document.getElementById('lockingPasswordInput').value = '';
+  document.getElementById('lockingPasswordConfirmInput').value = '';
+  document.getElementById('lockingConfirmPhraseInput').value = '';
+  document.getElementById('lockingSetupConfirmBtn').disabled = true;
+  lockingModalKeypairPath = null;
+  document.getElementById('lockingSetupModal').classList.add('open');
+}
+function closeLockingSetupModal() {
+  document.getElementById('lockingSetupModal').classList.remove('open');
+}
+
+let lockingModalKeypairPath = null;
+
+document.getElementById('lockingToggle').addEventListener('click', () => {
+  const toggle = document.getElementById('lockingToggle');
+  if (toggle.classList.contains('disabled')) return;
+  if (toggle.classList.contains('on')) {
+    // Turning back off is friction-free — nothing destructive has
+    // happened yet at this point, the vault doesn't exist until
+    // firstrunConfirmBtn is clicked.
+    toggle.classList.remove('on');
+    lockingSetup = null;
+    return;
+  }
+  openLockingSetupModal();
+});
+
+document.getElementById('lockingChooseKeyFolderBtn').addEventListener('click', async () => {
+  let folder;
+  try { folder = await invoke('pick_library_folder'); } catch (e) { return; }
+  if (!folder) return;
+  const btn = document.getElementById('lockingChooseKeyFolderBtn');
+  const status = document.getElementById('lockingKeyStatus');
+  btn.disabled = true;
+  status.textContent = 'Generating…';
+  try {
+    lockingModalKeypairPath = await invoke('generate_vault_keypair', { destDir: folder });
+    status.textContent = `Key file: ${lockingModalKeypairPath}`;
+  } catch (e) {
+    status.textContent = '';
+    showToast('Could not generate a key file there');
+    lockingModalKeypairPath = null;
+  }
+  btn.disabled = false;
+  updateLockingConfirmEnabled();
+});
+
+function updateLockingConfirmEnabled() {
+  const password = document.getElementById('lockingPasswordInput').value;
+  const confirm = document.getElementById('lockingPasswordConfirmInput').value;
+  const phrase = document.getElementById('lockingConfirmPhraseInput').value.trim().toLowerCase();
+  const ok = !!lockingModalKeypairPath
+    && password.length >= 12
+    && password === confirm
+    && phrase === 'i understand this cannot be recovered';
+  document.getElementById('lockingSetupConfirmBtn').disabled = !ok;
+}
+['lockingPasswordInput', 'lockingPasswordConfirmInput', 'lockingConfirmPhraseInput'].forEach(id => {
+  document.getElementById(id).addEventListener('input', updateLockingConfirmEnabled);
+});
+
+document.getElementById('lockingSetupCancelBtn').addEventListener('click', () => {
+  document.getElementById('lockingToggle').classList.remove('on');
+  lockingSetup = null;
+  closeLockingSetupModal();
+});
+
+document.getElementById('lockingSetupConfirmBtn').addEventListener('click', () => {
+  lockingSetup = {
+    keypairPath: lockingModalKeypairPath,
+    password: document.getElementById('lockingPasswordInput').value,
+  };
+  document.getElementById('lockingToggle').classList.add('on');
+  closeLockingSetupModal();
+});
+
 document.getElementById('firstrunConfirmBtn').addEventListener('click', async () => {
   if (!firstrunChoice) return;
   const btn = document.getElementById('firstrunConfirmBtn');
   btn.disabled = true;
   const verb = firstrunChoice.existingLibrary ? 'Opening' : 'Creating';
-  btn.textContent = `${verb}…`;
+  btn.textContent = lockingSetup ? `${verb}… approve the Windows permission prompt if asked` : `${verb}…`;
   try {
     if (firstrunChoice.existingLibrary) {
       await invoke('open_existing_library', { path: firstrunChoice.path });
     } else {
       const conversionEnabled = document.getElementById('conversionToggle').classList.contains('on');
-      await invoke('create_library', { path: firstrunChoice.path, conversionEnabled });
+      if (lockingSetup) {
+        await invoke('create_encrypted_vault', {
+          root: firstrunChoice.path,
+          keypairPath: lockingSetup.keypairPath,
+          password: lockingSetup.password,
+          conversionEnabled,
+          sizeBytes: null,
+        });
+      } else {
+        await invoke('create_library', { path: firstrunChoice.path, conversionEnabled });
+      }
     }
   } catch (e) {
     showToast('Could not set up the vault at that location');
@@ -1982,8 +2096,11 @@ document.getElementById('firstrunConfirmBtn').addEventListener('click', async ()
   showMainApp();
   const doneVerb = firstrunChoice.existingLibrary ? 'Opened' : 'Created';
   showToast(`${doneVerb} vault at ${firstrunChoice.path}`);
+  lockingSetup = null;
   startMainApp();
 });
+
+refreshLockingAvailability();
 
 // ── Settings (Milestone 5.5) ──────────────────────────────────────────────
 // hamming_threshold/retention_days were both decided as user-tunable
