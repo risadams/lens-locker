@@ -26,10 +26,17 @@ pub struct VaultMarker {
     /// Hex-encoded per-vault KDF salt (ticket 041/048) — not secret, must
     /// stay stable for the vault's lifetime once written.
     pub kdf_salt_hex: String,
+    /// Where the user chose to keep this vault's keypair file (ticket 043
+    /// — "app persists that chosen path, keyed to the vault"). Not secret:
+    /// knowing *where* the key should be doesn't help without actually
+    /// having the file. Read on every unlock attempt to know where to
+    /// look; a missing file there is ticket 047's distinct "key file not
+    /// found" error, not the generic wrong-password-or-key one.
+    pub keypair_path_hint: String,
 }
 
 impl VaultMarker {
-    pub fn new(salt: &[u8; KDF_SALT_LEN]) -> Self {
+    pub fn new(salt: &[u8; KDF_SALT_LEN], keypair_path_hint: String) -> Self {
         let mut kdf_salt_hex = String::with_capacity(KDF_SALT_LEN * 2);
         for byte in salt {
             kdf_salt_hex.push_str(&format!("{byte:02x}"));
@@ -38,6 +45,7 @@ impl VaultMarker {
             encrypted: true,
             format_version: CURRENT_FORMAT_VERSION,
             kdf_salt_hex,
+            keypair_path_hint,
         }
     }
 
@@ -102,13 +110,14 @@ mod tests {
         fs::create_dir_all(&dir).unwrap();
 
         let salt = [7u8; KDF_SALT_LEN];
-        let marker = VaultMarker::new(&salt);
+        let marker = VaultMarker::new(&salt, r"D:\keys\lenslocker-vault-key".into());
         write_marker(&dir, &marker).unwrap();
 
         let read_back = read_marker(&dir).unwrap().expect("marker should exist");
         assert!(read_back.encrypted);
         assert_eq!(read_back.format_version, CURRENT_FORMAT_VERSION);
         assert_eq!(read_back.salt().unwrap(), salt);
+        assert_eq!(read_back.keypair_path_hint, r"D:\keys\lenslocker-vault-key");
 
         fs::remove_dir_all(&dir).ok();
     }

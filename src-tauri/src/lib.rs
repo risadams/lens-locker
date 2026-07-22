@@ -47,6 +47,16 @@ struct AppState {
     conn: Mutex<Connection>,
     paths: lenslocker_import::LibraryPaths,
     library_id: i64,
+    /// `Some(vault_root)` when this library is a Locking-enabled vault
+    /// currently mounted at `lenslocker_vault::mount_point(vault_root)` —
+    /// `None` for an ordinary unencrypted library. Set explicitly by
+    /// [`create_encrypted_vault`]/[`unlock_vault`] after opening the
+    /// catalog at the mount point; [`try_init_state`]/[`create_library_at`]
+    /// have no way to know this on their own, since from their point of
+    /// view the mount point just looks like an ordinary directory (ticket
+    /// 044's "no changes needed" finding). [`lock_vault`] is this field's
+    /// only reader.
+    vault_root: Option<PathBuf>,
 }
 
 /// Guards against two `import_directory` calls running concurrently.
@@ -154,6 +164,18 @@ impl AnalysisLock {
 /// external drive unplugged), are both legitimate startup states now.
 enum LibraryState {
     Ready(AppState),
+    /// A Locking-enabled vault (ticket 044's plaintext status marker found
+    /// at `vault_root`) that isn't currently mounted. `LOCK-SPEC.md` §5's
+    /// third state, alongside `Ready`/`NeedsSetup` — gates the UI behind
+    /// an unlock screen the same way `NeedsSetup` gates behind first-run
+    /// setup, via [`with_ready`].
+    Locked {
+        vault_root: String,
+        /// Where the marker says the keypair file should be — shown in
+        /// the unlock UI so the user knows what they're looking for; not
+        /// itself sufficient to unlock anything.
+        keypair_path_hint: String,
+    },
     NeedsSetup {
         /// Set when a bootstrap config *was* found but its recorded path
         /// couldn't be opened — lets the frontend show a "we couldn't find
@@ -205,6 +227,12 @@ enum CmdError {
     ExeDirUnresolvable,
     #[error("{0}")]
     Vault(String),
+    #[error("this vault is locked — unlock it first")]
+    LibraryLocked,
+    #[error("the vault's key file could not be found at its configured location")]
+    KeypairFileMissing,
+    #[error("incorrect password or key")]
+    IncorrectPasswordOrKey,
 }
 
 // Tauri commands need their error type to serialize across the IPC bridge;
@@ -300,6 +328,7 @@ fn with_ready<T>(
     let guard = state.lock().unwrap();
     match &*guard {
         LibraryState::Ready(app_state) => f(app_state),
+        LibraryState::Locked { .. } => Err(CmdError::LibraryLocked),
         LibraryState::NeedsSetup { .. } => Err(CmdError::LibraryNotConfigured),
     }
 }
@@ -1416,6 +1445,7 @@ fn try_init_state(root: &Path) -> CmdResult<AppState> {
         conn: Mutex::new(conn),
         paths,
         library_id,
+        vault_root: None,
     })
 }
 
@@ -1455,6 +1485,25 @@ fn load_initial_library_state(app: &tauri::AppHandle) -> LibraryState {
         };
     }
 
+    // The vault-root marker (ticket 044) is plaintext and readable before
+    // any mount attempt — that's the whole point of it. A Locking-enabled
+    // vault always routes to `Locked` here, never straight to `Ready`: the
+    // catalog inside it isn't reachable until `unlock_vault` mounts it.
+    match lenslocker_vault::read_marker(&root) {
+        Ok(Some(marker)) if marker.encrypted => {
+            return LibraryState::Locked {
+                vault_root: library_path,
+                keypair_path_hint: marker.keypair_path_hint,
+            };
+        }
+        Ok(_) => {}
+        Err(err) => {
+            eprintln!("[bootstrap] could not read vault marker at {library_path}: {err}");
+            // Fall through and try the unencrypted path anyway — a
+            // corrupt marker shouldn't be worse than not having checked.
+        }
+    }
+
     match try_init_state(&root) {
         Ok(app_state) => {
             allow_library_in_asset_scope(app, &root);
@@ -1476,20 +1525,40 @@ fn load_initial_library_state(app: &tauri::AppHandle) -> LibraryState {
 struct LibraryStatusDto {
     ready: bool,
     previous_path_unreachable: Option<String>,
+    /// `Some(...)` when the frontend should show the unlock screen instead
+    /// of either the main app or first-run setup (`LOCK-SPEC.md` §5).
+    locked: Option<LockedStatusDto>,
 }
 
-/// Called once on frontend boot to decide: show the first-run screen, or go
-/// straight to the main app.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct LockedStatusDto {
+    vault_root: String,
+    keypair_path_hint: String,
+}
+
+/// Called once on frontend boot to decide: show the first-run screen, the
+/// unlock screen, or go straight to the main app.
 #[tauri::command]
 fn check_library_status(state: tauri::State<Mutex<LibraryState>>) -> LibraryStatusDto {
     match &*state.lock().unwrap() {
         LibraryState::Ready(_) => LibraryStatusDto {
             ready: true,
             previous_path_unreachable: None,
+            locked: None,
+        },
+        LibraryState::Locked { vault_root, keypair_path_hint } => LibraryStatusDto {
+            ready: false,
+            previous_path_unreachable: None,
+            locked: Some(LockedStatusDto {
+                vault_root: vault_root.clone(),
+                keypair_path_hint: keypair_path_hint.clone(),
+            }),
         },
         LibraryState::NeedsSetup { unreachable_path } => LibraryStatusDto {
             ready: false,
             previous_path_unreachable: unreachable_path.clone(),
+            locked: None,
         },
     }
 }
@@ -1667,6 +1736,7 @@ fn create_library_at(root: &Path, conversion_enabled: bool) -> CmdResult<AppStat
         conn: Mutex::new(conn),
         paths,
         library_id,
+        vault_root: None,
     })
 }
 
@@ -1721,15 +1791,10 @@ fn generate_vault_keypair(dest_dir: String) -> CmdResult<String> {
 /// changes needed there, since the mount point looks like an ordinary
 /// directory to everything above the block-storage layer.
 ///
-/// **Known gap, tracked for Milestone L2** (`LOCK-SPEC.md` §5): unlike
-/// [`create_library`], this does not yet make the vault re-openable on a
-/// future launch — [`load_initial_library_state`] doesn't have the
-/// `LibraryState::Locked` branch or the vault-marker check ticket 047
-/// specifies yet, so a relaunch after creating an encrypted vault will
-/// currently misbehave (fall through to `NeedsSetup`) until that lands.
-/// Writing the bootstrap config anyway rather than skipping it: an
-/// unrecorded vault would be worse (silently orphaned), and this is the
-/// same path L2 will correct rather than a second thing to unwind.
+/// (Milestone L2 update: [`load_initial_library_state`] now has the
+/// `LibraryState::Locked` branch, so relaunching after this correctly
+/// routes to the unlock screen instead of misbehaving as it did when this
+/// command was first built in L1.)
 #[tauri::command]
 async fn create_encrypted_vault(
     app: tauri::AppHandle,
@@ -1744,8 +1809,9 @@ async fn create_encrypted_vault(
         let keypair_path = PathBuf::from(&keypair_path);
         let size_bytes = size_bytes.unwrap_or(DEFAULT_NEW_VAULT_VHDX_BYTES);
 
-        let app_state =
+        let mut app_state =
             create_encrypted_vault_at(&root, &keypair_path, &password, conversion_enabled, size_bytes)?;
+        app_state.vault_root = Some(root.clone());
 
         write_bootstrap_config(&app, &root)?;
         let mount_point = root.join(lenslocker_vault::marker::MOUNT_DIR_NAME);
@@ -1815,10 +1881,193 @@ fn create_encrypted_vault_at(
         }
     }
 
-    let marker = lenslocker_vault::VaultMarker::new(&salt);
+    let marker = lenslocker_vault::VaultMarker::new(&salt, keypair_path.to_string_lossy().into_owned());
     lenslocker_vault::write_marker(root, &marker).map_err(|e| CmdError::Vault(e.to_string()))?;
 
     create_library_at(&mount_point, conversion_enabled)
+}
+
+/// Unlocks a [`LibraryState::Locked`] vault: reads the marker (salt +
+/// keypair path hint), re-derives the combined secret from `password` and
+/// the keypair file's raw bytes, and drives the elevated helper's `Attach`
+/// (§3, ticket 047) — another real UAC prompt, hence `spawn_blocking`.
+/// `KeypairFileMissing` is raised *before* attempting elevation whenever
+/// possible (no point prompting for UAC over a problem elevation can't
+/// fix) and is the one error state ticket 047 requires to be distinct;
+/// every other failure (wrong password, wrong/tampered key, BitLocker
+/// unlock failure) collapses into the same generic
+/// `IncorrectPasswordOrKey`, deliberately not revealing which factor was
+/// wrong.
+#[tauri::command]
+async fn unlock_vault(app: tauri::AppHandle, root: String, password: String) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = PathBuf::from(&root);
+        let mut app_state = unlock_vault_at(&root, &password)?;
+        app_state.vault_root = Some(root.clone());
+
+        allow_library_in_asset_scope(&app, &lenslocker_vault::mount_point(&root));
+        *app.state::<Mutex<LibraryState>>().lock().unwrap() = LibraryState::Ready(app_state);
+        Ok(())
+    })
+    .await
+    .map_err(|e| CmdError::TaskPanicked(e.to_string()))?
+}
+
+/// The actual unlock logic, factored out of [`unlock_vault`] so it's
+/// testable without a live `AppHandle` — same live-elevation caveat as
+/// [`create_encrypted_vault_at`].
+fn unlock_vault_at(root: &Path, password: &str) -> CmdResult<AppState> {
+    let marker = lenslocker_vault::read_marker(root)
+        .map_err(|e| CmdError::Vault(e.to_string()))?
+        .ok_or(CmdError::LibraryNotFound)?;
+
+    let keypair_path = Path::new(&marker.keypair_path_hint);
+    if !keypair_path.is_file() {
+        return Err(CmdError::KeypairFileMissing);
+    }
+    let keypair_bytes =
+        lenslocker_vault::read_raw_key_bytes(keypair_path).map_err(|_| CmdError::KeypairFileMissing)?;
+
+    let salt = marker.salt().map_err(|e| CmdError::Vault(e.to_string()))?;
+    let combined_secret = lenslocker_vault::derive_combined_secret(password, &keypair_bytes, &salt)
+        .map_err(|e| CmdError::Vault(e.to_string()))?;
+
+    let vhdx_path = lenslocker_vault::vhdx_path(root);
+    let mount_point = lenslocker_vault::mount_point(root);
+    let command = lenslocker_vault::VaultCommand::Attach {
+        vhdx_path,
+        mount_point: mount_point.clone(),
+        combined_secret_hex: combined_secret.to_bitlocker_password(),
+    };
+
+    match vault_elevation::run_elevated(&command)? {
+        lenslocker_vault::VaultResponse::Ok => {}
+        lenslocker_vault::VaultResponse::Err { .. } => {
+            return Err(CmdError::IncorrectPasswordOrKey);
+        }
+    }
+
+    open_existing_library_at(&mount_point)
+}
+
+/// Winds down `ImportLock`/`AnalysisLock` gracefully before a lock
+/// attempt closes the shared connection (ticket 046/047): signals both to
+/// stop after their current in-flight unit rather than starting the next
+/// one, then polls until each reports idle. Import already tolerates this
+/// exact interruption via its crash-safe journal (ticket 010) — treating
+/// a lock-triggered stop as a graceful version of that is free. Bounded by
+/// `WIND_DOWN_TIMEOUT` so a wedged background task can't hang locking
+/// forever; if it times out, the caller proceeds anyway (closing the
+/// connection under an active operation is the same failure mode a crash
+/// already produces, which this codebase already treats as recoverable).
+const WIND_DOWN_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(5 * 60);
+const WIND_DOWN_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_millis(200);
+
+fn wind_down_background_work(app: &tauri::AppHandle) {
+    let import_lock = app.state::<ImportLock>();
+    import_lock
+        .cancel_requested
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let analysis_lock = app.state::<AnalysisLock>();
+    analysis_lock.paused.store(true, std::sync::atomic::Ordering::SeqCst);
+
+    let deadline = std::time::Instant::now() + WIND_DOWN_TIMEOUT;
+    while std::time::Instant::now() < deadline {
+        let import_idle = !import_lock.running.load(std::sync::atomic::Ordering::SeqCst);
+        let analysis_idle = !analysis_lock.running.load(std::sync::atomic::Ordering::SeqCst);
+        if import_idle && analysis_idle {
+            return;
+        }
+        std::thread::sleep(WIND_DOWN_POLL_INTERVAL);
+    }
+    eprintln!("[lock] wind-down timed out after {WIND_DOWN_TIMEOUT:?}, proceeding anyway");
+}
+
+/// Locks a mounted encrypted vault: winds down background work, closes
+/// the shared connection, and drives the elevated helper's `Detach` (§3,
+/// ticket 046). A no-op (`Ok`) if the current library isn't a Locking
+/// vault at all — [`AppState::vault_root`] is `None` for those, nothing to
+/// do. On detach failure (ticket 046's "still in use" case, or the
+/// elevation call itself failing/being cancelled), the connection is
+/// reopened so the app isn't left in a broken half-locked state — the
+/// user just retries.
+#[tauri::command]
+async fn lock_vault(app: tauri::AppHandle) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || lock_vault_now(&app))
+        .await
+        .map_err(|e| CmdError::TaskPanicked(e.to_string()))?
+}
+
+fn lock_vault_now(app: &tauri::AppHandle) -> CmdResult<()> {
+    let state = app.state::<Mutex<LibraryState>>();
+
+    let vault_root = {
+        let guard = state.lock().unwrap();
+        match &*guard {
+            LibraryState::Ready(app_state) => match &app_state.vault_root {
+                Some(root) => root.clone(),
+                None => return Ok(()),
+            },
+            _ => return Ok(()),
+        }
+    };
+
+    wind_down_background_work(app);
+
+    let mount_point = lenslocker_vault::mount_point(&vault_root);
+    let vhdx_path = lenslocker_vault::vhdx_path(&vault_root);
+    let keypair_path_hint = lenslocker_vault::read_marker(&vault_root)
+        .ok()
+        .flatten()
+        .map(|m| m.keypair_path_hint)
+        .unwrap_or_default();
+
+    // Close the connection by swapping the state out *before* detaching —
+    // Windows won't detach a volume with open file handles on it.
+    {
+        let mut guard = state.lock().unwrap();
+        let old = std::mem::replace(
+            &mut *guard,
+            LibraryState::Locked {
+                vault_root: vault_root.to_string_lossy().into_owned(),
+                keypair_path_hint,
+            },
+        );
+        drop(guard);
+        drop(old); // closes AppState.conn
+    }
+
+    let command = lenslocker_vault::VaultCommand::Detach { vhdx_path, mount_point: mount_point.clone() };
+    let elevation_result = vault_elevation::run_elevated(&command);
+
+    let reopen_and_restore = |err: CmdError| -> CmdError {
+        match open_existing_library_at(&mount_point) {
+            Ok(mut app_state) => {
+                app_state.vault_root = Some(vault_root.clone());
+                *state.lock().unwrap() = LibraryState::Ready(app_state);
+            }
+            Err(reopen_err) => {
+                eprintln!(
+                    "[lock] failed to reopen after a failed detach — vault left Locked, real state is still mounted: {reopen_err}"
+                );
+            }
+        }
+        err
+    };
+
+    match elevation_result {
+        Ok(lenslocker_vault::VaultResponse::Ok) => Ok(()),
+        Ok(lenslocker_vault::VaultResponse::Err { message, still_in_use }) => {
+            let err = if still_in_use {
+                CmdError::Vault(format!("vault is still in use, close whatever has it open and try again: {message}"))
+            } else {
+                CmdError::Vault(message)
+            };
+            Err(reopen_and_restore(err))
+        }
+        Err(e) => Err(reopen_and_restore(e)),
+    }
 }
 
 /// The actual "open a pre-existing vault" logic, factored out of the
@@ -1896,6 +2145,44 @@ fn create_hardened_main_window(app: &tauri::App) -> tauri::Result<()> {
             }
         }
     })?;
+
+    // "Closed app ⇒ locked vault" is Locking's core promise (ticket 046) —
+    // every close request is intercepted and blocked until a lock attempt
+    // resolves; `lock_vault_now` is already a no-op for a non-encrypted
+    // library, so this adds no behavior change for the common case.
+    // `window.destroy()` (not `.close()`) performs the real close without
+    // re-emitting `CloseRequested`, which would otherwise loop back into
+    // this same handler.
+    let app_handle_for_close = app.handle().clone();
+    window.on_window_event(move |event| {
+        if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+            api.prevent_close();
+            let app_handle = app_handle_for_close.clone();
+            tauri::async_runtime::spawn(async move {
+                let lock_result = tauri::async_runtime::spawn_blocking({
+                    let app_handle = app_handle.clone();
+                    move || lock_vault_now(&app_handle)
+                })
+                .await;
+                match lock_result {
+                    Ok(Ok(())) => {
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.destroy();
+                        }
+                    }
+                    Ok(Err(err)) => {
+                        eprintln!("[lock] could not lock vault on close: {err}");
+                        if let Some(window) = app_handle.get_webview_window("main") {
+                            let _ = window.emit("vault-lock-failed", err.to_string());
+                        }
+                    }
+                    Err(join_err) => {
+                        eprintln!("[lock] lock-on-close task panicked: {join_err}");
+                    }
+                }
+            });
+        }
+    });
 
     Ok(())
 }
@@ -2328,6 +2615,8 @@ pub fn run() {
             open_existing_library,
             generate_vault_keypair,
             create_encrypted_vault,
+            unlock_vault,
+            lock_vault,
             get_app_settings,
             update_app_settings,
             list_images,
@@ -2489,6 +2778,37 @@ mod tests {
             lenslocker_vault::read_marker(&root).unwrap().is_none(),
             "marker must not be written when the helper call fails — would permanently block retries"
         );
+    }
+
+    #[test]
+    fn unlock_vault_at_reports_missing_vault_distinctly() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let result = unlock_vault_at(&root, "whatever");
+        assert!(matches!(result, Err(CmdError::LibraryNotFound)));
+    }
+
+    #[test]
+    fn unlock_vault_at_reports_missing_keypair_file_distinctly() {
+        // ticket 047: "key file not found at its configured path" must be
+        // its own distinct error, never folded into the generic
+        // incorrect-password-or-key case — this is the one real check of
+        // that requirement that doesn't need live elevation.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("vault");
+        std::fs::create_dir_all(&root).unwrap();
+
+        let salt = lenslocker_vault::generate_salt();
+        let marker = lenslocker_vault::VaultMarker::new(
+            &salt,
+            dir.path().join("nonexistent-key").to_string_lossy().into_owned(),
+        );
+        lenslocker_vault::write_marker(&root, &marker).unwrap();
+
+        let result = unlock_vault_at(&root, "whatever");
+        assert!(matches!(result, Err(CmdError::KeypairFileMissing)));
     }
 
     #[test]

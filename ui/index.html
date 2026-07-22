@@ -294,6 +294,34 @@
     </div>
   </div>
 
+  <div class="firstrun hidden" id="unlockScreen">
+    <div class="firstrun-card">
+      <div class="firstrun-mark">
+        <div class="mark mark--full">
+          <span class="mark-ring"></span>
+          <span class="mark-cut"></span>
+          <span class="mark-iris"></span>
+          <span class="mark-keyhole-eye"></span>
+          <span class="mark-keyhole-wedge"></span>
+        </div>
+      </div>
+      <h1>Unlock your vault</h1>
+      <p class="firstrun-lede">Enter the password for the vault at <span id="unlockVaultRoot" style="font-family: var(--mono); font-size: 11.5px;"></span>. Its key file should be at:</p>
+      <div class="locking-keypair-path" id="unlockKeypairHint" style="margin-bottom: 14px;"></div>
+
+      <div id="unlockErrorBanner" class="firstrun-existing" style="display:none; background: var(--danger-soft); border-color: var(--danger); color: var(--danger);">
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 9v4m0 4h.01M10.29 3.86L1.82 18a2 2 0 001.71 3h16.94a2 2 0 001.71-3L13.71 3.86a2 2 0 00-3.42 0z"/></svg>
+        <span id="unlockErrorText"></span>
+      </div>
+
+      <input type="password" class="search" id="unlockPasswordInput" placeholder="Password">
+
+      <div class="firstrun-actions">
+        <button class="btn btn-primary" id="unlockConfirmBtn">Unlock</button>
+      </div>
+    </div>
+  </div>
+
   <div class="modal-scrim" id="lockingSetupModal">
     <div class="modal" style="width:480px">
       <h3>Encrypt this vault</h3>

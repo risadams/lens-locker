@@ -2255,17 +2255,83 @@ function startMainApp() {
   invoke('list_persons').then(renderPersonDatalist).catch(() => {});
 }
 
+// ── Unlock screen (workplan/LOCK-SPEC.md §5, ticket 047) ─────────────────
+function showUnlockScreen(locked) {
+  document.getElementById('unlockScreen').classList.remove('hidden');
+  document.getElementById('mainApp').classList.add('hidden');
+  document.getElementById('firstrun').classList.add('hidden');
+  document.getElementById('unlockVaultRoot').textContent = locked.vaultRoot;
+  document.getElementById('unlockKeypairHint').textContent = locked.keypairPathHint;
+  document.getElementById('unlockErrorBanner').style.display = 'none';
+  document.getElementById('unlockPasswordInput').value = '';
+  currentLockedVaultRoot = locked.vaultRoot;
+}
+
+let currentLockedVaultRoot = null;
+
+// CmdError has no structured error code anywhere in this codebase (it
+// always serializes to a plain string, ticket-independent — see
+// `impl Serialize for CmdError`) — matching that existing convention
+// rather than introducing a stronger-typed channel just for these two
+// messages. Exact text must stay in sync with src-tauri/src/lib.rs's
+// KeypairFileMissing/IncorrectPasswordOrKey Display strings.
+function unlockErrorMessage(rawError) {
+  const text = String(rawError);
+  if (text.includes("key file could not be found")) {
+    return "The key file wasn't found at the path shown above. Check it's connected (e.g. a USB key) and try again.";
+  }
+  if (text.includes('incorrect password or key')) {
+    return 'Incorrect password or key.';
+  }
+  return "Couldn't unlock the vault.";
+}
+
+document.getElementById('unlockConfirmBtn').addEventListener('click', async () => {
+  const password = document.getElementById('unlockPasswordInput').value;
+  const btn = document.getElementById('unlockConfirmBtn');
+  const banner = document.getElementById('unlockErrorBanner');
+  banner.style.display = 'none';
+  btn.disabled = true;
+  btn.textContent = 'Unlocking… approve the Windows permission prompt if asked';
+  try {
+    await invoke('unlock_vault', { root: currentLockedVaultRoot, password });
+  } catch (e) {
+    document.getElementById('unlockErrorText').textContent = unlockErrorMessage(e);
+    banner.style.display = 'flex';
+    btn.disabled = false;
+    btn.textContent = 'Unlock';
+    return;
+  }
+  btn.disabled = false;
+  btn.textContent = 'Unlock';
+  showMainApp();
+  startMainApp();
+});
+
+document.getElementById('unlockPasswordInput').addEventListener('keydown', (e) => {
+  if (e.key === 'Enter') document.getElementById('unlockConfirmBtn').click();
+});
+
+// Surfaces `lock_vault_now`'s failure on app-close (ticket 046's "still in
+// use" case) — the window didn't actually close, so the user needs to
+// know why rather than just seeing nothing happen.
+listen('vault-lock-failed', (event) => {
+  showToast(String(event.payload));
+});
+
 async function boot() {
   let status;
   try {
     status = await invoke('check_library_status');
   } catch (e) {
     console.error(e);
-    status = { ready: false, previousPathUnreachable: null };
+    status = { ready: false, previousPathUnreachable: null, locked: null };
   }
   if (status.ready) {
     showMainApp();
     startMainApp();
+  } else if (status.locked) {
+    showUnlockScreen(status.locked);
   } else {
     showFirstRun(status.previousPathUnreachable);
   }

@@ -124,6 +124,13 @@ fn attach(
     mount_point: &std::path::Path,
     combined_secret_hex: &str,
 ) -> VaultResponse {
+    // Defensive stale-mount cleanup (ticket 045/052) folded into the
+    // normal unlock path, not a separate command — a crashed previous
+    // session may have left this VHDX attached, and detaching before a
+    // fresh attach keeps unlock to a single UAC prompt rather than two.
+    // Ignored: there's nothing stale to clear on the common case.
+    let _ = vhd::detach(vhdx_path);
+
     if let Err(e) = vhd::attach(vhdx_path) {
         return VaultResponse::err(e);
     }
