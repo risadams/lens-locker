@@ -143,6 +143,26 @@ unlock**, rather than attempting to silently reuse a stale mount.
 ([045](tickets/045-design-staging-directory-strategy.md),
 [052](tickets/052-research-vhd-bitlocker-mechanics.md))
 
+**Mount/unmount latency — measured for real, Milestone L4** (no credible
+published numbers existed anywhere, per
+[052](tickets/052-research-vhd-bitlocker-mechanics.md)): on real target
+hardware (the same i9-11900KF machine as ticket 048's Argon2id benchmark),
+a full attach+`Unlock-BitLocker` cycle measured **~9.8 seconds**, and
+detach+`Lock-BitLocker` **~9.9–10.0 seconds**, consistent across repeated
+runs (not a one-time warm-up cost). This makes the VHD/BitLocker
+attach-detach cycle the **dominant cost of a full unlock**, well past the
+Argon2id derivation's 1.8s (§2) — an unlock spinner needs to set
+expectations for up to ~15 seconds total, not treat the operation as
+near-instant. Two real implementation bugs surfaced and were fixed during
+this same measurement pass (both in `crates/vault-helper`): `AttachVirtualDisk`
+needs `ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME` (without it, the disk
+attached successfully at the raw Win32 level but was never registered as a
+manageable Storage Management object, so `Initialize-Disk` could never see
+it — not a transient timing issue), and `powershell.exe -Command "<script>"
+arg1 arg2` does not reliably populate `$args` the way `-File script.ps1
+arg1 arg2` does (every PowerShell-invoking function now writes a real temp
+`.ps1` file and runs it via `-File`).
+
 ## 4. Vault-root layout
 
 At the vault root, outside the encrypted volume: the VHDX container file
@@ -364,24 +384,25 @@ real populated library (not a toy fixture), kill the process mid-migration
 at least once, confirm resume-from-journal completes correctly and no
 plaintext original survives once migration reports done.
 
-**Milestone L4 — Release-gate hardening.** Two of this milestone's three
-original items are resolved (§9): the recovery-key-prompt risk was
-verified against Microsoft's own docs to not exist for this codebase's
-invocation path (two real hardening parameters, `-EncryptionMethod
-XtsAes256`/`-UsedSpaceOnly`, added along the way), and the
-routine-unlock-elevation question turned out to already be answered by
-ticket 052 — VHD attach always requires elevation regardless of
-BitLocker, so there's no "skip the UAC prompt" case to build. What
-remains, genuinely requiring a human at the keyboard rather than more
-code: **real local measurement of mount/unmount latency** (§3 — no
-credible published numbers exist anywhere, per
-[052](tickets/052-research-vhd-bitlocker-mechanics.md)) — time a real
-attach+BitLocker-unlock and detach+lock cycle on real target hardware and
-record the actual numbers, the same real-hardware-over-assumption
-discipline [019](tickets/019-validate-thumbnail-grid-performance.md) and
+**Milestone L4 — Release-gate hardening. Complete.** All three original
+items resolved (§3/§9): the recovery-key-prompt risk was verified against
+Microsoft's own docs to not exist for this codebase's invocation path (two
+real hardening parameters, `-EncryptionMethod XtsAes256`/`-UsedSpaceOnly`,
+added along the way); the routine-unlock-elevation question turned out to
+already be answered by ticket 052 (VHD attach always requires elevation
+regardless of BitLocker, no "skip the UAC prompt" case to build); and
+mount/unmount latency was measured for real on target hardware — ~9.8s
+attach, ~9.9–10.0s detach, consistent across runs (§3) — the same
+real-hardware-over-assumption discipline
+[019](tickets/019-validate-thumbnail-grid-performance.md) and
 [025](tickets/025-rebenchmark-sqlite-vec.md) already established for this
-project. This milestone is Locking's ship gate — nothing before it needs
-to be fully offline-verified for this feature, this one confirms it is.
+project. That live-testing pass also caught and fixed two real
+implementation bugs neither code review nor unit tests could have found
+(§3): `AttachVirtualDisk` missing `ATTACH_VIRTUAL_DISK_FLAG_PERMANENT_LIFETIME`,
+and PowerShell's `-Command` not reliably populating `$args`. This was
+Locking's ship gate — every milestone before it is now also confirmed to
+actually work end to end on real hardware, not just compile and
+unit-test clean.
 
 ---
 
