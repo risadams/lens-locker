@@ -14,20 +14,41 @@
 use std::path::Path;
 use std::process::Command;
 
+/// **Real bug, found via live testing (Milestone L4), not a hypothetical**:
+/// `powershell.exe -Command "<script text>" arg1 arg2` does **not**
+/// reliably populate `$args` inside the script the way a `-File
+/// script.ps1 arg1 arg2` invocation does — the trailing tokens instead get
+/// parsed as additional PowerShell source text appended after the
+/// `-Command` string, which breaks (a bare filesystem path parses as an
+/// "unexpected token") or silently drops them (observed as `$args[1]`
+/// being null). Every script in this module writes to a real temp `.ps1`
+/// file and runs it via `-File`, the documented-correct way to pass
+/// positional arguments to a script — confirmed working against this same
+/// live-testing round.
 fn run_powershell(script: &str, args: &[&str]) -> Result<(), String> {
-    let output = Command::new("powershell.exe")
+    let script_path = std::env::temp_dir().join(format!(
+        "lenslocker-vault-helper-{}-{}.ps1",
+        std::process::id(),
+        script_unique_suffix()
+    ));
+    std::fs::write(&script_path, script)
+        .map_err(|e| format!("failed to write temp PowerShell script: {e}"))?;
+
+    let result = Command::new("powershell.exe")
         .args([
             "-NoProfile",
             "-NonInteractive",
             "-ExecutionPolicy",
             "Bypass",
-            "-Command",
-            script,
+            "-File",
         ])
+        .arg(&script_path)
         .args(args)
-        .output()
-        .map_err(|e| format!("failed to launch powershell.exe: {e}"))?;
+        .output();
 
+    let _ = std::fs::remove_file(&script_path);
+
+    let output = result.map_err(|e| format!("failed to launch powershell.exe: {e}"))?;
     if output.status.success() {
         Ok(())
     } else {
@@ -37,6 +58,13 @@ fn run_powershell(script: &str, args: &[&str]) -> Result<(), String> {
             output.status.code()
         ))
     }
+}
+
+fn script_unique_suffix() -> u128 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0)
 }
 
 /// Extracts the trailing disk number from a `\\.\PhysicalDriveN` path, as
