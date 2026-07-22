@@ -69,17 +69,35 @@ pub fn partition_and_format(disk_number: &str, mount_point: &Path) -> Result<(),
 
 /// Enables BitLocker on the volume at `mount_point` with `password_hex`
 /// (ticket 040/041's app-combined secret) as its sole password protector.
-/// Deliberately **never** adds a `-RecoveryPasswordProtector` or any flow
-/// that could surface Windows' own "back up your recovery key to your
-/// Microsoft account" prompt — `LOCK-SPEC.md` §9's release-gate
-/// requirement; a single unwanted cloud-escrow prompt here would be a real
-/// breach of the zero-network-ever guarantee.
+///
+/// **Milestone L4 release-gate finding, verified against Microsoft's own
+/// `Enable-BitLocker`/`Add-BitLockerKeyProtector` reference docs, not
+/// assumed**: `-PasswordProtector`/`-Password` and
+/// `-RecoveryPasswordProtector`/`-RecoveryKeyProtector` are mutually
+/// exclusive parameter sets — a single call can only use one, and this one
+/// never requests the latter. A recovery protector is *only* ever added by
+/// a separate, explicit `Add-BitLockerKeyProtector` call, which nothing in
+/// this codebase makes. The interactive "back up your recovery key to your
+/// Microsoft account" screen is part of the separate Settings/Explorer
+/// "Turn on BitLocker" GUI wizard — `Enable-BitLocker` the cmdlet is fully
+/// headless and has no documented UI-prompt or cloud-escrow behavior of
+/// its own. (Automatic AD escrow exists only via a domain-joined Group
+/// Policy, inapplicable to this app's personal, non-domain-joined target.)
+/// So: no code-level guard was actually needed here — the risk this
+/// doc comment originally flagged doesn't exist for a cmdlet-only,
+/// GUI-wizard-free invocation path. `LOCK-SPEC.md` §9/§10.
+///
+/// `-EncryptionMethod XtsAes256` and `-UsedSpaceOnly` added per the same
+/// verification pass — Microsoft's own docs recommend `XtsAes256`
+/// explicitly (unspecified defaults to the weaker XTS-AES-128), and
+/// `-UsedSpaceOnly` is relevant here since a freshly-created fixed-size
+/// VHDX is mostly unallocated space that doesn't need encrypting yet.
 pub fn enable_bitlocker(mount_point: &Path, password_hex: &str) -> Result<(), String> {
     const SCRIPT: &str = r#"
         $ErrorActionPreference = "Stop"
         $mountPoint = $args[0]
         $secure = ConvertTo-SecureString -String $args[1] -AsPlainText -Force
-        Enable-BitLocker -MountPoint $mountPoint -PasswordProtector -Password $secure -SkipHardwareTest
+        Enable-BitLocker -MountPoint $mountPoint -PasswordProtector -Password $secure -EncryptionMethod XtsAes256 -UsedSpaceOnly -SkipHardwareTest
     "#;
     run_powershell(SCRIPT, &[&mount_point.to_string_lossy(), password_hex])
 }

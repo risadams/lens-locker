@@ -267,15 +267,38 @@ and doesn't run concurrently with either.
 
 Inherited unchanged: zero network access, `cargo-deny` bans, WFP audit,
 install-time firewall rule. One Locking-specific addition, surfaced during
-assembly (not from a closed ticket — flagged as a judgment call below): the
-app-driven BitLocker-enable flow (§3) must **never** trigger Windows' own
-"back up your recovery key to your Microsoft account" prompt or flow, which
-some BitLocker enablement paths surface by default. This must be explicitly
-suppressed/skipped in whatever `manage-bde`/WMI/PowerShell invocation the
-helper process uses, and verified (not assumed) as part of the release-gate
-milestone below — a single cloud key-escrow prompt slipping through would
-be a real breach of the zero-network-ever guarantee, on a feature whose
-entire premise is offline data protection.
+assembly and **verified during Milestone L4** against Microsoft's own
+`Enable-BitLocker`/`Add-BitLockerKeyProtector` reference documentation, not
+assumed: the app-driven BitLocker-enable flow (§3) must never trigger
+Windows' own "back up your recovery key to your Microsoft account" prompt.
+Confirmed this risk doesn't actually exist for this codebase's invocation
+path — `-PasswordProtector`/`-Password` and `-RecoveryPasswordProtector`/
+`-RecoveryKeyProtector` are mutually exclusive `Enable-BitLocker` parameter
+sets (a recovery protector is only ever added by a separate, explicit
+`Add-BitLockerKeyProtector` call this codebase never makes), and the
+interactive recovery-key-backup screen belongs to the separate Settings/
+Explorer "Turn on BitLocker" GUI wizard, not the headless cmdlet this code
+actually calls. (Automatic AD escrow exists only via a domain-joined Group
+Policy, inapplicable to this app's personal, non-domain-joined target.) No
+code-level guard was needed beyond what `bitlocker.rs`'s `enable_bitlocker`
+already did — confirmed correct-by-construction, not patched.
+`-EncryptionMethod XtsAes256` and `-UsedSpaceOnly` were added to the same
+call as real best-practice findings from the same verification pass
+(Microsoft's docs explicitly recommend `XtsAes256` over the unspecified
+default, and `-UsedSpaceOnly` is a meaningful win for a freshly-created,
+mostly-unallocated fixed-size VHDX).
+
+**Also resolved during L4**: whether *routine* unlock (not just initial
+BitLocker setup) requires elevation, separately from whether enabling
+BitLocker does. Already effectively answered by
+[ticket 052](tickets/052-research-vhd-bitlocker-mechanics.md)'s original
+research, not something L4 needed to re-investigate: mounting a VHD
+requires administrator elevation as a general Windows behavior,
+independent of BitLocker — so every `Attach` (§5, every unlock) already
+goes through the elevated helper unconditionally, regardless of what
+`Unlock-BitLocker` alone would require. There is no "routine unlock skips
+elevation" case to design for; §3/§5's elevated-helper-per-unlock design
+was already correct as built, not a gap needing adjustment.
 
 ## 10. Explicitly out of scope
 
@@ -341,16 +364,24 @@ real populated library (not a toy fixture), kill the process mid-migration
 at least once, confirm resume-from-journal completes correctly and no
 plaintext original survives once migration reports done.
 
-**Milestone L4 — Release-gate hardening.** Real local measurement of
-mount/unmount latency (§3 — no credible published numbers exist, per
-[052](tickets/052-research-vhd-bitlocker-mechanics.md)); resolve the
-still-ambiguous question of whether *routine* unlock (not just initial
-BitLocker setup) requires elevation, and adjust the helper-process UX if
-it turns out routine unlock doesn't need a UAC prompt at all; verify (not
-assume) that the BitLocker-enable flow never surfaces a Microsoft-account
-recovery-key-backup prompt (§10). This milestone is Locking's ship gate —
-nothing before it needs to be fully offline-verified for this feature, this
-one confirms it is.
+**Milestone L4 — Release-gate hardening.** Two of this milestone's three
+original items are resolved (§9): the recovery-key-prompt risk was
+verified against Microsoft's own docs to not exist for this codebase's
+invocation path (two real hardening parameters, `-EncryptionMethod
+XtsAes256`/`-UsedSpaceOnly`, added along the way), and the
+routine-unlock-elevation question turned out to already be answered by
+ticket 052 — VHD attach always requires elevation regardless of
+BitLocker, so there's no "skip the UAC prompt" case to build. What
+remains, genuinely requiring a human at the keyboard rather than more
+code: **real local measurement of mount/unmount latency** (§3 — no
+credible published numbers exist anywhere, per
+[052](tickets/052-research-vhd-bitlocker-mechanics.md)) — time a real
+attach+BitLocker-unlock and detach+lock cycle on real target hardware and
+record the actual numbers, the same real-hardware-over-assumption
+discipline [019](tickets/019-validate-thumbnail-grid-performance.md) and
+[025](tickets/025-rebenchmark-sqlite-vec.md) already established for this
+project. This milestone is Locking's ship gate — nothing before it needs
+to be fully offline-verified for this feature, this one confirms it is.
 
 ---
 
