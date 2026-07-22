@@ -32,6 +32,7 @@ base64 = "0.22"
 lenslocker-catalog = { version = "0.1.0", path = "../crates/catalog" }
 lenslocker-import = { version = "0.1.0", path = "../crates/import" }
 lenslocker-xmp = { version = "0.1.0", path = "../crates/xmp" }
+lenslocker-vault = { version = "0.1.0", path = "../crates/vault" }
 # Milestone ML-5's text-to-image search (crates/ml/src/similarity.rs) is
 # the first command that runs live ML inference at query time rather than
 # only reading/writing already-computed catalog rows — the first real
@@ -52,4 +53,4 @@ webview2-com = "0.38"
 # Milestone 5.5 adds `Win32_Storage_FileSystem` for `GetDiskFreeSpaceExW`
 # (free-space reporting in `inspect_library_folder`) — reusing this already-
 # direct dependency rather than adding a new disk-space crate.
-windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_Storage_FileSystem", "Win32_System_SystemInformation"] }
+windows = { version = "0.61", features = ["Win32_Foundation", "Win32_System_Com", "Win32_Storage_FileSystem", "Win32_System_SystemInformation", "Win32_UI_Shell", "Win32_System_Registry", "Win32_System_Threading"] }

@@ -40,6 +40,7 @@ use serde::{Deserialize, Serialize};
 use tauri::{Emitter, Manager};
 
 #[cfg(windows)]
+mod vault_elevation;
 mod webview2_hardening;
 
 struct AppState {
@@ -1687,6 +1688,139 @@ fn open_existing_library(
     Ok(())
 }
 
+/// Flat default fixed-VHDX size for a brand-new, empty encrypted vault
+/// (ticket 043/050 — "a reasonable flat default the user can override").
+/// The override UI isn't built yet (`size_bytes` below already accepts an
+/// explicit value, ready for it); this constant is only the fallback when
+/// none is given.
+const DEFAULT_NEW_VAULT_VHDX_BYTES: u64 = 100 * 1024 * 1024 * 1024; // 100 GiB
+
+/// Generates this vault's ed25519 keypair at `dest_dir` (ticket 038/043 —
+/// per-vault, user-chosen location) and returns the private key file's
+/// path, which the frontend then passes back into [`create_encrypted_vault`].
+#[tauri::command]
+fn generate_vault_keypair(dest_dir: String) -> CmdResult<String> {
+    let path = lenslocker_vault::generate_and_write_keypair(
+        Path::new(&dest_dir),
+        "lenslocker-vault-key",
+    )
+    .map_err(|e| CmdError::Vault(e.to_string()))?;
+    Ok(path.to_string_lossy().into_owned())
+}
+
+/// Creates a brand-new **encrypted** vault at `root`: generates the
+/// per-vault KDF salt, combines `password` with the keypair file's raw
+/// bytes into BitLocker's password protector (`LOCK-SPEC.md` §2), writes
+/// the vault-root status marker (§4), and drives the elevated helper
+/// through `CreateAndEncrypt` (§3) — a real UAC prompt, which is why this
+/// command runs via `spawn_blocking` rather than inline (same discipline
+/// `import_directory`/`get_full_preview` already follow for long-running
+/// native work). On success the volume is left mounted, so the freshly
+/// created catalog opens immediately via the same [`create_library_at`]
+/// logic every unencrypted vault already uses — ticket 044 found no
+/// changes needed there, since the mount point looks like an ordinary
+/// directory to everything above the block-storage layer.
+///
+/// **Known gap, tracked for Milestone L2** (`LOCK-SPEC.md` §5): unlike
+/// [`create_library`], this does not yet make the vault re-openable on a
+/// future launch — [`load_initial_library_state`] doesn't have the
+/// `LibraryState::Locked` branch or the vault-marker check ticket 047
+/// specifies yet, so a relaunch after creating an encrypted vault will
+/// currently misbehave (fall through to `NeedsSetup`) until that lands.
+/// Writing the bootstrap config anyway rather than skipping it: an
+/// unrecorded vault would be worse (silently orphaned), and this is the
+/// same path L2 will correct rather than a second thing to unwind.
+#[tauri::command]
+async fn create_encrypted_vault(
+    app: tauri::AppHandle,
+    root: String,
+    keypair_path: String,
+    password: String,
+    conversion_enabled: bool,
+    size_bytes: Option<u64>,
+) -> CmdResult<()> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let root = PathBuf::from(&root);
+        let keypair_path = PathBuf::from(&keypair_path);
+        let size_bytes = size_bytes.unwrap_or(DEFAULT_NEW_VAULT_VHDX_BYTES);
+
+        let app_state =
+            create_encrypted_vault_at(&root, &keypair_path, &password, conversion_enabled, size_bytes)?;
+
+        write_bootstrap_config(&app, &root)?;
+        let mount_point = root.join(lenslocker_vault::marker::MOUNT_DIR_NAME);
+        allow_library_in_asset_scope(&app, &mount_point);
+
+        *app.state::<Mutex<LibraryState>>().lock().unwrap() = LibraryState::Ready(app_state);
+        Ok(())
+    })
+    .await
+    .map_err(|e| CmdError::TaskPanicked(e.to_string()))?
+}
+
+/// The actual "create and BitLocker-encrypt a brand-new vault" logic,
+/// factored out of [`create_encrypted_vault`] so it's testable without a
+/// live `AppHandle` — though the elevated-helper step it drives can only
+/// be exercised for real with a human approving UAC (see
+/// `vault_elevation`'s doc comment).
+fn create_encrypted_vault_at(
+    root: &Path,
+    keypair_path: &Path,
+    password: &str,
+    conversion_enabled: bool,
+    size_bytes: u64,
+) -> CmdResult<AppState> {
+    if !windows_edition_supports_locking()? {
+        return Err(CmdError::Vault(
+            "Locking requires Windows Pro, Enterprise, or Education — this edition doesn't include BitLocker".into(),
+        ));
+    }
+    if lenslocker_vault::read_marker(root)
+        .map_err(|e| CmdError::Vault(e.to_string()))?
+        .is_some()
+    {
+        return Err(CmdError::LibraryAlreadyExists);
+    }
+
+    std::fs::create_dir_all(root)?;
+
+    let keypair_bytes =
+        lenslocker_vault::read_raw_key_bytes(keypair_path).map_err(|e| CmdError::Vault(e.to_string()))?;
+
+    let salt = lenslocker_vault::generate_salt();
+    let combined_secret = lenslocker_vault::derive_combined_secret(password, &keypair_bytes, &salt)
+        .map_err(|e| CmdError::Vault(e.to_string()))?;
+
+    let vhdx_path = lenslocker_vault::vhdx_path(root);
+    let mount_point = lenslocker_vault::mount_point(root);
+    let command = lenslocker_vault::VaultCommand::CreateAndEncrypt {
+        vhdx_path,
+        size_bytes,
+        mount_point: mount_point.clone(),
+        combined_secret_hex: combined_secret.to_bitlocker_password(),
+    };
+
+    // The marker is written only *after* the helper confirms the vault
+    // was actually created — writing it first would leave a broken
+    // "marked encrypted, nothing really there" vault_root behind if the
+    // helper fails or the user cancels UAC, which would then permanently
+    // block every retry at this function's own already-exists check
+    // above. Found by testing this path, not by inspection.
+    match vault_elevation::run_elevated(&command)? {
+        lenslocker_vault::VaultResponse::Ok => {}
+        lenslocker_vault::VaultResponse::Err { message, .. } => {
+            return Err(CmdError::Vault(format!(
+                "could not create the encrypted vault: {message}"
+            )));
+        }
+    }
+
+    let marker = lenslocker_vault::VaultMarker::new(&salt);
+    lenslocker_vault::write_marker(root, &marker).map_err(|e| CmdError::Vault(e.to_string()))?;
+
+    create_library_at(&mount_point, conversion_enabled)
+}
+
 /// The actual "open a pre-existing vault" logic, factored out of the
 /// [`open_existing_library`] command so it's testable directly.
 fn open_existing_library_at(root: &Path) -> CmdResult<AppState> {
@@ -2192,6 +2326,8 @@ pub fn run() {
             inspect_library_folder,
             create_library,
             open_existing_library,
+            generate_vault_keypair,
+            create_encrypted_vault,
             get_app_settings,
             update_app_settings,
             list_images,
@@ -2315,6 +2451,44 @@ mod tests {
             )
             .unwrap();
         assert_eq!(enabled, 0);
+    }
+
+    #[test]
+    fn create_encrypted_vault_at_derives_a_real_secret_and_fails_cleanly_without_elevation() {
+        // Exercises the real pipeline as far as an automated test safely
+        // can: edition check, real keypair generation/read, real
+        // Argon2id+HKDF derivation (production parameters, ticket 048).
+        // It then fails at `helper_exe_path`'s not-found check, *not* the
+        // real ERROR_PRIVILEGE_NOT_HELD wall — `cargo test` binaries live
+        // in target/debug/deps/, not next to lenslocker-vault-helper.exe,
+        // so this deliberately never reaches (and never risks popping) a
+        // live ShellExecuteExW/UAC prompt during automated test runs.
+        // Confirms the marker-ordering fix regardless: nothing is left
+        // behind on failure.
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path().join("vault");
+        let keypair_dir = dir.path().join("keys");
+
+        let keypair_path =
+            lenslocker_vault::generate_and_write_keypair(&keypair_dir, "test").unwrap();
+
+        let result = create_encrypted_vault_at(
+            &root,
+            &keypair_path,
+            "correct horse battery staple",
+            false,
+            64 * 1024 * 1024,
+        );
+
+        match &result {
+            Err(CmdError::Vault(_)) => {}
+            Err(other) => panic!("expected a Vault error from the non-elevated helper call, got: {other}"),
+            Ok(_) => panic!("expected the non-elevated helper call to fail, but it succeeded"),
+        }
+        assert!(
+            lenslocker_vault::read_marker(&root).unwrap().is_none(),
+            "marker must not be written when the helper call fails — would permanently block retries"
+        );
     }
 
     #[test]

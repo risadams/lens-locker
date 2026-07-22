@@ -109,14 +109,12 @@ fn create_and_encrypt(
         return VaultResponse::err(e);
     }
 
-    // Provisioning is done as a distinct step from mounting for use — the
-    // caller issues a separate Attach command when it actually wants the
-    // vault live. See vault crate/protocol.rs's doc comment.
-    let _ = bitlocker::lock_bitlocker(mount_point);
-    if let Err(e) = vhd::detach(vhdx_path) {
-        return VaultResponse::err(e);
-    }
-
+    // Deliberately left attached and unlocked — `Enable-BitLocker` doesn't
+    // lock the volume it just set up, so it's already live at this point.
+    // Locking+detaching here would just force an immediate second UAC
+    // prompt for the extremely common "use the vault right after creating
+    // it" case; the caller treats a successful CreateAndEncrypt as already
+    // mounted, ready to open the catalog against.
     VaultResponse::Ok
 }
 

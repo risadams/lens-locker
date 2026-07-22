@@ -2638,6 +2638,7 @@ dependencies = [
  "lenslocker-catalog",
  "lenslocker-import",
  "lenslocker-ml",
+ "lenslocker-vault",
  "lenslocker-xmp",
  "rusqlite",
  "serde",

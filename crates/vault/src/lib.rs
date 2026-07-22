@@ -18,7 +18,7 @@ pub mod secret;
 pub use keypair::{generate_and_write_keypair, read_raw_key_bytes};
 pub use marker::{VaultMarker, mount_point, read_marker, vhdx_path, write_marker};
 pub use protocol::{VaultCommand, VaultResponse};
-pub use secret::{CombinedSecret, derive_combined_secret};
+pub use secret::{CombinedSecret, derive_combined_secret, generate_salt};
 
 #[derive(Debug, thiserror::Error)]
 pub enum VaultError {

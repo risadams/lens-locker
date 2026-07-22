@@ -11,6 +11,7 @@
 
 use argon2::{Algorithm, Argon2, Params, Version};
 use hkdf::Hkdf;
+use rand_core::{OsRng, RngCore};
 use sha2::Sha256;
 use zeroize::{Zeroize, ZeroizeOnDrop};
 
@@ -29,6 +30,15 @@ pub const ARGON2_PARALLELISM: u32 = 4;
 pub const KDF_SALT_LEN: usize = 16;
 
 pub const COMBINED_SECRET_LEN: usize = 32;
+
+/// Fresh per-vault KDF salt from the OS's real CSPRNG. Not secret (ticket
+/// 041/044 — persisted in the vault-root marker in the clear), but must be
+/// unpredictable enough that two vaults never collide.
+pub fn generate_salt() -> [u8; KDF_SALT_LEN] {
+    let mut salt = [0u8; KDF_SALT_LEN];
+    OsRng.fill_bytes(&mut salt);
+    salt
+}
 
 /// The derived secret. Zeroized on drop — this is the one value that
 /// stands in for both unlock factors at once, so it's handled like other

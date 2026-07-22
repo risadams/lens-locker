@@ -28,7 +28,13 @@ use crate::VaultError;
 pub enum VaultCommand {
     /// Creates a new fixed-size VHDX, formats it NTFS, and enables
     /// BitLocker with `combined_secret_hex` as the password protector —
-    /// ticket 043/050's new-vault and migration creation paths.
+    /// ticket 043/050's new-vault and migration creation paths. On success
+    /// the volume is left **attached and unlocked** (`Enable-BitLocker`
+    /// doesn't lock what it just set up) — avoids forcing a second UAC
+    /// prompt for the common "use it right after creating it" case. The
+    /// caller is responsible for a follow-up `Detach` once it's done
+    /// using the freshly-created vault in this session, if it isn't kept
+    /// open for immediate use.
     CreateAndEncrypt {
         vhdx_path: PathBuf,
         size_bytes: u64,
