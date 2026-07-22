@@ -12,7 +12,7 @@ jobs:
   check:
     runs-on: windows-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
       # tauri-build's build script validates every src-tauri/models/ path
       # in tauri.conf.json's bundle.resources at *compile* time — not just
@@ -57,7 +57,7 @@ jobs:
     # so running the *checker* on Linux doesn't change what it evaluates.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
           command: check
