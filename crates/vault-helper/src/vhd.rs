@@ -113,7 +113,12 @@ pub fn attach(path: &Path) -> Result<String, String> {
         OpenVirtualDisk(
             &storage_type,
             PCWSTR(wide.as_ptr()),
-            VIRTUAL_DISK_ACCESS_ALL,
+            // Documented Win32 quirk: the access-mask parameter is
+            // ignored (and must be VIRTUAL_DISK_ACCESS_NONE) once
+            // OPEN_VIRTUAL_DISK_VERSION_2+ params are used — passing
+            // VIRTUAL_DISK_ACCESS_ALL here fails with
+            // ERROR_INVALID_PARAMETER, confirmed against this real build.
+            VIRTUAL_DISK_ACCESS_NONE,
             OPEN_VIRTUAL_DISK_FLAG_NONE,
             Some(&mut open_params),
             &mut handle,
