@@ -2127,10 +2127,21 @@ async fn migrate_vault_to_encrypted(
         let _migration_guard = migration_lock
             .try_acquire()
             .ok_or_else(|| CmdError::Vault("a migration is already running".into()))?;
+
+        // Real bug, found via live testing: wind_down_background_work polls
+        // ImportLock.running to decide when it's safe to proceed — but
+        // acquiring _import_guard *before* winding down sets that same
+        // flag ourselves, so the wait below was waiting on a flag we'd
+        // already set, guaranteed to time out every single time
+        // regardless of whether any real import was running. Wind down
+        // first (waits for any genuinely pre-existing import/analysis
+        // work), *then* claim the guard to block new imports from
+        // starting during migration.
+        wind_down_background_work(&app);
+
         let import_lock = app.state::<ImportLock>();
         let _import_guard = import_lock.try_acquire().ok_or(CmdError::ImportAlreadyRunning)?;
 
-        wind_down_background_work(&app);
         migrate_vault_to_encrypted_now(&app, &keypair_path, &password, size_bytes)
     })
     .await
