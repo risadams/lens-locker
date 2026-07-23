@@ -54,7 +54,20 @@ fn check(err: WIN32_ERROR, what: &str) -> Result<(), String> {
 /// fragmentation risk at many-small-files scale). Closes the handle
 /// before returning — callers that need to immediately attach the disk
 /// they just created should call `attach` separately.
+///
+/// **Real bug, found via live testing (Milestone L4/build session)**:
+/// Microsoft's own docs for `CREATE_VIRTUAL_DISK_PARAMETERS.Version2.MaximumSize`
+/// state it "must be a multiple of 512" — undocumented in practice until
+/// hit live: an early manual test happened to use an already-aligned
+/// round value (512 MiB), masking this until a real size computed from
+/// summed real file sizes (essentially never a multiple of 512) produced
+/// `ERROR_INVALID_PARAMETER` (Win32 error 87). Rounded up here, once, so
+/// every caller is protected rather than requiring each call site to
+/// remember this.
 pub fn create_fixed_vhdx(path: &Path, size_bytes: u64) -> Result<(), String> {
+    const ALIGNMENT: u64 = 512;
+    let size_bytes = size_bytes.div_ceil(ALIGNMENT) * ALIGNMENT;
+
     let storage_type = vhdx_storage_type();
     let wide = wide_path(path);
 
